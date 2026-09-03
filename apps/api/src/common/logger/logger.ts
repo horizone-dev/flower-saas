@@ -2,22 +2,31 @@ import pino, { type Logger } from 'pino';
 import { loadConfig } from '../../config/env.js';
 
 /**
+ * Log-redaction paths. Secrets / PII must never reach a log line; the list grows
+ * per phase. The secrets-vault entries (task 1.10) are belt-and-braces — the
+ * plaintext credential is never placed on a logged object in the first place.
+ */
+export const REDACT_PATHS: readonly string[] = [
+  'req.headers.authorization',
+  'req.headers.cookie',
+  '*.password',
+  '*.secret',
+  '*.token',
+  '*.secret_blob_ref',
+  '*.plaintext',
+  '*.secretCiphertext',
+  '*.secretNonce',
+  '*.dekWrapped',
+  '*.masterKey',
+  'SECRETS_MASTER_KEY',
+];
+
+/**
  * Root pino logger. Structured JSON in production; pretty in development.
- * Secrets / PII must never reach a log line (redaction paths grow per phase).
  */
 export function createRootLogger(): Logger {
   const cfg = loadConfig();
-  const redact = {
-    paths: [
-      'req.headers.authorization',
-      'req.headers.cookie',
-      '*.password',
-      '*.secret',
-      '*.token',
-      '*.secret_blob_ref',
-    ],
-    censor: '[redacted]',
-  };
+  const redact = { paths: [...REDACT_PATHS], censor: '[redacted]' };
 
   if (cfg.NODE_ENV === 'development') {
     return pino({

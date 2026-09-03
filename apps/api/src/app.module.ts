@@ -8,6 +8,7 @@ import { AccessModule } from './modules/access/access.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 import { IdentityModule } from './modules/identity/identity.module.js';
 import { OrgModule } from './modules/org/org.module.js';
+import { SecretsModule } from './modules/secrets/secrets.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
@@ -26,6 +27,7 @@ import { HealthModule } from './health/health.module.js';
     PlatformModule,
     IdentityModule,
     OrgModule,
+    SecretsModule,
     HealthModule,
   ],
 })

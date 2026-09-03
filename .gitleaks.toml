@@ -24,6 +24,8 @@ regexes = [
   # the dev-only JWT secret default (env.ts) + its integration-test sibling
   '''dev-only-insecure-jwt-secret-change-me-\d+''',
   '''integration-test-jwt-secret-\d+''',
+  # the dev-only secrets-vault master key default (env.ts) — refused in production (G16)
+  '''dev-only-insecure-secrets-master-key-change-me-\d+''',
   # the fixed argon2id "dummy" digest used for constant-time login (auth.service.ts)
   '''\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+''',
 ]

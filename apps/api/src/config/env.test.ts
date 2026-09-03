@@ -25,4 +25,27 @@ describe('loadConfig', () => {
     const cfg = loadConfig({});
     expect(Object.isFrozen(cfg)).toBe(true);
   });
+
+  it('refuses the dev secrets provider in production (G16)', () => {
+    const prodBase = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://x',
+      AUTH_JWT_SECRET: 'a-real-production-jwt-secret-value-32+',
+      SECRETS_MASTER_KEY: 'a-real-production-master-key-value-32+chars',
+    };
+    expect(() => loadConfig(prodBase)).toThrow(/SECRETS_PROVIDER/);
+    expect(() => loadConfig({ ...prodBase, SECRETS_PROVIDER: 'kms' })).not.toThrow();
+    expect(() =>
+      loadConfig({
+        ...prodBase,
+        SECRETS_PROVIDER: 'kms',
+        SECRETS_MASTER_KEY: 'dev-only-insecure-secrets-master-key-change-me-000',
+      }),
+    ).toThrow(/SECRETS_MASTER_KEY/);
+  });
+
+  it('the dev secrets provider is the default outside production', () => {
+    const cfg = loadConfig({});
+    expect(cfg.SECRETS_PROVIDER).toBe('dev');
+  });
 });

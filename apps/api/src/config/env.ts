@@ -43,6 +43,17 @@ const envSchema = z.object({
     .default(60 * 60 * 12),
   AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   AUTH_LOGIN_LOCKOUT_SECONDS: z.coerce.number().int().positive().default(900),
+
+  // Secrets vault (task 1.10). `dev` = AES-256-GCM with a per-tenant DEK wrapped
+  // by an env master key — acceptable for local dev + CI ONLY (OD4). Production
+  // onboarding is gated on a managed provider (`kms`) — the `dev` provider is
+  // refused when NODE_ENV=production (G16). `SECRETS_MASTER_KEY` is any passphrase
+  // ≥ 32 chars; the 32-byte key is derived from it.
+  SECRETS_PROVIDER: z.enum(['dev', 'kms']).default('dev'),
+  SECRETS_MASTER_KEY: z
+    .string()
+    .min(32)
+    .default('dev-only-insecure-secrets-master-key-change-me-000'),
 });
 
 export type AppConfig = Readonly<z.infer<typeof envSchema>>;
@@ -55,6 +66,7 @@ export class EnvValidationError extends Error {
 }
 
 const DEV_JWT_SECRET = 'dev-only-insecure-jwt-secret-change-me-000';
+const DEV_SECRETS_MASTER_KEY = 'dev-only-insecure-secrets-master-key-change-me-000';
 
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.safeParse(source);
@@ -73,6 +85,18 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     }
     if (!cfg.DATABASE_URL) {
       throw new EnvValidationError('  - DATABASE_URL: required in production');
+    }
+    // G16 — the env-master-key vault is a dev/CI convenience only. Production
+    // tenant onboarding must run against a managed provider (OD4 / §4).
+    if (cfg.SECRETS_PROVIDER === 'dev') {
+      throw new EnvValidationError(
+        '  - SECRETS_PROVIDER: the "dev" secrets provider must not be used in production (set SECRETS_PROVIDER=kms)',
+      );
+    }
+    if (cfg.SECRETS_MASTER_KEY === DEV_SECRETS_MASTER_KEY) {
+      throw new EnvValidationError(
+        '  - SECRETS_MASTER_KEY: the dev default must not be used in production',
+      );
     }
   }
   return Object.freeze(cfg);
