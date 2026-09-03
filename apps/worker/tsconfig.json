@@ -1,0 +1,6 @@
+{
+  "extends": "@flower/config/tsconfig/node",
+  "compilerOptions": { "noEmit": true, "composite": false, "rootDir": ".", "types": ["node"] },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
