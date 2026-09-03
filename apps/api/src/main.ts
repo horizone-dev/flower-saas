@@ -5,6 +5,7 @@ import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fa
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter.js';
+import { installRequestContext } from './common/context/index.js';
 import { rootLogger } from './common/logger/logger.js';
 import { loadConfig } from './config/env.js';
 
@@ -23,6 +24,10 @@ async function bootstrap(): Promise<void> {
     void reply.header(CORRELATION_HEADER, correlationId);
     done();
   });
+
+  // Establish the per-request RequestContext (ALS) before guards run. The auth
+  // guard (task 1.5) layers the session's tenant/user/scope onto it.
+  installRequestContext(adapter.getInstance());
 
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, {
     logger: ['error', 'warn', 'log'],

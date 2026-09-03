@@ -19,8 +19,11 @@ const envSchema = z.object({
   REDIS_PORT: z.coerce.number().int().positive().default(6379),
   S3_ENDPOINT: z.string().url().default('http://localhost:9000'),
 
-  // Present now so the shape is stable; not yet consumed.
+  // Postgres. `DATABASE_URL` is the app connection (scoped queries drop to
+  // `flower_app`); `PLATFORM_DATABASE_URL` is the separate audited platform path
+  // (`flower_platform`, BYPASSRLS — ADR-0014). In dev they can be the same URL.
   DATABASE_URL: z.string().optional(),
+  PLATFORM_DATABASE_URL: z.string().optional(),
   REDIS_URL: z.string().optional(),
 });
 

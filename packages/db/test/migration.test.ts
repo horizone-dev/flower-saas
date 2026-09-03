@@ -10,6 +10,11 @@ import {
   PLATFORM_GLOBAL_TABLES,
   PARTITIONED_TABLES,
   DB_ROLES,
+  createPrismaClient,
+  runScoped,
+  runPlatform,
+  currentTenantGuc,
+  type PrismaClient,
 } from '../src/index.js';
 
 const pkgDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -19,6 +24,9 @@ const pkgDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
  * -> the identity/tenancy/RBAC schema WITH RLS + partitioning + the DB roles.
  * Real schema engine, real database (Testcontainers). Nothing mocked or skipped.
  */
+const TENANT_A = 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
+const TENANT_B = 'bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb';
+
 describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', () => {
   let container: StartedPostgreSqlContainer;
   let url: string;
@@ -37,6 +45,38 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       { cwd: pkgDir, env: { ...process.env, DATABASE_URL: url }, encoding: 'utf8' },
     );
     pool = new pg.Pool({ connectionString: url });
+
+    // shared fixture: a Starter plan version + two tenants, each with one owner
+    // user and one audit row (used by the RLS-behaviour and runScoped blocks)
+    await pool.query(
+      `INSERT INTO plan (id, key, name, "updatedAt")
+       VALUES ('00000000-0000-7000-8000-000000000001', 'starter', 'Starter', now())`,
+    );
+    await pool.query(
+      `INSERT INTO plan_version (id, "planId", version, status, "updatedAt")
+       VALUES ('00000000-0000-7000-8000-000000000002',
+               '00000000-0000-7000-8000-000000000001', 1, 'PUBLISHED', now())`,
+    );
+    for (const [id, slug] of [
+      [TENANT_A, 'ta'],
+      [TENANT_B, 'tb'],
+    ]) {
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1, $2, $2, 'AE', 'ACTIVE', '00000000-0000-7000-8000-000000000002', now())`,
+        [id, slug],
+      );
+      await pool.query(
+        `INSERT INTO "user" ("tenantId", email, status, "updatedAt")
+         VALUES ($1, $2, 'ACTIVE', now())`,
+        [id, `owner@${slug}.com`],
+      );
+      await pool.query(
+        `INSERT INTO audit_log ("tenantId", "actorAccountType", action, "resourceType")
+         VALUES ($1, 'SYSTEM', $2, 'x')`,
+        [id, `evt-${slug}`],
+      );
+    }
   }, 180_000);
 
   afterAll(async () => {
@@ -173,41 +213,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
 
   // ── RLS behaviour (the ADR-0010 GO pattern) ────────────────────────────────
   describe('RLS behaviour as flower_app', () => {
-    const A = 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
-    const B = 'bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb';
-
-    beforeAll(async () => {
-      await pool.query(
-        `INSERT INTO plan (id, key, name, "updatedAt")
-         VALUES ('00000000-0000-7000-8000-000000000001', 'starter', 'Starter', now())`,
-      );
-      await pool.query(
-        `INSERT INTO plan_version (id, "planId", version, status, "updatedAt")
-         VALUES ('00000000-0000-7000-8000-000000000002',
-                 '00000000-0000-7000-8000-000000000001', 1, 'PUBLISHED', now())`,
-      );
-      for (const [id, slug] of [
-        [A, 'ta'],
-        [B, 'tb'],
-      ]) {
-        await pool.query(
-          `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
-           VALUES ($1, $2, $2, 'AE', 'ACTIVE',
-                   '00000000-0000-7000-8000-000000000002', now())`,
-          [id, slug],
-        );
-        await pool.query(
-          `INSERT INTO "user" ("tenantId", email, status, "updatedAt")
-           VALUES ($1, $2, 'ACTIVE', now())`,
-          [id, `owner@${slug}.com`],
-        );
-        await pool.query(
-          `INSERT INTO audit_log ("tenantId", "actorAccountType", action, "resourceType")
-           VALUES ($1, 'SYSTEM', $2, 'x')`,
-          [id, `evt-${slug}`],
-        );
-      }
-    });
+    const A = TENANT_A;
+    const B = TENANT_B;
 
     async function asTenant<T>(tenantId: string | null, fn: (c: pg.PoolClient) => Promise<T>) {
       const c = await pool.connect();
@@ -270,6 +277,68 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
           ),
         ).rejects.toThrow(/row-level security/i);
       });
+    });
+  });
+
+  // ── runScoped / runPlatform (the production helpers — task 1.2) ─────────────
+  describe('runScoped / runPlatform', () => {
+    const A = TENANT_A;
+    const B = TENANT_B;
+    let prisma: PrismaClient;
+
+    beforeAll(() => {
+      prisma = createPrismaClient({ connectionString: url });
+    });
+    afterAll(async () => {
+      await prisma?.$disconnect();
+    });
+
+    it('scopes reads to the given tenant (drops to flower_app, sets the GUC)', async () => {
+      const emails = await runScoped(prisma, { tenantId: A }, (tx) =>
+        tx.user.findMany({ select: { email: true } }),
+      );
+      expect(emails.map((u) => u.email)).toEqual(['owner@ta.com']);
+    });
+
+    it('does not let tenant A touch tenant B', async () => {
+      const updated = await runScoped(prisma, { tenantId: A }, (tx) =>
+        tx.user.updateMany({ where: { email: 'owner@tb.com' }, data: { status: 'DISABLED' } }),
+      );
+      expect(updated.count).toBe(0);
+    });
+
+    it('rejects a non-UUID tenant id before it reaches SQL', async () => {
+      await expect(
+        runScoped(prisma, { tenantId: "'; DROP TABLE tenant; --" }, async () => 1),
+      ).rejects.toThrow(/not a UUID/);
+    });
+
+    it('the GUC does not bleed onto the next transaction on the same pool', async () => {
+      await runScoped(prisma, { tenantId: A }, async (tx) => {
+        expect(await currentTenantGuc(tx)).toBe(A);
+      });
+      // a bare query (no runScoped) on the pooled connection sees no GUC
+      const leaked = await prisma.$queryRaw<{ v: string }[]>`
+        SELECT COALESCE(current_setting('app.tenant_id', true), '') AS v`;
+      expect(leaked[0]?.v ?? '').toBe('');
+    });
+
+    it('runPlatform sees every tenant (BYPASSRLS) — no app.tenant_id set', async () => {
+      const { tenants, guc } = await runPlatform(prisma, async (tx) => ({
+        tenants: await tx.tenant.findMany({ select: { slug: true }, orderBy: { slug: 'asc' } }),
+        guc: await currentTenantGuc(tx),
+      }));
+      expect(tenants.map((t) => t.slug)).toEqual(['ta', 'tb']);
+      expect(guc).toBe('');
+    });
+
+    it('concurrent runScoped calls for different tenants stay isolated', async () => {
+      const [a, b] = await Promise.all([
+        runScoped(prisma, { tenantId: A }, (tx) => tx.user.findMany({ select: { email: true } })),
+        runScoped(prisma, { tenantId: B }, (tx) => tx.user.findMany({ select: { email: true } })),
+      ]);
+      expect(a.map((u) => u.email)).toEqual(['owner@ta.com']);
+      expect(b.map((u) => u.email)).toEqual(['owner@tb.com']);
     });
   });
 });

@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ReadinessResponse } from '@flower/shared-types';
-import { createPrismaClient, type PrismaClient } from '@flower/db';
+import type { PrismaClient } from '@flower/db';
 import { APP_CONFIG, type AppConfig } from '../config/env.js';
+import { DbService } from '../common/db/db.module.js';
 import { tcpProbe } from './tcp-probe.js';
 
 type CheckState = 'ok' | 'down';
@@ -9,15 +10,18 @@ type CheckState = 'ok' | 'down';
 @Injectable()
 export class HealthService {
   private readonly log = new Logger(HealthService.name);
-  private prisma: PrismaClient | null = null;
 
-  constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
+  constructor(
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly dbService: DbService,
+  ) {}
 
   private db(): PrismaClient | null {
-    if (this.prisma) return this.prisma;
-    if (!this.config.DATABASE_URL) return null;
-    this.prisma = createPrismaClient({ connectionString: this.config.DATABASE_URL });
-    return this.prisma;
+    try {
+      return this.dbService.appClient();
+    } catch {
+      return null;
+    }
   }
 
   /** Liveness — the process is up and can serve. */
@@ -80,10 +84,6 @@ export class HealthService {
       this.log.debug(`migrations check failed: ${String(err)}`);
       return false;
     }
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await this.prisma?.$disconnect();
   }
 }
 
