@@ -681,10 +681,35 @@ importers:
         version: 4.1.11(@types/node@24.13.3)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
 
   packages/testing:
+    dependencies:
+      '@testcontainers/minio':
+        specifier: 12.1.0
+        version: 12.1.0
+      '@testcontainers/postgresql':
+        specifier: 12.1.0
+        version: 12.1.0
+      '@testcontainers/redis':
+        specifier: 12.1.0
+        version: 12.1.0
+      ioredis:
+        specifier: 6.0.0
+        version: 6.0.0
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
+      testcontainers:
+        specifier: 12.1.0
+        version: 12.1.0
     devDependencies:
       '@flower/config':
         specifier: workspace:*
         version: link:../config
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      '@types/pg':
+        specifier: 8.23.1
+        version: 8.23.1
       eslint:
         specifier: 10.9.1
         version: 10.9.1(jiti@2.7.0)
@@ -1837,8 +1862,14 @@ packages:
   '@tailwindcss/postcss@4.3.3':
     resolution: {integrity: sha512-JTSZZGQi1AyKirbLN3azmjVzef92tcX7h+iSqPdaeStyFpGpDlKvvpxeOE8njhbUanbRwr3z8DyzhICWnMtQeg==}
 
+  '@testcontainers/minio@12.1.0':
+    resolution: {integrity: sha512-coIZA1CFNZyLElcAgIxR3YcJxohm/2Q2XbSmM+PhxmzCrjcXgw2BIqoSeh1IBwjdIzndWNayXwmfV7wbQuFYjQ==}
+
   '@testcontainers/postgresql@12.1.0':
     resolution: {integrity: sha512-Pjf2VSVNirEPfz36nidyrVAnZvc2YhajOznY4VgyEsvfTd5qiMNOuPq96drREvxAUtXl5SFLX7vXj7sSq4aTcA==}
+
+  '@testcontainers/redis@12.1.0':
+    resolution: {integrity: sha512-WRiS1Lhc+e/DHXDnCmMZtm8Wv64zYlRGNV04rvtn8kxIS2aVz5lgsP+Su/cfBzHJ0/vwdVKW+YJ3nUrXYbQxqw==}
 
   '@tokenizer/inflate@0.4.1':
     resolution: {integrity: sha512-2mAv+8pkG6GIZiF1kNg1jAjh27IDxEPKwdGul3snfztFerfPGI1LjDezZp3i7BElXompqEtPmoPx6c2wgtWsOA==}
@@ -5062,7 +5093,25 @@ snapshots:
       postcss: 8.5.27
       tailwindcss: 4.3.3
 
+  '@testcontainers/minio@12.1.0':
+    dependencies:
+      testcontainers: 12.1.0
+    transitivePeerDependencies:
+      - bare-abort-controller
+      - bare-buffer
+      - react-native-b4a
+      - supports-color
+
   '@testcontainers/postgresql@12.1.0':
+    dependencies:
+      testcontainers: 12.1.0
+    transitivePeerDependencies:
+      - bare-abort-controller
+      - bare-buffer
+      - react-native-b4a
+      - supports-color
+
+  '@testcontainers/redis@12.1.0':
     dependencies:
       testcontainers: 12.1.0
     transitivePeerDependencies:
