@@ -1,0 +1,28 @@
+// Flower SaaS — Prisma schema.
+//
+// Phase 0 baseline: NO domain tables (CLAUDE.md rule 4). Domain models are added
+// per phase, always partitioned/indexed per docs/conventions/DB-CONVENTIONS.md,
+// with RLS enabled on every tenant-owned table (ADR-0004).
+//
+// `app_meta` is infrastructure, not domain data: a key/value store for the schema
+// baseline marker and seed idempotency markers.
+//
+// Prisma 7: the datasource connection URL lives in prisma7.config.ts (CLI) and is
+// passed to `new PrismaClient({ adapter })` at runtime (src/client.ts).
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AppMeta {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("app_meta")
+}
