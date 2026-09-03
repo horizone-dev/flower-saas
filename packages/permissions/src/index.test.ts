@@ -2,13 +2,17 @@ import { describe, it, expect } from 'vitest';
 import {
   PERMISSIONS,
   ALL_PERMISSIONS,
+  PERMISSION_GROUP_OF,
+  PHASE_1_TENANT_PERMISSIONS,
+  PLATFORM_PERMISSIONS,
   isPermissionKey,
+  isPlatformPermissionKey,
   isWellFormedPermissionKey,
 } from './index.js';
 
 describe('@flower/permissions registry', () => {
   it('every key is well-formed domain:action[:qualifier]', () => {
-    for (const key of ALL_PERMISSIONS) {
+    for (const key of [...ALL_PERMISSIONS, ...PLATFORM_PERMISSIONS]) {
       expect(isWellFormedPermissionKey(key), key).toBe(true);
     }
   });
@@ -18,14 +22,36 @@ describe('@flower/permissions registry', () => {
     expect(new Set(ALL_PERMISSIONS).size).toBe(ALL_PERMISSIONS.length);
   });
 
-  it('has no secret-management key (not a tenant-realm capability)', () => {
+  it('the tenant realm has no secret-management key (CLAUDE.md rule 26)', () => {
     expect(ALL_PERMISSIONS.some((k) => k.includes('secret'))).toBe(false);
+    // and no tenant key leaks into the platform namespace
+    expect(ALL_PERMISSIONS.some((k) => k.startsWith('platform:'))).toBe(false);
   });
 
-  it('isPermissionKey recognises real keys and rejects made-up ones', () => {
+  it('the two realms are disjoint', () => {
+    const tenant = new Set<string>(ALL_PERMISSIONS);
+    for (const k of PLATFORM_PERMISSIONS) expect(tenant.has(k)).toBe(false);
+  });
+
+  it('secret management exists ONLY in the platform realm', () => {
+    const secretKeys = PLATFORM_PERMISSIONS.filter((k) => k.includes('secret'));
+    expect(secretKeys).toEqual(['platform:secrets:manage']);
+  });
+
+  it('PHASE_1_TENANT_PERMISSIONS are all real tenant keys', () => {
+    for (const k of PHASE_1_TENANT_PERMISSIONS) {
+      expect(isPermissionKey(k), k).toBe(true);
+      expect(PERMISSION_GROUP_OF[k]).toBeTruthy();
+    }
+  });
+
+  it('isPermissionKey / isPlatformPermissionKey recognise their realm only', () => {
     expect(isPermissionKey('pos:sell')).toBe(true);
     expect(isPermissionKey('z_report:close')).toBe(true);
     expect(isPermissionKey('pos:launch_nukes')).toBe(false);
+    expect(isPermissionKey('platform:secrets:manage')).toBe(false);
+    expect(isPlatformPermissionKey('platform:secrets:manage')).toBe(true);
+    expect(isPlatformPermissionKey('users:manage')).toBe(false);
   });
 
   it('exposes the finance + cash-register groups added in v0.3', () => {

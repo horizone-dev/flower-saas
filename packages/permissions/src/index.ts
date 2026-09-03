@@ -142,15 +142,67 @@ export const PERMISSIONS = {
 export type PermissionGroup = keyof typeof PERMISSIONS;
 export type PermissionKey = (typeof PERMISSIONS)[PermissionGroup][number];
 
-/** Flat, de-duplicated, sorted list of every permission key. */
+/** Flat, de-duplicated, sorted list of every tenant-realm permission key. */
 export const ALL_PERMISSIONS: readonly PermissionKey[] = Object.freeze(
   [...new Set(Object.values(PERMISSIONS).flat())].sort() as PermissionKey[],
 );
+
+/** group key for a tenant permission (its key in `PERMISSIONS`). */
+export const PERMISSION_GROUP_OF: Readonly<Record<PermissionKey, PermissionGroup>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(PERMISSIONS).flatMap(([group, keys]) =>
+      keys.map((k) => [k, group as PermissionGroup] as const),
+    ),
+  ) as Record<PermissionKey, PermissionGroup>,
+);
+
+/**
+ * The Phase 1 subset of the tenant catalogue that is *actually enforced* now
+ * (OD6 — least privilege). Every other key stays inert until its domain lands,
+ * so Phase 1 provisioning seeds only these into `permission_registry` and only
+ * assigns these to the seeded system roles.
+ */
+export const PHASE_1_TENANT_PERMISSIONS = [
+  'users:view',
+  'users:manage',
+  'roles:manage',
+  'audit:view',
+  'settings:branch:manage',
+  'settings:tenant:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase1TenantPermission = (typeof PHASE_1_TENANT_PERMISSIONS)[number];
+
+/**
+ * Platform Super Admin realm permissions. **Wholly separate** from the tenant
+ * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
+ * This is the ONLY place a secret-management capability exists anywhere — the
+ * tenant realm has no such key (CLAUDE.md rule 26).
+ */
+export const PLATFORM_PERMISSIONS = [
+  'platform:tenants:view',
+  'platform:tenants:manage',
+  'platform:tenants:impersonate',
+  'platform:plans:manage',
+  'platform:entitlements:manage',
+  'platform:limits:manage',
+  'platform:tenant_users:manage',
+  'platform:tenant_roles:manage',
+  'platform:sessions:revoke',
+  'platform:audit:view',
+  'platform:secrets:manage',
+] as const;
+
+export type PlatformPermissionKey = (typeof PLATFORM_PERMISSIONS)[number];
 
 const KEY_RE = /^[a-z0-9_]+(?::[a-z0-9_]+){1,2}$/;
 
 export function isPermissionKey(value: string): value is PermissionKey {
   return (ALL_PERMISSIONS as readonly string[]).includes(value);
+}
+
+export function isPlatformPermissionKey(value: string): value is PlatformPermissionKey {
+  return (PLATFORM_PERMISSIONS as readonly string[]).includes(value);
 }
 
 export function isWellFormedPermissionKey(value: string): boolean {

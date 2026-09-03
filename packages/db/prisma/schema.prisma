@@ -1,14 +1,24 @@
 // Flower SaaS — Prisma schema.
 //
-// Phase 0 baseline: NO domain tables (CLAUDE.md rule 4). Domain models are added
-// per phase, always partitioned/indexed per docs/conventions/DB-CONVENTIONS.md,
-// with RLS enabled on every tenant-owned table (ADR-0004).
+// Phase 1: identity, tenancy, RBAC, entitlements, org hierarchy, the secrets
+// vault shell, and the minimal audit/outbox foundation. See
+// docs/phase-1/PHASE-1-PLAN.md §3 task 1.1.
 //
-// `app_meta` is infrastructure, not domain data: a key/value store for the schema
-// baseline marker and seed idempotency markers.
+// Conventions (docs/conventions/DB-CONVENTIONS.md):
+//   - UUID v7 primary keys (`@default(dbgenerated("uuidv7()"))` — a SQL helper
+//     created in the migration).
+//   - `tenant_id` on EVERY tenant-owned table (denormalised onto children) so the
+//     RLS policy is uniform: `tenant_id = current_setting('app.tenant_id')::uuid`.
+//   - Extensible enumerations are `String` + a CHECK constraint (added in the
+//     migration), never a PG `enum`.
+//   - Money = `amountMinor BigInt` + `currencyCode` + `currencyExponent` (none in
+//     Phase 1 yet). Timestamps are `timestamptz`, UTC.
+//   - RLS is ENABLE + FORCE on every tenant-owned table; `audit_log` and `outbox`
+//     are range-partitioned. Both are done in the migration (Prisma cannot express
+//     RLS or partitioning) — the models below are the type source only.
 //
-// Prisma 7: the datasource connection URL lives in prisma7.config.ts (CLI) and is
-// passed to `new PrismaClient({ adapter })` at runtime (src/client.ts).
+// Prisma 7: the datasource URL lives in prisma7.config.ts (CLI) and is passed to
+// `new PrismaClient({ adapter })` at runtime (src/client.ts).
 
 generator client {
   provider = "prisma-client-js"
@@ -19,10 +29,678 @@ datasource db {
   provider = "postgresql"
 }
 
+// ───────────────────────────── infrastructure ──────────────────────────────
+
+/// Key/value store for schema-baseline + seed-idempotency markers. Not domain data.
 model AppMeta {
   key       String   @id
   value     String
   updatedAt DateTime @updatedAt
 
   @@map("app_meta")
+}
+
+// ══════════════════════════ platform-global (RLS-exempt) ═══════════════════════
+// No `tenant_id`. Readable by the app role, written only via the audited platform
+// path. Documented as RLS-exempt in the migration.
+
+/// A subscription plan (Starter, Pro, …). Versioned via PlanVersion.
+model Plan {
+  id          String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  key         String        @unique
+  name        String
+  description String?
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime      @updatedAt @db.Timestamptz(6)
+  versions    PlanVersion[]
+
+  @@map("plan")
+}
+
+/// An immutable snapshot of a plan's entitlements + limits. A tenant points at one.
+model PlanVersion {
+  id                  String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  planId              String               @db.Uuid
+  plan                Plan                 @relation(fields: [planId], references: [id], onDelete: Restrict)
+  version             Int
+  /// DRAFT | PUBLISHED | RETIRED
+  status              String               @default("DRAFT")
+  publishedAt         DateTime?            @db.Timestamptz(6)
+  createdAt           DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime             @updatedAt @db.Timestamptz(6)
+  entitlementDefaults EntitlementDefault[]
+  limitDefaults       LimitDefault[]
+  tenants             Tenant[]
+
+  @@unique([planId, version])
+  @@map("plan_version")
+}
+
+/// Default on/off (+ config) for a feature module at a given plan version.
+model EntitlementDefault {
+  id            String      @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  planVersionId String      @db.Uuid
+  planVersion   PlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+  /// module key, e.g. "customer_web", "ai_whatsapp", "advanced_inventory"
+  moduleKey     String
+  enabled       Boolean     @default(false)
+  config        Json        @default("{}")
+
+  @@unique([planVersionId, moduleKey])
+  @@map("entitlement_default")
+}
+
+/// Default numeric limit for a plan version (e.g. max_branches = 3).
+model LimitDefault {
+  id            String      @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  planVersionId String      @db.Uuid
+  planVersion   PlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+  limitKey      String
+  value         BigInt
+
+  @@unique([planVersionId, limitKey])
+  @@map("limit_default")
+}
+
+/// The code-defined permission catalogue, synced from `@flower/permissions`.
+/// A permission whose module is not entitled is inert (checked at runtime).
+model PermissionRegistry {
+  key          String   @id
+  /// TENANT | PLATFORM — the two realms are never cross-grantable (SECURITY.md)
+  realm        String   @default("TENANT")
+  groupKey     String
+  description   String
+  /// the phase that first enforces this key (1 for the Phase 1 foundation set)
+  addedInPhase Int      @default(1)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([realm])
+  @@map("permission_registry")
+}
+
+// ─────────────────────── platform identity realm (separate) ────────────────────
+// Never cross-grantable with the tenant realm (SECURITY.md). Its own users,
+// credentials, MFA, roles and sessions.
+
+model PlatformUser {
+  id            String                 @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  email         String                 @unique
+  name          String
+  /// ACTIVE | DISABLED
+  status        String                 @default("ACTIVE")
+  createdAt     DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime               @updatedAt @db.Timestamptz(6)
+  credential    PlatformCredential?
+  mfaFactors    PlatformMfaFactor[]
+  roles         PlatformUserRole[]
+  sessions      PlatformSession[]
+  tenantLimits  TenantLimit[]
+  providerCreds ProviderCredential[]
+
+  @@map("platform_user")
+}
+
+model PlatformCredential {
+  id             String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  platformUserId String       @unique @db.Uuid
+  platformUser   PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
+  /// argon2id hash
+  hash           String
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(6)
+
+  @@map("platform_credential")
+}
+
+model PlatformMfaFactor {
+  id             String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  platformUserId String       @db.Uuid
+  platformUser   PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
+  /// TOTP
+  kind           String       @default("TOTP")
+  secretRef      String
+  /// PENDING | CONFIRMED
+  status         String       @default("PENDING")
+  confirmedAt    DateTime?    @db.Timestamptz(6)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+
+  @@map("platform_mfa_factor")
+}
+
+model PlatformRole {
+  id          String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  key         String                   @unique
+  name        String
+  isSystem    Boolean                  @default(true)
+  permissions PlatformRolePermission[]
+  users       PlatformUserRole[]
+
+  @@map("platform_role")
+}
+
+model PlatformRolePermission {
+  id             String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  platformRoleId String       @db.Uuid
+  platformRole   PlatformRole @relation(fields: [platformRoleId], references: [id], onDelete: Cascade)
+  permissionKey  String
+
+  @@unique([platformRoleId, permissionKey])
+  @@map("platform_role_permission")
+}
+
+model PlatformUserRole {
+  id             String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  platformUserId String       @db.Uuid
+  platformUser   PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
+  platformRoleId String       @db.Uuid
+  platformRole   PlatformRole @relation(fields: [platformRoleId], references: [id], onDelete: Cascade)
+
+  @@unique([platformUserId, platformRoleId])
+  @@map("platform_user_role")
+}
+
+model PlatformSession {
+  id             String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  platformUserId String       @db.Uuid
+  platformUser   PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
+  /// NONE | MFA | STEP_UP
+  mfaLevel       String       @default("NONE")
+  ip             String?
+  userAgent      String?
+  /// non-null while an impersonation is active (points at a tenant)
+  impersonatingTenantId String? @db.Uuid
+  impersonationReason   String?
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  lastSeenAt     DateTime     @default(now()) @db.Timestamptz(6)
+  expiresAt      DateTime     @db.Timestamptz(6)
+  revokedAt      DateTime?    @db.Timestamptz(6)
+  revokeReason   String?
+
+  @@index([platformUserId])
+  @@map("platform_session")
+}
+
+// ══════════════════════════════ tenant realm ══════════════════════════════════
+
+/// The isolation root. RLS on this table keys on `id` (not `tenant_id`).
+model Tenant {
+  id            String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  slug          String   @unique
+  name          String
+  /// e.g. "AE", "SA" — never hardcoded region logic (Z-3)
+  region        String
+  /// DRAFT | ACTIVE | SUSPENDED | TERMINATED
+  status        String   @default("DRAFT")
+  planVersionId String   @db.Uuid
+  planVersion   PlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  entitlements  TenantEntitlement[]
+  limits        TenantLimit[]
+  settings      TenantSetting[]
+  users         User[]
+  roles         Role[]
+  companies     Company[]
+  branches      Branch[]
+  posTerminals  PosTerminal[]
+  providerCreds ProviderCredential[]
+
+  @@map("tenant")
+}
+
+model TenantEntitlement {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  moduleKey String
+  enabled   Boolean @default(false)
+  config    Json    @default("{}")
+  /// DEFAULT | OVERRIDE
+  source    String  @default("DEFAULT")
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, moduleKey])
+  @@index([tenantId])
+  @@map("tenant_entitlement")
+}
+
+model TenantLimit {
+  id                   String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId             String        @db.Uuid
+  tenant               Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  limitKey             String
+  value                BigInt
+  isOverride           Boolean       @default(false)
+  overrideReason       String?
+  setByPlatformUserId  String?       @db.Uuid
+  setByPlatformUser    PlatformUser? @relation(fields: [setByPlatformUserId], references: [id], onDelete: SetNull)
+  setAt                DateTime?     @db.Timestamptz(6)
+  updatedAt            DateTime      @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, limitKey])
+  @@index([tenantId])
+  @@map("tenant_limit")
+}
+
+/// Non-secret operational settings. NEVER adjacent to a secret (CLAUDE.md rule 27).
+model TenantSetting {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, key])
+  @@index([tenantId])
+  @@map("tenant_setting")
+}
+
+// ───────────────────────────── identity (tenant) ──────────────────────────────
+
+model User {
+  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// OWNER | USER — a limit bucket, never an authorization signal (ARCH §6)
+  accountType String   @default("USER")
+  email       String
+  phone       String?
+  /// ACTIVE | DISABLED | LOCKED
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  createdByUserId String? @db.Uuid
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  credential         Credential?
+  mfaFactors         MfaFactor[]
+  setPasswordTokens  SetPasswordToken[]
+  sessions           Session[]
+  roles              UserRole[]
+  grants             PermissionGrant[]  @relation("grantSubject")
+  grantsMade         PermissionGrant[]  @relation("grantActor")
+  dataScope          DataScopeAssignment?
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("user")
+}
+
+model Credential {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  userId    String   @unique @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// PASSWORD
+  kind      String   @default("PASSWORD")
+  /// argon2id hash
+  hash      String
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([tenantId])
+  @@map("credential")
+}
+
+model MfaFactor {
+  id          String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId    String    @db.Uuid
+  userId      String    @db.Uuid
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// TOTP
+  kind        String    @default("TOTP")
+  secretRef   String
+  /// PENDING | CONFIRMED
+  status      String    @default("PENDING")
+  confirmedAt DateTime? @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([tenantId, userId])
+  @@map("mfa_factor")
+}
+
+/// Admin-generated, single-use, expiring set-password link. Token hashed at rest
+/// (OD3) — the raw token is only ever in the API response.
+model SetPasswordToken {
+  id              String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId        String    @db.Uuid
+  userId          String    @db.Uuid
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash       String    @unique
+  expiresAt       DateTime  @db.Timestamptz(6)
+  usedAt          DateTime? @db.Timestamptz(6)
+  createdByUserId String?   @db.Uuid
+  createdByPlatformUserId String? @db.Uuid
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([tenantId, userId])
+  @@map("set_password_token")
+}
+
+model Session {
+  id            String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String    @db.Uuid
+  userId        String    @db.Uuid
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// identity/origin/audit only — NEVER an isolation boundary (ARCH §8)
+  posTerminalId String?   @db.Uuid
+  /// null until Phase 2 (devices module)
+  deviceId      String?   @db.Uuid
+  /// NONE | MFA | STEP_UP
+  mfaLevel      String    @default("NONE")
+  ip            String?
+  userAgent     String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+  lastSeenAt    DateTime  @default(now()) @db.Timestamptz(6)
+  expiresAt     DateTime  @db.Timestamptz(6)
+  revokedAt     DateTime? @db.Timestamptz(6)
+  revokeReason  String?
+  refreshTokens RefreshToken[]
+
+  @@index([tenantId, userId])
+  @@index([tenantId, expiresAt])
+  @@map("session")
+}
+
+model RefreshToken {
+  id           String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId     String    @db.Uuid
+  sessionId    String    @db.Uuid
+  session      Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  /// all rotations of one login share a familyId; a replay revokes the family
+  familyId     String    @db.Uuid
+  tokenHash    String    @unique
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  usedAt       DateTime? @db.Timestamptz(6)
+  revokedAt    DateTime? @db.Timestamptz(6)
+  replacedById String?   @db.Uuid
+
+  @@index([tenantId, familyId])
+  @@map("refresh_token")
+}
+
+model LoginSecurityEvent {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String?  @db.Uuid
+  userId    String?  @db.Uuid
+  /// LOGIN_OK | LOGIN_FAIL | LOCKOUT | MFA_FAIL | STEP_UP_OK | REFRESH_REUSE | SESSION_REVOKED | NEW_DEVICE
+  kind      String
+  ip        String?
+  userAgent String?
+  detail    Json?
+  at        DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([tenantId, at])
+  @@index([userId, at])
+  @@map("login_security_event")
+}
+
+// ────────────────────────────── access (tenant) ───────────────────────────────
+
+model Role {
+  id          String           @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId    String           @db.Uuid
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// stable key, e.g. "owner", "admin", "manager"
+  key         String
+  name        String
+  isSystem    Boolean          @default(false)
+  isActive    Boolean          @default(true)
+  createdAt   DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime         @updatedAt @db.Timestamptz(6)
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@unique([tenantId, key])
+  @@index([tenantId])
+  @@map("role")
+}
+
+model RolePermission {
+  id            String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String @db.Uuid
+  roleId        String @db.Uuid
+  role          Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionKey String
+
+  @@unique([roleId, permissionKey])
+  @@index([tenantId])
+  @@map("role_permission")
+}
+
+model UserRole {
+  id       String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId String @db.Uuid
+  userId   String @db.Uuid
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId   String @db.Uuid
+  role     Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([tenantId])
+  @@map("user_role")
+}
+
+/// A direct per-user grant. One row per (user, permissionKey); `effect` decides.
+/// DENY always beats ALLOW at resolution time.
+model PermissionGrant {
+  id              String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  userId          String   @db.Uuid
+  user            User     @relation("grantSubject", fields: [userId], references: [id], onDelete: Cascade)
+  permissionKey   String
+  /// ALLOW | DENY
+  effect          String
+  reason          String
+  grantedByUserId String?  @db.Uuid
+  grantedBy       User?    @relation("grantActor", fields: [grantedByUserId], references: [id], onDelete: SetNull)
+  at              DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([userId, permissionKey])
+  @@index([tenantId])
+  @@map("permission_grant")
+}
+
+/// The data-scope axis. Company + branch scope, optional per-branch permission
+/// overlay. Owner short-circuits to ALL/ALL at resolution time.
+model DataScopeAssignment {
+  id               String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId         String  @db.Uuid
+  userId           String  @unique @db.Uuid
+  user             User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyScopeAll  Boolean @default(false)
+  companyIds       String[] @db.Uuid
+  branchScopeAll   Boolean @default(false)
+  branchIds        String[] @db.Uuid
+  /// { "<branchId>": ["perm:key", …] } — narrower perms in specific branches
+  perBranchOverlay Json?
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([tenantId])
+  @@map("data_scope_assignment")
+}
+
+// ──────────────────────────────── org (tenant) ────────────────────────────────
+
+model Company {
+  id                String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId          String        @db.Uuid
+  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalNameEn       String
+  legalNameAr       String?
+  crNumber          String?
+  /// tax registration number / VAT number
+  trn               String?
+  registeredAddress String?
+  /// ACTIVE | INACTIVE
+  status            String        @default("ACTIVE")
+  createdAt         DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime      @updatedAt @db.Timestamptz(6)
+  tradeLicenses     TradeLicense[]
+  branches          Branch[]
+  posTerminals      PosTerminal[]
+  providerCreds     ProviderCredential[]
+
+  @@index([tenantId])
+  @@map("company")
+}
+
+model TradeLicense {
+  id        String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String    @db.Uuid
+  companyId String    @db.Uuid
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  number    String
+  issuedAt  DateTime? @db.Timestamptz(6)
+  expiresAt DateTime? @db.Timestamptz(6)
+  /// ACTIVE | EXPIRED | CANCELLED
+  status    String    @default("ACTIVE")
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+
+  @@index([tenantId, companyId])
+  @@index([tenantId, expiresAt])
+  @@map("trade_license")
+}
+
+model Branch {
+  id           String          @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId     String          @db.Uuid
+  tenant       Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId    String          @db.Uuid
+  company      Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  name         String
+  /// IANA tz, e.g. "Asia/Dubai"
+  timezone     String          @default("Asia/Dubai")
+  /// FRI_SAT | SAT_SUN | SUN_ONLY … (GCC weekend model)
+  weekendModel String          @default("FRI_SAT")
+  /// ACTIVE | INACTIVE
+  status       String          @default("ACTIVE")
+  createdAt    DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime        @updatedAt @db.Timestamptz(6)
+  settings     BranchSetting[]
+  posTerminals PosTerminal[]
+  providerCreds ProviderCredential[]
+
+  @@index([tenantId, companyId])
+  @@map("branch")
+}
+
+model BranchSetting {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  /// e.g. "registered_device_required" (default false; NOT writable by any Phase 1 API)
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([branchId, key])
+  @@index([tenantId])
+  @@map("branch_setting")
+}
+
+/// Identity / origin / register / audit only. NEVER an isolation boundary.
+model PosTerminal {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String   @db.Uuid
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String   @db.Uuid
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  code      String
+  name      String
+  /// ACTIVE | INACTIVE
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, code])
+  @@index([tenantId, branchId])
+  @@map("pos_terminal")
+}
+
+// ───────────────────────── secrets vault shell (tenant) ───────────────────────
+// Platform-realm write only. No tenant-realm permission key exists for these.
+
+model ProviderCredential {
+  id                    String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId              String        @db.Uuid
+  tenant                Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId             String?       @db.Uuid
+  company               Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  branchId              String?       @db.Uuid
+  branch                Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  /// e.g. "stripe", "whatsapp_bsp", "openai"
+  provider              String
+  /// TEST | LIVE
+  mode                  String        @default("TEST")
+  /// AES-256-GCM ciphertext of the raw credential (never logged, never returned)
+  secretCiphertext      Bytes
+  secretNonce           Bytes
+  /// the per-tenant DEK, wrapped by the master key (KMS in prod, env in dev)
+  dekWrapped            Bytes
+  /// non-secret config a tenant may see (masked display, method toggles…)
+  nonSecretConfig       Json          @default("{}")
+  /// ACTIVE | REVOKED
+  status                String        @default("ACTIVE")
+  version               Int           @default(1)
+  updatedByPlatformUserId String?     @db.Uuid
+  updatedByPlatformUser PlatformUser? @relation(fields: [updatedByPlatformUserId], references: [id], onDelete: SetNull)
+  createdAt             DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime      @updatedAt @db.Timestamptz(6)
+
+  @@index([tenantId, provider])
+  @@map("provider_credential")
+}
+
+// ──────────────────── audit + outbox foundation (tenant, partitioned) ──────────
+// RLS + range partitioning applied in the migration. Composite PK includes the
+// partition key. Append-only. No dispatcher / hash chain in Phase 1.
+
+model AuditLog {
+  id                         String   @default(dbgenerated("uuidv7()")) @db.Uuid
+  /// null for platform-scoped actions (visible only via the platform path)
+  tenantId                   String?  @db.Uuid
+  companyId                  String?  @db.Uuid
+  branchId                   String?  @db.Uuid
+  posTerminalId              String?  @db.Uuid
+  actorUserId                String?  @db.Uuid
+  actorPlatformUserId        String?  @db.Uuid
+  /// OWNER | USER | PLATFORM | SYSTEM
+  actorAccountType           String
+  /// set when the action happened inside an impersonated session (OD7)
+  impersonatorPlatformUserId String?  @db.Uuid
+  /// e.g. "tenant.created", "role.permission_changed", "IMPERSONATION:tenant.read"
+  action                     String
+  resourceType               String
+  resourceId                 String?
+  reason                     String?
+  before                     Json?
+  after                      Json?
+  ip                         String?
+  at                         DateTime @default(now()) @db.Timestamptz(6)
+
+  @@id([id, at])
+  @@index([tenantId, at])
+  @@index([action, at])
+  @@map("audit_log")
+}
+
+model Outbox {
+  id            String    @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String?   @db.Uuid
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+  /// stays null in Phase 1 — the SKIP LOCKED dispatcher is Phase 2
+  dispatchedAt  DateTime? @db.Timestamptz(6)
+
+  @@id([id, createdAt])
+  @@index([createdAt])
+  @@map("outbox")
 }

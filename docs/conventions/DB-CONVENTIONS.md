@@ -5,8 +5,10 @@
 
 ## Identity & ownership columns
 
-- **Primary keys: UUID v7** (`id uuid PRIMARY KEY`). Time-ordered → index-friendly,
-  non-enumerable.
+- **Primary keys: UUID v7** (`id uuid PRIMARY KEY DEFAULT uuidv7()`). Time-ordered
+  → index-friendly, non-enumerable. Postgres 17 has no built-in generator, so the
+  first Phase 1 migration creates a pure-SQL `uuidv7()` (ADR-0014); revisit when
+  the deployment target reaches PG 18.
 - **`tenant_id uuid NOT NULL`** on every tenant-owned table.
 - **`company_id uuid`** and **`branch_id uuid`** on operational tables (NOT NULL
   where the row is inherently branch-scoped).
@@ -23,6 +25,14 @@
   separate role.
 - Reference/lookup tables that are genuinely global (currencies, country tax
   templates) are exempt and documented as such.
+- **Phase 1 roles (ADR-0014):** `flower_app` (NOSUPERUSER NOBYPASSRLS — every
+  tenant request; no privilege on the `platform_*` tables), `flower_platform`
+  (BYPASSRLS — the one audited cross-tenant path, used only by `PlatformRepository`),
+  `flower_migrate` (DDL). Policy shape:
+  `USING (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid)`
+  with a matching `WITH CHECK`; `tenant` itself keys on `id`.
+- **RLS-exempt in Phase 1:** `plan`, `plan_version`, `entitlement_default`,
+  `limit_default`, `permission_registry`, all `platform_*` tables, `app_meta`.
 
 ## Types
 

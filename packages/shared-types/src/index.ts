@@ -31,6 +31,48 @@ export const apiErrorSchema = z.object({
 });
 export type ApiError = z.infer<typeof apiErrorSchema>;
 
+// --- feature entitlements & plan limits (ARCHITECTURE §48) ---
+
+/**
+ * Feature modules a plan can switch on/off. A permission whose module is not
+ * entitled is inert (checked at runtime). None of these are implemented in
+ * Phase 1 — the list exists so plans/entitlements can be modelled now.
+ */
+export const ENTITLEMENT_MODULES = [
+  'customer_web',
+  'ai_whatsapp',
+  'customer_web_ai',
+  'advanced_inventory',
+  'production_bom',
+  'biometric_attendance',
+  'biometric_face',
+  'biometric_fingerprint',
+  'biometric_rfid',
+  'advanced_reporting',
+  'delivery',
+] as const;
+export type EntitlementModule = (typeof ENTITLEMENT_MODULES)[number];
+export const entitlementModuleSchema = z.enum(ENTITLEMENT_MODULES);
+
+/**
+ * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
+ * counts"). Enforced by `LimitService` on create / activate / login.
+ */
+export const LIMIT_KEYS = [
+  'max_companies',
+  'max_branches',
+  'max_pos_terminals',
+  'max_registered_devices',
+  'max_users',
+  'max_owner_users',
+  'max_pos_concurrent_sessions',
+  'max_owner_concurrent_sessions',
+  'max_sessions_per_user',
+  'storage_bytes',
+] as const;
+export type LimitKey = (typeof LIMIT_KEYS)[number];
+export const limitKeySchema = z.enum(LIMIT_KEYS);
+
 // --- health/readiness (Phase 0) ---
 export const healthResponseSchema = z.object({ status: z.literal('ok') });
 export type HealthResponse = z.infer<typeof healthResponseSchema>;

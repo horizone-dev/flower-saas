@@ -43,8 +43,11 @@
   },
   "devDependencies": {
     "@flower/config": "workspace:*",
+    "@flower/permissions": "workspace:*",
+    "@flower/shared-types": "workspace:*",
     "@testcontainers/postgresql": "12.1.0",
     "@types/node": "24.13.3",
+    "@types/pg": "8.23.1",
     "dotenv": "17.4.2",
     "eslint": "10.9.1",
     "prisma": "7.10.0",
