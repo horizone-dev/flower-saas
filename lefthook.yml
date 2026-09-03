@@ -1,9 +1,28 @@
-# Git hooks (lefthook). Fleshed out in Phase 0 Task 0.12.
-# Task 0.1 ships this minimal placeholder so `pnpm prepare` has a valid config.
+# Git hooks (lefthook). Docs: docs/conventions/GIT-WORKFLOW.md
+#
+# Nothing here replaces CI — it is a fast local first line of defence. Hooks can
+# be skipped with LEFTHOOK=0 in a genuine emergency; the commit is still gated by
+# CI on push (never bypass CI).
 
 pre-commit:
   parallel: true
   jobs:
     - name: prettier
-      glob: '*.{ts,tsx,js,jsx,cjs,mjs,json,md,yml,yaml}'
+      glob: '*.{ts,tsx,js,jsx,cjs,mjs,json,md,yml,yaml,css}'
       run: pnpm exec prettier --check {staged_files}
+      stage_fixed: false
+
+    - name: eslint
+      # per-file flat config resolution finds the nearest eslint.config.js
+      glob: '{apps,packages,tooling}/**/*.{ts,tsx,js,mjs}'
+      run: pnpm exec eslint --no-warn-ignored {staged_files}
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: pnpm exec commitlint --edit {1}
+
+pre-push:
+  jobs:
+    - name: typecheck
+      run: pnpm -w typecheck
