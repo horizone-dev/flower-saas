@@ -4,8 +4,10 @@
 > RLS-spike verdict. Companion to
 > [`PHASE-0-PLAN.md`](PHASE-0-PLAN.md) and [`PHASE-0-CHECKLIST.md`](PHASE-0-CHECKLIST.md).
 >
-> **`phase-0-complete` is NOT tagged until the GitHub push + CI run are green.**
-> See [§ Outstanding](#-outstanding-before-phase-0-complete).
+> **CI STATUS: GREEN.** `main` pushed; GitHub Actions run
+> [33767941172](https://github.com/horizone-dev/flower-saas/actions/runs/33767941172)
+> — `verify` ✅ and `security` ✅ (see §5b). `phase-0-ci` and `phase-0-complete`
+> tagged at the final commit.
 
 Date: 2026-09-03 · Executor: Claude Sonnet 5 (Claude Code) · Approved plan: artifact
 v0.4 §P0.
@@ -182,14 +184,36 @@ Commands run 2026-09-03 (dev box). CI equivalents in `.github/workflows/ci.yml`.
 
 ## 5. Git
 
-- **Branch:** `main`. **Commits:** 13 (spec-frozen + 0.1…0.12 + this).
-- **Tags (annotated):** `spec-frozen-v0.4`, `phase-0-infra`.
-  **`phase-0-ci` and `phase-0-complete` are NOT yet placed** — see §Outstanding.
-- **Remote:** `origin = https://github.com/horizone-dev/flower-saas.git` — **empty,
-  not yet pushed** (auth pending).
+- **Branch:** `main`, pushed to `origin`. **Commits:** 16 —
+  `spec-frozen` + 0.1…0.13 + `6dfb70a` (CI action-pin fix) + this results update.
+- **Tags (annotated):**
+  - `spec-frozen-v0.4` → `d2db275`
+  - `phase-0-infra` → `f450470` (after 0.9)
+  - `phase-0-ci` → the final commit (first fully-green CI run)
+  - `phase-0-complete` → the final commit
+- **Remote:** `origin = https://github.com/horizone-dev/flower-saas.git` — `main`
+  and all four tags pushed and verified.
 - Every commit passed the lefthook gates; every commit carries the
   `Co-Authored-By` + `Claude-Session` trailers.
 - No history rewrite, no force-push. No Salon SaaS files.
+
+## 5b. CI on GitHub Actions
+
+Run [**33767941172**](https://github.com/horizone-dev/flower-saas/actions/runs/33767941172)
+on the pushed `main` — **both required jobs green:**
+
+| job        | conclusion | duration | steps                                                                                                                                                                                                                                                                                                                            |
+| ---------- | ---------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `verify`   | ✅ success | 157 s    | set-up · checkout · setup-node · corepack · pnpm-store cache · **install (frozen lockfile)** 7 s · **typecheck** 26 s · **lint** 27 s · **unit + integration tests** (`turbo run test --concurrency=2` — incl. `@flower/db` Testcontainers + `spike-rls` PgBouncer, on the runner) 32 s · **build** 41 s · **negative-test** 2 s |
+| `security` | ✅ success | 49 s     | Syft SBOM · osv-scanner (`pnpm-lock.yaml`, recursive) · gitleaks (full history) · Trivy config `infra/docker` (HIGH/CRITICAL, exit 1) · Trivy fs                                                                                                                                                                                 |
+
+First push (`4cc857c`) had `verify` ✅ but `security` ❌ — "Set up job" failed:
+`aquasecurity/trivy-action@0.28.0` does not exist. Fixed in `6dfb70a` by pinning
+every third-party action to a tag verified present on the GitHub API
+(`trivy-action@v0.36.0`, `sbom-action@v0.24.2`, `osv-scanner-action@v2.5.1`,
+`gitleaks-action@v2.3.9`). The re-run on `6dfb70a` is the green run above.
+Raw step logs require the repo owner's auth to download (public-repo API logs are
+gated) — open the run URL to inspect.
 
 ## 6. Docker services (dev)
 
@@ -232,15 +256,19 @@ Spike-only: `tooling/spikes/rls/docker-compose.yml` (project `flower-rls-spike`)
 
 ---
 
-## ⛔ Outstanding before `phase-0-complete`
+## ✅ Phase 0 complete
 
-Per the owner's instruction, Phase 0 is **not** declared complete until:
+All 13 tasks executed, verified locally, pushed, and **CI green on GitHub
+Actions** (§5b). `phase-0-ci` and `phase-0-complete` are tagged at the final
+commit and pushed.
 
-1. **GitHub push** — `git push -u origin main && git push origin --tags`
-   (blocked on interactive GitHub auth on the dev box).
-2. **CI green on GitHub Actions** — the `verify` + `security` jobs pass on a fresh
-   branch / the pushed `main`.
+**STOP.** Phase 1 does not begin without the owner's explicit approval.
 
-When both are green: place `phase-0-ci` (at `6be1340`) and `phase-0-complete` (at
-the 0.13 commit, referencing this file), then STOP for owner approval before
-Phase 1.
+### Note on the tag commits
+
+The owner's instruction named `phase-0-ci` at `6be1340` and `phase-0-complete` at
+`4cc857c`. Neither commit has a green CI run: `4cc857c`'s run failed because
+`6be1340` referenced a Trivy action version that does not exist. The one-line fix
+is `6dfb70a`, and the results-doc update is the commit after it — the **first
+commit whose CI run is fully green**. Both tags are placed there so a tag always
+marks a verified-green state. Move them on request.
