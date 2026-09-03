@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AccessModule } from '../access/access.module.js';
+import { PlatformModule } from '../platform/platform.module.js';
 import { PasswordService } from '../../common/crypto/password.service.js';
 import { TotpService } from '../../common/crypto/totp.service.js';
 import { IdentityRepository } from './identity.repository.js';
@@ -17,7 +18,7 @@ import { MeController } from './me.controller.js';
  * tokens, login security events. Auth for both realms + `/v1/me`.
  */
 @Module({
-  imports: [AccessModule],
+  imports: [AccessModule, PlatformModule],
   controllers: [AuthController, PlatformAuthController, MeController],
   providers: [
     PasswordService,

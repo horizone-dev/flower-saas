@@ -6,6 +6,7 @@ import { SessionStore } from '../../common/auth/session-store.js';
 import type { Realm, SessionData } from '../../common/auth/session.types.js';
 import type { MfaLevel } from '../../common/context/index.js';
 import { PolicyService } from '../access/policy.service.js';
+import { LimitService } from '../platform/limit.service.js';
 import { IdentityRepository } from './identity.repository.js';
 import { PlatformIdentityRepository } from './platform-identity.repository.js';
 import { RefreshTokenStore } from './refresh-token.store.js';
@@ -37,6 +38,7 @@ export class SessionService {
     private readonly store: SessionStore,
     private readonly refresh: RefreshTokenStore,
     private readonly policy: PolicyService,
+    private readonly limits: LimitService,
     private readonly identity: IdentityRepository,
     private readonly platformIdentity: PlatformIdentityRepository,
   ) {}
@@ -46,6 +48,11 @@ export class SessionService {
     const sessionId = randomUUID();
     const familyId = randomUUID();
     const expiresAt = now + this.config.AUTH_SESSION_TTL_SECONDS * 1000;
+
+    // concurrent-session limit (tenant realm) — refuse before creating anything
+    if (input.realm === 'tenant' && input.tenantId && input.userId) {
+      await this.limits.assertSessionWithin(input.tenantId, input.userId);
+    }
 
     const access =
       input.realm === 'tenant' && input.tenantId && input.userId
@@ -86,6 +93,10 @@ export class SessionService {
         userAgent: input.userAgent,
         expiresAt: new Date(expiresAt),
       });
+    }
+
+    if (input.realm === 'tenant' && input.tenantId && input.userId) {
+      await this.limits.recordSession(input.tenantId, input.userId, sessionId, expiresAt);
     }
 
     const { token: refreshToken } = await this.refresh.issue(sessionId, familyId);
@@ -137,7 +148,12 @@ export class SessionService {
     const session = await this.store.get(sessionId);
     await this.store.revoke(sessionId, reason);
     await this.identity.markSessionRowRevoked(sessionId, reason).catch(() => {});
-    if (session) await this.refresh.revokeFamily(session.familyId).catch(() => []);
+    if (session) {
+      await this.refresh.revokeFamily(session.familyId).catch(() => []);
+      if (session.tenantId && session.userId) {
+        await this.limits.dropSession(session.tenantId, session.userId, sessionId).catch(() => {});
+      }
+    }
   }
 
   private async resolveAccess(tenantId: string, userId: string): Promise<SessionData['access']> {
