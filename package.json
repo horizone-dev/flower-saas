@@ -35,7 +35,8 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "lefthook",
-      "unrs-resolver"
+      "unrs-resolver",
+      "esbuild"
     ],
     "supportedArchitectures": {
       "os": [
