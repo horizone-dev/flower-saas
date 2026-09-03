@@ -10,6 +10,16 @@ import { REQUIRED_PERMISSION_KEY } from './require-permission.decorator.js';
 import { SCOPED_PARAM_KEY, type ScopedParamConfig } from './pipeline.decorators.js';
 
 /**
+ * The ONLY actions allowed during an impersonated session (OD7). Deliberately a
+ * tiny read allowlist — never a denylist. Any future support-mutation must be
+ * added here explicitly, step-up-protected and separately approved.
+ */
+export const IMPERSONATION_READ_ALLOWLIST: ReadonlySet<string> = new Set<string>([
+  'users:view',
+  'audit:view',
+]);
+
+/**
  * Pipeline steps 5–9: entitlement -> permission (+ step-up) -> company scope ->
  * branch scope. Delegates the decision to the pure `PolicyEngine`; this guard
  * only resolves the target ids from the route and maps a DENY reason to an HTTP
@@ -37,6 +47,16 @@ export class PermissionGuard implements CanActivate {
 
     const ctx = getContext();
     if (!ctx) throw new UnauthorizedException('no request context');
+
+    // OD7 — impersonation is read-only: reject every non-allowlisted action while
+    // an impersonated session is active, whatever the underlying permission says.
+    if (ctx.isImpersonating && !IMPERSONATION_READ_ALLOWLIST.has(required)) {
+      throw new DomainError(
+        'IMPERSONATION_READ_ONLY',
+        'this action is not permitted during an impersonated session',
+        403,
+      );
+    }
 
     // platform realm
     if (isPlatformPermissionKey(required)) {

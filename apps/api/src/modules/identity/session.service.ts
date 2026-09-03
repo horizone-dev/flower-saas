@@ -22,6 +22,8 @@ export interface IssueSessionInput {
   userAgent: string | null;
   posTerminalId?: string | null;
   impersonatorPlatformUserId?: string | null;
+  /** shorten the session lifetime (impersonation ≤ 30 min — OD7) */
+  ttlSecondsOverride?: number;
 }
 
 export interface IssuedSession {
@@ -47,10 +49,20 @@ export class SessionService {
     const now = Date.now();
     const sessionId = randomUUID();
     const familyId = randomUUID();
-    const expiresAt = now + this.config.AUTH_SESSION_TTL_SECONDS * 1000;
+    const ttlSeconds = Math.min(
+      input.ttlSecondsOverride ?? this.config.AUTH_SESSION_TTL_SECONDS,
+      this.config.AUTH_SESSION_TTL_SECONDS,
+    );
+    const expiresAt = now + ttlSeconds * 1000;
 
-    // concurrent-session limit (tenant realm) — refuse before creating anything
-    if (input.realm === 'tenant' && input.tenantId && input.userId) {
+    // concurrent-session limit (tenant realm) — refuse before creating anything.
+    // Impersonation sessions don't count against the owner's cap.
+    if (
+      input.realm === 'tenant' &&
+      input.tenantId &&
+      input.userId &&
+      !input.impersonatorPlatformUserId
+    ) {
       await this.limits.assertSessionWithin(input.tenantId, input.userId);
     }
 

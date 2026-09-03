@@ -6,6 +6,7 @@ import pg from 'pg';
 import { ConfigModule } from '../../config/config.module.js';
 import { DbModule } from '../../common/db/db.module.js';
 import { RedisModule } from '../../common/redis/redis.module.js';
+import { AuditModule } from '../../common/audit/audit.module.js';
 import { SessionModule } from '../../common/auth/session.module.js';
 import { PlatformModule } from './platform.module.js';
 import { LimitService, LimitExceededError } from './limit.service.js';
@@ -33,7 +34,7 @@ describe('platform: limits + entitlements (integration)', () => {
     process.env['REDIS_URL'] = stack.redis.url;
 
     moduleRef = await Test.createTestingModule({
-      imports: [ConfigModule, DbModule, RedisModule, SessionModule, PlatformModule],
+      imports: [ConfigModule, DbModule, RedisModule, AuditModule, SessionModule, PlatformModule],
     }).compile();
     await moduleRef.init();
     limits = moduleRef.get(LimitService);
