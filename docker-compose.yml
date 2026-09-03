@@ -1,0 +1,142 @@
+# Flower SaaS — local development infrastructure (ARCHITECTURE §55, PHASE-0-PLAN §D).
+#
+# Isolated compose project `flower-saas`. All volumes/networks are namespaced
+# `flower*` — this stack never shares data with the separate Salon SaaS project.
+# PgBouncer is NOT here: it is spike-only (tooling/spikes/rls/docker-compose.yml).
+#
+#   pnpm dev:up      -> docker compose up -d --wait
+#   pnpm dev:down    -> docker compose down
+#   pnpm db:reset    -> recreate the postgres volume + migrate deploy
+name: flower-saas
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: flower-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flower}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flower_local_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-flower}
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - log_min_duration_statement=500
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - flower-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER:-flower} -d ${POSTGRES_DB:-flower}',
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  redis:
+    image: redis:7
+    container_name: flower-redis
+    command: ['redis-server', '--appendonly', 'yes', '--save', '60', '1']
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - flower-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-08T15-41-24Z
+    container_name: flower-minio
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-flower_minio}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-flower_minio_local_dev}
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - flower-minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 4s
+      timeout: 4s
+      retries: 20
+      start_period: 5s
+
+  # One-shot: create the three buckets, then exit 0.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-08T15-39-49Z
+    container_name: flower-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "${S3_ACCESS_KEY_ID:-flower_minio}" "${S3_SECRET_ACCESS_KEY:-flower_minio_local_dev}" &&
+        mc mb --ignore-existing local/${S3_BUCKET_PRIVATE:-flower-private} &&
+        mc mb --ignore-existing local/${S3_BUCKET_QUARANTINE:-flower-quarantine} &&
+        mc mb --ignore-existing local/${S3_BUCKET_PUBLIC:-flower-public} &&
+        mc anonymous set download local/${S3_BUCKET_PUBLIC:-flower-public} &&
+        echo "buckets ready"
+    restart: 'no'
+
+  clamav:
+    image: clamav/clamav:1.4
+    container_name: flower-clamav
+    environment:
+      # dev speed: use the DB shipped in the image, skip the freshclam download.
+      CLAMAV_NO_FRESHCLAM: 'true'
+      CLAMD_STARTUP_TIMEOUT: '120'
+    ports:
+      - '${CLAMAV_PORT:-3310}:3310'
+    volumes:
+      - flower-clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ['CMD-SHELL', 'clamdscan --ping 1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+
+  mailpit:
+    image: axllent/mailpit:v1.24
+    container_name: flower-mailpit
+    environment:
+      MP_MAX_MESSAGES: '500'
+      MP_SMTP_AUTH_ACCEPT_ANY: '1'
+      MP_SMTP_AUTH_ALLOW_INSECURE: '1'
+    ports:
+      - '${SMTP_PORT:-1025}:1025'
+      - '8025:8025'
+    volumes:
+      - flower-mailpit-data:/data
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'sh',
+          '-c',
+          'wget -q -O /dev/null http://localhost:8025/livez || exit 1',
+        ]
+      interval: 4s
+      timeout: 4s
+      retries: 20
+      start_period: 3s
+
+volumes:
+  flower-pg-data:
+  flower-redis-data:
+  flower-minio-data:
+  flower-clamav-data:
+  flower-mailpit-data:

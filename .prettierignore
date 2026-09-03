@@ -9,3 +9,7 @@ packages/db/generated
 tooling/**/*.sql
 packages/db/prisma/migrations/**
 **/*.sql
+
+# scripts / templates prettier cannot parse
+*.sh
+.env.example

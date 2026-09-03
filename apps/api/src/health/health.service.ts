@@ -1,5 +1,6 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ReadinessResponse } from '@flower/shared-types';
+import { createPrismaClient, type PrismaClient } from '@flower/db';
 import { APP_CONFIG, type AppConfig } from '../config/env.js';
 import { tcpProbe } from './tcp-probe.js';
 
@@ -7,7 +8,17 @@ type CheckState = 'ok' | 'down';
 
 @Injectable()
 export class HealthService {
+  private readonly log = new Logger(HealthService.name);
+  private prisma: PrismaClient | null = null;
+
   constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
+
+  private db(): PrismaClient | null {
+    if (this.prisma) return this.prisma;
+    if (!this.config.DATABASE_URL) return null;
+    this.prisma = createPrismaClient({ connectionString: this.config.DATABASE_URL });
+    return this.prisma;
+  }
 
   /** Liveness — the process is up and can serve. */
   health(): { status: 'ok' } {
@@ -16,12 +27,14 @@ export class HealthService {
 
   /**
    * Readiness — every dependency the API needs to do real work.
-   * Phase 0: TCP reachability for db / redis / storage; `migrations` is `down`
-   * until `packages/db` exists (Task 0.5).
+   * db: `SELECT 1`. migrations: the latest `_prisma_migrations` row is finished
+   * and not rolled back. redis / storage: TCP reachability (protocol-level checks
+   * arrive with those modules in later phases).
    */
   async readiness(): Promise<ReadinessResponse> {
-    const [db, redis, storage] = await Promise.all([
-      tcpProbe(this.config.POSTGRES_HOST, this.config.POSTGRES_PORT),
+    const [db, migrations, redis, storage] = await Promise.all([
+      this.checkDb(),
+      this.checkMigrations(),
       tcpProbe(this.config.REDIS_HOST, this.config.REDIS_PORT),
       probeUrl(this.config.S3_ENDPOINT),
     ]);
@@ -30,7 +43,7 @@ export class HealthService {
       db: db ? 'ok' : 'down',
       redis: redis ? 'ok' : 'down',
       storage: storage ? 'ok' : 'down',
-      migrations: 'down', // wired in Task 0.5
+      migrations: migrations ? 'ok' : 'down',
     };
 
     const anyDown = Object.values(checks).includes('down');
@@ -38,6 +51,39 @@ export class HealthService {
     const status: ReadinessResponse['status'] = allDown ? 'down' : anyDown ? 'degraded' : 'ok';
 
     return { status, checks };
+  }
+
+  private async checkDb(): Promise<boolean> {
+    const prisma = this.db();
+    if (!prisma) return false;
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      return true;
+    } catch (err) {
+      this.log.debug(`db check failed: ${String(err)}`);
+      return false;
+    }
+  }
+
+  private async checkMigrations(): Promise<boolean> {
+    const prisma = this.db();
+    if (!prisma) return false;
+    try {
+      const rows = await prisma.$queryRawUnsafe<
+        { migration_name: string; finished_at: Date | null; rolled_back_at: Date | null }[]
+      >(
+        'SELECT migration_name, finished_at, rolled_back_at FROM _prisma_migrations ORDER BY started_at DESC LIMIT 1',
+      );
+      const latest = rows[0];
+      return latest != null && latest.finished_at != null && latest.rolled_back_at == null;
+    } catch (err) {
+      this.log.debug(`migrations check failed: ${String(err)}`);
+      return false;
+    }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.prisma?.$disconnect();
   }
 }
 

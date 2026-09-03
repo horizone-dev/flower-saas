@@ -16,6 +16,7 @@
     "clean": "rimraf dist node_modules .turbo"
   },
   "dependencies": {
+    "@flower/db": "workspace:*",
     "@flower/permissions": "workspace:*",
     "@flower/shared-types": "workspace:*",
     "@nestjs/common": "12.0.1",
