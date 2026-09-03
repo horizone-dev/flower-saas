@@ -7,8 +7,14 @@ dist/
 build/
 out/
 .next/
+next-env.d.ts
 .turbo/
 *.tsbuildinfo
+
+# Next.js 16 regenerates these per-app on `next dev` — machine-local agent hints,
+# not project rules (the authoritative rules file is the repo-root CLAUDE.md).
+apps/*/AGENTS.md
+apps/*/CLAUDE.md
 
 # Test / coverage
 coverage/

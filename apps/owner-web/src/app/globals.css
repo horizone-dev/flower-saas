@@ -1,0 +1,38 @@
+@import 'tailwindcss';
+
+/* Design tokens (Z-14) — mirrors @flower/config/tailwind. Replaced when the
+   real design system lands. */
+@theme {
+  --color-brand-50: #fdf2f8;
+  --color-brand-500: #ec4899;
+  --color-brand-600: #db2777;
+  --color-brand-900: #831843;
+  --radius-card: 0.75rem;
+}
+
+body {
+  font-family: Inter, system-ui, sans-serif;
+}
+
+/* @flower/ui Button shell */
+.fl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.fl-btn--primary {
+  background: var(--color-brand-600);
+  color: #fff;
+}
+.fl-btn--secondary {
+  background: var(--color-brand-50);
+  color: var(--color-brand-900);
+}
+.fl-btn--ghost {
+  background: transparent;
+  color: var(--color-brand-600);
+}
