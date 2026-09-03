@@ -1,0 +1,8 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'tooling/spikes/*'
+
+# Keep dependency resolution strict and reproducible.
+# (pnpm v10 defaults: isolated node_modules, strict-peer-dependencies off by default —
+#  we turn it on in .npmrc.)

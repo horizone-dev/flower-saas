@@ -1,0 +1,9 @@
+# Git hooks (lefthook). Fleshed out in Phase 0 Task 0.12.
+# Task 0.1 ships this minimal placeholder so `pnpm prepare` has a valid config.
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: prettier
+      glob: '*.{ts,tsx,js,jsx,cjs,mjs,json,md,yml,yaml}'
+      run: pnpm exec prettier --check {staged_files}
