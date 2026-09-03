@@ -6,6 +6,7 @@ import { SessionStore } from '../../common/auth/session-store.js';
 import type { Realm, SessionData } from '../../common/auth/session.types.js';
 import type { MfaLevel } from '../../common/context/index.js';
 import { PolicyService } from '../access/policy.service.js';
+import { toAccessSnapshot } from '../access/policy.types.js';
 import { LimitService } from '../platform/limit.service.js';
 import { IdentityRepository } from './identity.repository.js';
 import { PlatformIdentityRepository } from './platform-identity.repository.js';
@@ -169,17 +170,7 @@ export class SessionService {
   }
 
   private async resolveAccess(tenantId: string, userId: string): Promise<SessionData['access']> {
-    const r = await this.policy.resolveForUser(userId, tenantId);
-    return {
-      effectivePermissions: [...r.effectivePermissions],
-      companyScope: r.companyScope === 'ALL' ? 'ALL' : [...r.companyScope],
-      branchScope: r.branchScope === 'ALL' ? 'ALL' : [...r.branchScope],
-      perBranchOverlay: Object.fromEntries(
-        [...r.perBranchOverlay].map(([b, keys]) => [b, [...keys]]),
-      ),
-      entitledModules: [...r.entitledModules],
-      planKey: null,
-    };
+    return toAccessSnapshot(await this.policy.resolveForUser(userId, tenantId));
   }
 
   private async resolvePlatformAccess(platformUserId: string): Promise<SessionData['access']> {

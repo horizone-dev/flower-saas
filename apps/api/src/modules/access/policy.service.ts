@@ -12,14 +12,16 @@ export class UserNotFoundError extends Error {
 }
 
 export interface ProposedAccess {
-  roleIds?: readonly string[];
-  grants?: readonly { permissionKey: string; effect: 'ALLOW' | 'DENY' }[];
-  scope?: {
-    companyScopeAll?: boolean;
-    companyIds?: readonly string[];
-    branchScopeAll?: boolean;
-    branchIds?: readonly string[];
-  };
+  roleIds?: readonly string[] | undefined;
+  grants?: readonly { permissionKey: string; effect: 'ALLOW' | 'DENY' }[] | undefined;
+  scope?:
+    | {
+        companyScopeAll?: boolean | undefined;
+        companyIds?: readonly string[] | undefined;
+        branchScopeAll?: boolean | undefined;
+        branchIds?: readonly string[] | undefined;
+      }
+    | undefined;
 }
 
 export interface AccessPreview {

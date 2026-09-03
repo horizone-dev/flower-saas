@@ -37,3 +37,32 @@ export interface ResolvedAccess {
   readonly perBranchOverlay: ReadonlyMap<string, ReadonlySet<string>>;
   readonly entitledModules: ReadonlySet<string>;
 }
+
+/**
+ * The plain, JSON-serialisable form of a `ResolvedAccess` — this is what a session
+ * caches (`SessionData['access']`) and the auth guard copies onto the request
+ * context. Kept structural (not importing the session type) so both the identity
+ * module (at login / token refresh) and the access module (`SessionAccessRefresher`
+ * after an RBAC change) produce it the same way.
+ */
+export interface AccessSnapshot {
+  effectivePermissions: string[];
+  companyScope: 'ALL' | string[];
+  branchScope: 'ALL' | string[];
+  perBranchOverlay: Record<string, string[]>;
+  entitledModules: string[];
+  planKey: string | null;
+}
+
+export function toAccessSnapshot(r: ResolvedAccess): AccessSnapshot {
+  return {
+    effectivePermissions: [...r.effectivePermissions],
+    companyScope: r.companyScope === 'ALL' ? 'ALL' : [...r.companyScope],
+    branchScope: r.branchScope === 'ALL' ? 'ALL' : [...r.branchScope],
+    perBranchOverlay: Object.fromEntries(
+      [...r.perBranchOverlay].map(([b, keys]) => [b, [...keys]]),
+    ),
+    entitledModules: [...r.entitledModules],
+    planKey: null,
+  };
+}
