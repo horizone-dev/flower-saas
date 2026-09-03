@@ -1,0 +1,15 @@
+# Normalize line endings — LF in the repository, always.
+* text=auto eol=lf
+
+# Explicitly binary (never touch)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+
+# Lockfiles / generated — keep as-is, don't diff noisily
+pnpm-lock.yaml -diff linguist-generated
