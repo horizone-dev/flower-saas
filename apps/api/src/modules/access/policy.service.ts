@@ -37,10 +37,10 @@ export interface AccessPreview {
 export class PolicyService {
   constructor(private readonly repo: AccessRepository) {}
 
-  /** The full resolved access for a user — used by the auth guard to populate the
-   *  session/context (Phase 1 task 1.5) and by `/v1/me/access`. */
-  async resolveForUser(userId: string): Promise<ResolvedAccess> {
-    const row = await this.repo.loadUserAccess(userId);
+  /** The full resolved access for a user. `tenantId` is passed at login (before a
+   *  request context exists); otherwise it comes from the request context. */
+  async resolveForUser(userId: string, tenantId?: string): Promise<ResolvedAccess> {
+    const row = await this.repo.loadUserAccess(userId, tenantId);
     if (!row) throw new UserNotFoundError(userId);
     return this.materialise(userId, row);
   }

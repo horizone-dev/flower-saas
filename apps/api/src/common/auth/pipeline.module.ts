@@ -2,7 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { APP_GUARD, DiscoveryModule, Reflector } from '@nestjs/core';
 import { AccessModule } from '../../modules/access/access.module.js';
 import { JwtService } from './jwt.service.js';
-import { SessionStore, InMemorySessionStore } from './session-store.js';
+import { SessionModule } from './session.module.js';
 import { AuthGuard } from './auth.guard.js';
 import { PermissionGuard } from './permission.guard.js';
 
@@ -20,14 +20,13 @@ import { PermissionGuard } from './permission.guard.js';
  */
 @Global()
 @Module({
-  imports: [AccessModule, DiscoveryModule],
+  imports: [AccessModule, DiscoveryModule, SessionModule],
   providers: [
     Reflector,
     JwtService,
-    { provide: SessionStore, useClass: InMemorySessionStore },
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },
   ],
-  exports: [JwtService, SessionStore],
+  exports: [JwtService, SessionModule],
 })
 export class PipelineModule {}

@@ -1,16 +1,26 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from './config/config.module.js';
 import { DbModule } from './common/db/db.module.js';
+import { RedisModule } from './common/redis/redis.module.js';
 import { PipelineModule } from './common/auth/index.js';
 import { AccessModule } from './modules/access/access.module.js';
+import { IdentityModule } from './modules/identity/identity.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
  * Root module. Domain modules are registered here per phase (`src/modules/*`).
- * Phase 1: config + DB layer + the request enforcement pipeline (auth +
- * permission guards) + access + health.
+ * Phase 1: config + DB + Redis + the request enforcement pipeline + access +
+ * identity (auth) + health.
  */
 @Module({
-  imports: [ConfigModule, DbModule, PipelineModule, AccessModule, HealthModule],
+  imports: [
+    ConfigModule,
+    DbModule,
+    RedisModule,
+    PipelineModule,
+    AccessModule,
+    IdentityModule,
+    HealthModule,
+  ],
 })
 export class AppModule {}

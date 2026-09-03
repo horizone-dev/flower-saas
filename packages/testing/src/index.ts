@@ -15,3 +15,4 @@ export {
   type ProbeRun,
 } from './probes.js';
 export { inParallel, summarize, expectAtMostSucceed, type ParallelSummary } from './concurrency.js';
+export { migrateTestDb } from './migrate.js';

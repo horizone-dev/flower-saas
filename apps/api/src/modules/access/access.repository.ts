@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { ScopedRepository, DbService } from '../../common/data/index.js';
+import { runScoped, type ScopedTx } from '@flower/db';
+import { DbService } from '../../common/data/index.js';
+import { requireTenantContext } from '../../common/context/index.js';
 
 export interface UserAccessRow {
   accountType: 'OWNER' | 'USER';
@@ -19,17 +21,21 @@ export interface UserAccessRow {
 }
 
 /**
- * Reads the RBAC state for one user, tenant-scoped through RLS. The only data
- * path for the `access` module (ScopedRepository — lint-enforced).
+ * Reads the RBAC state for one user, tenant-scoped through RLS. Every method
+ * accepts an explicit `tenantId` (login resolves access before there is a request
+ * context) and falls back to the request context otherwise.
  */
 @Injectable()
-export class AccessRepository extends ScopedRepository {
-  constructor(db: DbService) {
-    super(db);
+export class AccessRepository {
+  constructor(private readonly db: DbService) {}
+
+  private run<T>(tenantId: string | undefined, fn: (tx: ScopedTx) => Promise<T>): Promise<T> {
+    const tid = tenantId ?? requireTenantContext().tenantId;
+    return runScoped(this.db.appClient(), { tenantId: tid }, fn);
   }
 
-  async loadUserAccess(userId: string): Promise<UserAccessRow | null> {
-    return this.scoped(async (tx) => {
+  async loadUserAccess(userId: string, tenantId?: string): Promise<UserAccessRow | null> {
+    return this.run(tenantId, async (tx) => {
       const user = await tx.user.findUnique({
         where: { id: userId },
         select: { accountType: true },
@@ -87,9 +93,9 @@ export class AccessRepository extends ScopedRepository {
   }
 
   /** Permission keys held by a set of roles (for permission-preview). */
-  async permissionsForRoles(roleIds: readonly string[]): Promise<string[]> {
+  async permissionsForRoles(roleIds: readonly string[], tenantId?: string): Promise<string[]> {
     if (roleIds.length === 0) return [];
-    return this.scoped(async (tx) => {
+    return this.run(tenantId, async (tx) => {
       const rows = await tx.rolePermission.findMany({
         where: { roleId: { in: [...roleIds] } },
         select: { permissionKey: true },

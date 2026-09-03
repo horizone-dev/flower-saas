@@ -13,6 +13,8 @@ export type Realm = 'tenant' | 'platform';
 export interface SessionData {
   sessionId: string;
   realm: Realm;
+  /** the refresh-token family for this session (revoked on logout / reuse) */
+  familyId: string;
   tenantId: string | null;
   userId: string | null;
   platformUserId: string | null;

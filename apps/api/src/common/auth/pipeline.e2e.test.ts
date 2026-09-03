@@ -74,6 +74,7 @@ function session(over: Partial<SessionData> = {}): SessionData {
   return {
     sessionId: 's1',
     realm: 'tenant',
+    familyId: 'f1',
     tenantId: T,
     userId: '22222222-2222-7222-8222-222222222222',
     platformUserId: null,

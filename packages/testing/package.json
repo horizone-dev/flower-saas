@@ -24,11 +24,13 @@
     "clean": "rimraf dist node_modules .turbo"
   },
   "dependencies": {
+    "@flower/db": "workspace:*",
     "@testcontainers/minio": "12.1.0",
     "@testcontainers/postgresql": "12.1.0",
     "@testcontainers/redis": "12.1.0",
     "ioredis": "6.0.0",
     "pg": "8.23.0",
+    "prisma": "7.10.0",
     "testcontainers": "12.1.0"
   },
   "devDependencies": {
