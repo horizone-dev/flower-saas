@@ -7,6 +7,7 @@ import { PipelineModule } from './common/auth/index.js';
 import { AccessModule } from './modules/access/access.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 import { IdentityModule } from './modules/identity/identity.module.js';
+import { OrgModule } from './modules/org/org.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
@@ -24,6 +25,7 @@ import { HealthModule } from './health/health.module.js';
     AccessModule,
     PlatformModule,
     IdentityModule,
+    OrgModule,
     HealthModule,
   ],
 })
