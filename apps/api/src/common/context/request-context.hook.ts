@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RequestContext } from './request-context.js';
-import { contextStorage } from './context.als.js';
+import { enterContext } from './context.als.js';
 
 /**
  * Establish a bootstrap `RequestContext` (request id + client ip/ua) in the ALS
@@ -23,7 +23,7 @@ export function installRequestContext(fastify: FastifyInstance): void {
     const uaHeader = request.headers['user-agent'];
     const userAgent = Array.isArray(uaHeader) ? (uaHeader[0] ?? null) : (uaHeader ?? null);
 
-    contextStorage.enterWith(new RequestContext({ requestId, ip, userAgent }));
+    enterContext(new RequestContext({ requestId, ip, userAgent }));
     done();
   });
 }

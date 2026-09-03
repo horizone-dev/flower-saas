@@ -25,6 +25,24 @@ const envSchema = z.object({
   DATABASE_URL: z.string().optional(),
   PLATFORM_DATABASE_URL: z.string().optional(),
   REDIS_URL: z.string().optional(),
+
+  // Auth (task 1.4/1.5). A dev default keeps unit tests self-contained; a real
+  // secret is required in production (checked at bootstrap).
+  AUTH_JWT_SECRET: z.string().min(32).default('dev-only-insecure-jwt-secret-change-me-000'),
+  AUTH_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(600),
+  AUTH_REFRESH_TOKEN_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60 * 60 * 24 * 30),
+  AUTH_STEP_UP_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+  AUTH_SESSION_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60 * 60 * 12),
+  AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  AUTH_LOGIN_LOCKOUT_SECONDS: z.coerce.number().int().positive().default(900),
 });
 
 export type AppConfig = Readonly<z.infer<typeof envSchema>>;
@@ -36,6 +54,8 @@ export class EnvValidationError extends Error {
   }
 }
 
+const DEV_JWT_SECRET = 'dev-only-insecure-jwt-secret-change-me-000';
+
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.safeParse(source);
   if (!parsed.success) {
@@ -44,7 +64,18 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       .join('\n');
     throw new EnvValidationError(issues);
   }
-  return Object.freeze(parsed.data);
+  const cfg = parsed.data;
+  if (cfg.NODE_ENV === 'production') {
+    if (cfg.AUTH_JWT_SECRET === DEV_JWT_SECRET) {
+      throw new EnvValidationError(
+        '  - AUTH_JWT_SECRET: the dev default must not be used in production',
+      );
+    }
+    if (!cfg.DATABASE_URL) {
+      throw new EnvValidationError('  - DATABASE_URL: required in production');
+    }
+  }
+  return Object.freeze(cfg);
 }
 
 /** DI token for the validated config. */

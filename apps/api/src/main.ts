@@ -6,6 +6,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter.js';
 import { installRequestContext } from './common/context/index.js';
+import { assertEveryRouteDeclaresIntent } from './common/auth/index.js';
 import { rootLogger } from './common/logger/logger.js';
 import { loadConfig } from './config/env.js';
 
@@ -37,6 +38,9 @@ async function bootstrap(): Promise<void> {
   app.setGlobalPrefix('v1', { exclude: ['healthz', 'readyz'] });
   app.useGlobalFilters(new AllExceptionsFilter());
   app.enableShutdownHooks();
+
+  // hard gate G8 — refuse to start if any route lacks @RequirePermission / @Public
+  assertEveryRouteDeclaresIntent(app);
 
   const openapi = new DocumentBuilder()
     .setTitle('Flower SaaS API')

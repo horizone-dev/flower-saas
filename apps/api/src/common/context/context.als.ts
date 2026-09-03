@@ -3,19 +3,31 @@ import type { RequestContext } from './request-context.js';
 
 /**
  * Per-request context carried through the async call tree (AsyncLocalStorage).
- * One store per Node process; every request runs its handler inside
- * `runWithContext`, so nothing leaks between concurrent requests.
+ *
+ * The store holds a **mutable holder**, not the context directly: guards run in
+ * sequence and the auth guard *replaces* the bootstrap context with the enriched
+ * one via `replaceContext`. Mutating a holder that every reader shares works
+ * regardless of how the runtime chains the guards' async contexts (an
+ * `enterWith`-based swap does not reliably propagate to sibling guards).
  */
-export const contextStorage = new AsyncLocalStorage<RequestContext>();
-const als = contextStorage;
+interface Holder {
+  current: RequestContext;
+}
+
+export const contextStorage = new AsyncLocalStorage<Holder>();
 
 export function runWithContext<T>(ctx: RequestContext, fn: () => T): T {
-  return als.run(ctx, fn);
+  return contextStorage.run({ current: ctx }, fn);
+}
+
+/** Seed the holder for the current async context (the Fastify onRequest hook). */
+export function enterContext(ctx: RequestContext): void {
+  contextStorage.enterWith({ current: ctx });
 }
 
 /** The current context, or `undefined` outside a request (jobs, boot). */
 export function getContext(): RequestContext | undefined {
-  return als.getStore();
+  return contextStorage.getStore()?.current;
 }
 
 export class NoRequestContextError extends Error {
@@ -34,9 +46,9 @@ export class NotTenantScopedError extends Error {
 
 /** The current context or throw — the default for anything data-touching. */
 export function requireContext(what?: string): RequestContext {
-  const ctx = als.getStore();
-  if (!ctx) throw new NoRequestContextError(what);
-  return ctx;
+  const holder = contextStorage.getStore();
+  if (!holder) throw new NoRequestContextError(what);
+  return holder.current;
 }
 
 /** The current context with a resolved `tenantId`, or throw. */
@@ -46,9 +58,10 @@ export function requireTenantContext(): RequestContext & { tenantId: string } {
   return ctx as RequestContext & { tenantId: string };
 }
 
-/** Test/interceptor helper: replace the context within the current ALS frame. */
+/** Swap the context within the current request (the auth guard enriching the
+ *  bootstrap context with the session's tenant / user / scope / permissions). */
 export function replaceContext(ctx: RequestContext): void {
-  const store = als.getStore();
-  if (!store) throw new NoRequestContextError('replaceContext');
-  als.enterWith(ctx);
+  const holder = contextStorage.getStore();
+  if (!holder) throw new NoRequestContextError('replaceContext');
+  holder.current = ctx;
 }

@@ -8,6 +8,7 @@ export {
 export {
   contextStorage,
   runWithContext,
+  enterContext,
   getContext,
   requireContext,
   requireTenantContext,
