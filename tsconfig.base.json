@@ -1,38 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
-  "display": "Flower SaaS base",
-  "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "moduleDetection": "force",
-
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "noPropertyAccessFromIndexSignature": true,
-    "exactOptionalPropertyTypes": true,
-    "forceConsistentCasingInFileNames": true,
-
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "composite": true,
-    "incremental": true,
-
-    "esModuleInterop": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "verbatimModuleSyntax": false,
-
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-
-    "skipLibCheck": true,
-    "noEmitOnError": true,
-    "pretty": true
-  },
-  "exclude": ["node_modules", "dist", ".next", "build", "coverage"]
+  "display": "Flower SaaS base (re-exports @flower/config/tsconfig/base)",
+  "extends": "@flower/config/tsconfig/base.json"
 }

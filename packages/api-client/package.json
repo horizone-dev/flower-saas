@@ -1,0 +1,36 @@
+{
+  "name": "@flower/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed REST client for /v1 (generated from OpenAPI in later phases). Phase 0 seed: a thin fetch wrapper + the health endpoints.",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "clean": "rimraf dist node_modules .turbo"
+  },
+  "dependencies": {
+    "@flower/shared-types": "workspace:*"
+  },
+  "devDependencies": {
+    "@flower/config": "workspace:*",
+    "eslint": "10.9.1",
+    "rimraf": "6.1.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

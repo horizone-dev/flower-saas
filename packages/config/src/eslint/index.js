@@ -157,25 +157,32 @@ export function flowerConfig(options = {}) {
   if (type === 'pure') {
     config.push({
       files: ['src/**/*.ts'],
+      ignores: ['src/**/*.test.ts'],
       rules: {
+        // No I/O and no non-deterministic sources. Deterministic helpers
+        // (Math.abs / Math.floor / structured clone) stay allowed.
         'no-restricted-imports': [
           'error',
           {
             paths: [
               { name: 'fs', message: 'pure package: no I/O' },
               { name: 'node:fs', message: 'pure package: no I/O' },
-              { name: 'crypto', message: 'pure package: no non-determinism' },
               { name: 'node:crypto', message: 'pure package: no non-determinism' },
             ],
-            patterns: ['@flower/db', '@prisma/*', '**/prisma/*'],
+            patterns: ['@flower/db', '@prisma/*', '**/prisma/*', 'node:*'],
           },
         ],
-        'no-restricted-globals': [
+        'no-restricted-properties': [
           'error',
-          { name: 'Date', message: 'pure package: pass time in explicitly' },
+          { object: 'Math', property: 'random', message: 'pure package: no randomness' },
+          { object: 'Date', property: 'now', message: 'pure package: pass time in explicitly' },
+          { object: 'process', property: 'hrtime', message: 'pure package: no clock access' },
+        ],
+        'no-restricted-syntax': [
+          'error',
           {
-            name: 'Math',
-            message: 'pure package: Math.random is banned; deterministic math only via allowlist',
+            selector: "NewExpression[callee.name='Date'][arguments.length=0]",
+            message: 'pure package: `new Date()` reads the clock — pass time in explicitly',
           },
         ],
       },

@@ -1,8 +1,38 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
-  "display": "@flower/config — base",
-  "extends": "../../../tsconfig.base.json",
+  "display": "@flower/config — base (single source of truth for compiler options)",
   "compilerOptions": {
-    "types": []
-  }
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "force",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "incremental": true,
+
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "pretty": true
+  },
+  "exclude": ["node_modules", "dist", ".next", "build", "coverage"]
 }
