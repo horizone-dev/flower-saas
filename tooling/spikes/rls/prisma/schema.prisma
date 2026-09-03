@@ -1,0 +1,31 @@
+// RLS spike schema (Task 0.6). Two tenant-scoped tables. RLS policies + the
+// non-superuser app role are appended to the baseline migration SQL (sql/rls.sql
+// is applied by the test as superuser after `migrate deploy`).
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model SpikeTenant {
+  id   String     @id @default(uuid()) @db.Uuid
+  name String
+  rows SpikeRow[]
+
+  @@map("spike_tenant")
+}
+
+model SpikeRow {
+  id        String      @id @default(uuid()) @db.Uuid
+  tenantId  String      @map("tenant_id") @db.Uuid
+  secret    String
+  createdAt DateTime    @default(now()) @map("created_at")
+  tenant    SpikeTenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("spike_row")
+}

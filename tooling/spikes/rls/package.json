@@ -1,0 +1,34 @@
+{
+  "name": "spike-rls",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 Task 0.6 — RLS + PgBouncer connection-pooling spike (the HARD security gate). Verdict -> ADR-0010.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "prepare": "prisma generate",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run --no-file-parallelism",
+    "up": "docker compose up -d --wait",
+    "down": "docker compose down -v",
+    "clean": "rimraf node_modules .turbo generated"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@flower/config": "workspace:*",
+    "@types/node": "24.13.3",
+    "@types/pg": "8.23.1",
+    "eslint": "10.9.1",
+    "prisma": "7.10.0",
+    "rimraf": "6.1.3",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

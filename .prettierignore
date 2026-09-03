@@ -6,3 +6,6 @@ build
 coverage
 pnpm-lock.yaml
 packages/db/generated
+tooling/**/*.sql
+packages/db/prisma/migrations/**
+**/*.sql

@@ -1,0 +1,74 @@
+# Phase 0 Task 0.6 — RLS + connection-pooling spike (ADR-0010, the HARD gate).
+#
+# Postgres 17 + two PgBouncer front-ends (transaction pool AND session pool) so the
+# spike can prove tenant isolation holds under BOTH pooling modes, plus a direct
+# connection for a baseline. Isolated compose project — never touches the main
+# stack or the Salon project.
+name: flower-rls-spike
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: flower-rls-spike-pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: spike
+    command:
+      - postgres
+      - -c
+      - log_statement=none
+      - -c
+      - max_connections=100
+    ports:
+      - '55532:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d spike']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  pgbouncer-txn:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    container_name: flower-rls-spike-pgb-txn
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: spike
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: '200'
+      DEFAULT_POOL_SIZE: '5'
+      # small pool on purpose: forces connection reuse so GUC-bleed is exercised
+      ADMIN_USERS: postgres
+    ports:
+      - '55533:5432'
+
+  pgbouncer-session:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    container_name: flower-rls-spike-pgb-session
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: spike
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: session
+      MAX_CLIENT_CONN: '200'
+      # session mode holds a server conn for the whole client session, so the pool
+      # must cover the app's own connection-pool size + concurrency headroom.
+      DEFAULT_POOL_SIZE: '30'
+      ADMIN_USERS: postgres
+    ports:
+      - '55534:5432'

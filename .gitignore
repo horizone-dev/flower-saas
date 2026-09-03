@@ -20,9 +20,9 @@ coverage/
 .env.*
 !.env.example
 
-# Prisma generated client (regenerated on install)
-packages/db/generated/
-packages/db/node_modules/.prisma/
+# Prisma generated client (regenerated on install / `prisma generate`)
+**/generated/client/
+**/node_modules/.prisma/
 
 # Logs
 *.log
