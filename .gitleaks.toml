@@ -1,0 +1,29 @@
+# Flower SaaS — gitleaks config. Extends the default ruleset; adds an allowlist
+# for deliberately-fake values in tests, fixtures and ADR examples. Real secrets
+# never live in the repo (CLAUDE.md rule 38 / SECURITY.md — all external
+# credentials are Platform-Super-Admin-only, KMS-encrypted).
+
+title = "Flower SaaS"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures, dev placeholders and doc examples — not real credentials"
+
+paths = [
+  '''.*\.test\.ts$''',
+  '''.*\.spec\.ts$''',
+  '''.*/fixtures/.*''',
+  '''packages/config/fixtures/.*''',
+  '''docs/decisions/ADR-.*\.md$''',
+  '''\.env\.example$''',
+]
+
+regexes = [
+  # the dev-only JWT secret default (env.ts) + its integration-test sibling
+  '''dev-only-insecure-jwt-secret-change-me-\d+''',
+  '''integration-test-jwt-secret-\d+''',
+  # the fixed argon2id "dummy" digest used for constant-time login (auth.service.ts)
+  '''\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+''',
+]
