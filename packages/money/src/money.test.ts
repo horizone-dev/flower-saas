@@ -115,6 +115,38 @@ describe('Money — allocate (split / partial payments, residual rule)', () => {
     const parts = Money.ofMajor('-10.00', 'AED').allocate([1, 1, 1]);
     expect(sumMoney(parts, 'AED').toString()).toBe('-10.00 AED');
   });
+  it('negative amount + unequal weights — residual by largest remainder (F2)', () => {
+    // -70 / [1,2,3]: exact shares -11.67, -23.33, -35.00. The extra -1 minor unit
+    // must go to the part with the largest fractional shortfall (part 0), not the
+    // one that already divided evenly (part 2).
+    const parts = Money.ofMinor(-70n, 'AED').allocate([1, 2, 3]);
+    expect(parts.map((p) => p.amountMinor)).toEqual([-12n, -23n, -35n]);
+    expect(sumMoney(parts, 'AED').amountMinor).toBe(-70n);
+  });
+  it('negative and positive splits of the same magnitude mirror each other here', () => {
+    const pos = Money.ofMinor(70n, 'AED')
+      .allocate([1, 2, 3])
+      .map((p) => p.amountMinor);
+    const neg = Money.ofMinor(-70n, 'AED')
+      .allocate([1, 2, 3])
+      .map((p) => p.amountMinor);
+    expect(pos).toEqual([12n, 23n, 35n]);
+    expect(neg).toEqual(pos.map((v) => -v));
+  });
+  it('negative equal-weight split spreads the residual, not all onto one part', () => {
+    // -101 / 3 -> -33.67 each: two parts get -34, one gets -33; sums to -101
+    const parts = Money.ofMinor(-101n, 'AED')
+      .allocate([1, 1, 1])
+      .map((p) => p.amountMinor);
+    expect(parts.filter((v) => v === -34n)).toHaveLength(2);
+    expect(parts.filter((v) => v === -33n)).toHaveLength(1);
+    expect(parts.reduce((a, b) => a + b, 0n)).toBe(-101n);
+  });
+  it('3-decimal negative weighted split (KWD) sums exactly', () => {
+    const parts = Money.ofMinor(-1000n, 'KWD').allocate([2, 3, 5]);
+    expect(sumMoney(parts, 'KWD').amountMinor).toBe(-1000n);
+    expect(parts.map((p) => p.amountMinor)).toEqual([-200n, -300n, -500n]);
+  });
   it('rejects a zero weight total', () => {
     expect(() => Money.ofMajor('1.00', 'AED').allocate([0, 0])).toThrow(/weight total/);
   });

@@ -144,6 +144,12 @@ export class Money {
    * Split into `weights.length` parts that sum EXACTLY to this amount. The residual
    * from rounding is distributed one minor unit at a time to the parts with the
    * largest remainder, then by order (deterministic — ADR-0006 residual rule).
+   *
+   * `base` uses floor division (toward −∞), so every remainder is in `[0, total)`
+   * and the residual to hand out is always ≥ 0 — the largest-remainder rule then
+   * behaves identically for positive and negative amounts. (A prior version divided
+   * toward zero and mis-placed the residual on negative amounts with unequal
+   * weights — ultra-review F2.)
    */
   allocate(weights: readonly (bigint | number)[]): Money[] {
     if (weights.length === 0) throw new RangeError('allocate needs at least one weight');
@@ -152,31 +158,34 @@ export class Money {
     const total = w.reduce((a, b) => a + b, 0n);
     if (total === 0n) throw new RangeError('weight total must be > 0');
 
-    const base = w.map((wi) => (this.amountMinor * wi) / total);
-    const remainders = w.map((wi, i) => ({
-      i,
-      rem: this.amountMinor * wi - base[i]! * total,
-    }));
-    let allocated = base.reduce((a, b) => a + b, 0n);
-    let residual = this.amountMinor - allocated;
+    // floor division: total is always > 0, so `q - 1` when the truncated remainder
+    // is negative gives the floor.
+    const floorDiv = (numerator: bigint): bigint => {
+      const q = numerator / total;
+      return numerator % total < 0n ? q - 1n : q;
+    };
 
-    // hand out the residual: +1 (or -1 if negative) to the largest remainders first
-    const step = residual >= 0n ? 1n : -1n;
+    const numer = w.map((wi) => this.amountMinor * wi);
+    const base = numer.map(floorDiv);
+    const remainders = numer.map((n, i) => ({ i, rem: n - base[i]! * total })); // each in [0, total)
+    let residual = this.amountMinor - base.reduce((a, b) => a + b, 0n); // always >= 0
+
+    // hand out the residual: +1 minor unit to the largest remainders first, ties by order
     remainders.sort((a, b) => {
       if (a.rem === b.rem) return a.i - b.i;
       return a.rem > b.rem ? -1 : 1;
     });
     const result = [...base];
     let k = 0;
-    while (residual !== 0n) {
+    while (residual > 0n) {
       const target = remainders[k % remainders.length]!.i;
-      result[target] = result[target]! + step;
-      residual -= step;
+      result[target] = result[target]! + 1n;
+      residual -= 1n;
       k++;
     }
-    allocated = result.reduce((a, b) => a + b, 0n);
-    // invariant
-    if (allocated !== this.amountMinor) {
+
+    // invariant: the parts sum back to the original amount, exactly
+    if (result.reduce((a, b) => a + b, 0n) !== this.amountMinor) {
       throw new Error('allocate invariant violated');
     }
     return result.map((v) => new Money(v, this.currency));

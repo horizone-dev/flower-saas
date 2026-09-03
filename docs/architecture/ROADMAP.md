@@ -78,7 +78,9 @@ Full breakdown: [`../phase-0/PHASE-0-PLAN.md`](../phase-0/PHASE-0-PLAN.md).
   abstraction (email/SMS) + SMS OTP; WA share link; outbox → Redis Stream publisher.
 - **Realtime**: topic model, subscription authorization, resume-from-seq,
   dedup/reorder handling, gateway consumer group; a demo `ping` event proves
-  reconnect semantics.
+  reconnect semantics. Resolve the `seq`-granularity + stale-position questions in
+  [`../phase-2/REALTIME-PROTOCOL-INPUTS.md`](../phase-2/REALTIME-PROTOCOL-INPUTS.md)
+  (ultra-review F8/F9) as part of this.
 - **Security**: WebCrypto keypair activation + DPoP proof; AV + magic-byte +
   signed-URL proxy; audit tamper-evidence job.
 - **Exit**: device lifecycle complete; documents reusable by any owner_type;

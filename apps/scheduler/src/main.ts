@@ -22,7 +22,17 @@ async function main(): Promise<void> {
   );
   const log = createLogger('scheduler', env.LOG_LEVEL, env.NODE_ENV === 'development');
   const connection = createRedis(env.REDIS_HOST, env.REDIS_PORT);
-  await connectRedis(connection);
+
+  // The scheduler's whole job is to register repeatable jobs on Redis-backed
+  // queues. If Redis is unreachable at boot there is nothing useful to do, and
+  // there is no retry / leader-election loop yet (Phase 2). Fail fast so the
+  // orchestrator restarts the process rather than leaving it idle and silent
+  // with no schedules registered — ultra-review F5.
+  if (!(await connectRedis(connection))) {
+    throw new Error(
+      `Redis unreachable at ${env.REDIS_HOST}:${env.REDIS_PORT} — cannot register schedules`,
+    );
+  }
 
   const queues = new Map(
     [...new Set(REPEATABLE_JOBS.map((j) => j.queue))].map(
@@ -40,26 +50,15 @@ async function main(): Promise<void> {
     connection.disconnect();
   });
 
-  const redisOk = await redisHealthy(connection);
-  if (redisOk) {
-    for (const job of REPEATABLE_JOBS) {
-      await queues
-        .get(job.queue)!
-        .upsertJobScheduler(
-          job.schedulerId,
-          { every: job.everyMs },
-          { name: job.jobName, data: {} },
-        );
-    }
+  for (const job of REPEATABLE_JOBS) {
+    await queues
+      .get(job.queue)!
+      .upsertJobScheduler(job.schedulerId, { every: job.everyMs }, { name: job.jobName, data: {} });
   }
 
   log.info(
-    {
-      metricsPort: env.SCHEDULER_METRICS_PORT,
-      jobs: REPEATABLE_JOBS.length,
-      redis: redisOk ? 'ok' : 'down',
-    },
-    redisOk ? 'scheduler started (schedules registered)' : 'scheduler started (waiting for redis)',
+    { metricsPort: env.SCHEDULER_METRICS_PORT, jobs: REPEATABLE_JOBS.length },
+    'scheduler started (schedules registered)',
   );
 }
 

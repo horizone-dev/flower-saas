@@ -1,6 +1,7 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+  - 'tooling/scripts'
   - 'tooling/spikes/*'
 
 # Keep dependency resolution strict and reproducible.

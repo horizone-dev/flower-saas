@@ -65,16 +65,22 @@ export async function connectRedis(redis: Redis, timeoutMs = 5000): Promise<bool
   const status = (): string => redis.status;
   if (status() === 'ready') return true;
   const canConnect = ['wait', 'close', 'end'].includes(status());
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       canConnect
         ? redis.connect()
         : new Promise<void>((resolve) => redis.once('ready', () => resolve())),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs)),
+      new Promise<never>((_, rej) => {
+        timer = setTimeout(() => rej(new Error('timeout')), timeoutMs);
+      }),
     ]);
     return status() === 'ready';
   } catch {
     return false;
+  } finally {
+    // don't leave the timeout timer holding the event loop open on the happy path (F12)
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -84,14 +90,19 @@ export async function redisHealthy(redis: Redis, timeoutMs = 1000): Promise<bool
     const connected = await connectRedis(redis, timeoutMs);
     if (!connected) return false;
   }
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const pong = await Promise.race([
       redis.ping(),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), timeoutMs)),
+      new Promise<never>((_, rej) => {
+        timer = setTimeout(() => rej(new Error('timeout')), timeoutMs);
+      }),
     ]);
     return pong === 'PONG';
   } catch {
     return false;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -112,11 +123,17 @@ export function startHealthServer(
       return;
     }
     if (url === '/readyz') {
-      void checkReady().then((checks) => {
-        const down = Object.values(checks).includes('down');
-        res.writeHead(down ? 503 : 200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ status: down ? 'down' : 'ok', role, checks }));
-      });
+      checkReady()
+        .then((checks) => {
+          const down = Object.values(checks).includes('down');
+          res.writeHead(down ? 503 : 200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ status: down ? 'down' : 'ok', role, checks }));
+        })
+        .catch((err: unknown) => {
+          // a readiness probe must always answer — a throwing check means "not ready" (F11)
+          res.writeHead(503, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ status: 'down', role, error: String(err) }));
+        });
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });

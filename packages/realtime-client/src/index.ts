@@ -4,11 +4,20 @@
  * Phase 0 seed: the pure, deterministic parts — the resume-tracker and the
  * idempotent event reducer. The WebSocket transport (connect / auth / topic
  * subscribe / reconnect) is built in Phase 2.
+ *
+ * Phase 2 protocol work MUST resolve two open questions in the gap/stale logic
+ * below before this is wired to a live gateway — see
+ * `docs/phase-2/REALTIME-PROTOCOL-INPUTS.md` (ultra-review F8 / F9). Do not
+ * "fix" them here in isolation; they depend on the `seq` granularity decision.
  */
 
 export interface RealtimeEvent {
   eventId: string;
-  /** per-tenant monotonic sequence number */
+  /**
+   * per-tenant monotonic sequence number (ARCHITECTURE §13-14). NOTE: whether the
+   * gap check should be per-tenant or per-topic is a Phase 2 decision —
+   * `docs/phase-2/REALTIME-PROTOCOL-INPUTS.md` (F8).
+   */
   seq: number;
   tenantId: string;
   branchId: string;
@@ -52,6 +61,9 @@ export class EventReducer {
   }
 
   offer(e: RealtimeEvent): ApplyDecision {
+    // Phase 2 (F9): the `stale` branch below records the eventId but does not
+    // advance `lastSeqByTopic`, which can later feed a false `gap-needs-resync`.
+    // Resolve alongside the F8 `seq`-granularity decision, not standalone.
     if (this.seenEventIds.has(e.eventId)) return 'duplicate';
 
     const tk = this.topicKey(e);

@@ -29,7 +29,11 @@ FROM deps AS build
 ARG APP
 RUN test -n "$APP" || (echo "APP build-arg is required" && exit 1)
 COPY . .
-RUN pnpm --filter "@flower/${APP}" build \
+# turbo builds the app AND its workspace dependencies in topological order
+# (raw `pnpm --filter <app> build` would build only the app, leaving @flower/db,
+# @flower/service-runtime, … without a dist/ — ultra-review F3). `deploy --prod`
+# then prunes to a self-contained /out with only production dependencies.
+RUN pnpm turbo run build --filter "@flower/${APP}" \
     && pnpm --filter "@flower/${APP}" deploy --prod --legacy /out
 
 # ---- runtime --------------------------------------------------------------

@@ -1,0 +1,17 @@
+{
+  "name": "@flower/tooling-scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Repo dev / verification scripts (Bash + small Node checks). Not shipped; linted like the rest of the monorepo — ultra-review F7.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.9.1",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.12.0"
+  }
+}

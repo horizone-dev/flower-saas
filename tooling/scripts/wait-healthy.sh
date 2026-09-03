@@ -11,15 +11,28 @@ deadline=$(( $(date +%s) + TIMEOUT ))
 echo "waiting up to ${TIMEOUT}s for the flower-saas stack to become healthy..."
 
 while true; do
-  # rows: "<service> <state> <health>"
-  mapfile -t rows < <(docker compose ps --format '{{.Service}} {{.State}} {{.Health}}')
+  # "-a" so the one-shot init still shows after it exits. "|" separated (not
+  # spaces) so an empty .Health field (services without a healthcheck) does not
+  # shift the columns.
+  mapfile -t rows < <(docker compose ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}')
 
   pending=()
   for row in "${rows[@]}"; do
-    read -r svc state health <<<"$row"
+    IFS='|' read -r svc state health exitcode <<<"$row"
     case "$svc" in
       minio-init)
-        [[ "$state" == "exited" ]] || pending+=("$svc:$state") ;;
+        # one-shot: success is "exited" AND exit code 0. A non-zero exit is fatal
+        # (bucket creation failed) — do not report the stack healthy.
+        if [[ "$state" == "exited" && "$exitcode" == "0" ]]; then
+          :
+        elif [[ "$state" == "exited" ]]; then
+          echo "FATAL: minio-init exited ${exitcode:-?} (bucket setup failed):" >&2
+          docker compose logs minio-init >&2 || true
+          exit 1
+        else
+          pending+=("$svc:$state")
+        fi
+        ;;
       *)
         [[ "$health" == "healthy" ]] || pending+=("$svc:${health:-$state}") ;;
     esac

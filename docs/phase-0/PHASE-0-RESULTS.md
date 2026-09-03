@@ -253,6 +253,10 @@ Spike-only: `tooling/spikes/rls/docker-compose.yml` (project `flower-rls-spike`)
 - Real protocol-level `/readyz` checks for redis/storage (currently TCP probes),
   the outbox dispatcher, `ScopedRepository`, the guard pipeline, and real seed
   fixtures are **Phase 1+**, by design.
+- **Post-`phase-0-complete` ultra-review remediation** (a separate commit that does
+  **not** move the `phase-0-complete` tag) — 10 verified findings fixed, 2
+  (realtime protocol) recorded for Phase 2. See
+  [`POST-REVIEW-REMEDIATION.md`](POST-REVIEW-REMEDIATION.md).
 
 ---
 

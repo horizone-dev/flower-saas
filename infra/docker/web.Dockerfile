@@ -34,7 +34,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 USER node
 WORKDIR /app
-# standalone server + the assets Next does NOT bundle into it
+# standalone server + the assets Next does NOT bundle into it.
+# Every app keeps a `public/` dir (a `.gitkeep` where it has no static assets yet)
+# so this COPY is unconditional and never fails — ultra-review F4.
 COPY --chown=node:node --from=build /repo/apps/${APP}/.next/standalone ./
 COPY --chown=node:node --from=build /repo/apps/${APP}/.next/static ./apps/${APP}/.next/static
 COPY --chown=node:node --from=build /repo/apps/${APP}/public ./apps/${APP}/public
