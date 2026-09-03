@@ -195,6 +195,89 @@ export const PLATFORM_PERMISSIONS = [
 
 export type PlatformPermissionKey = (typeof PLATFORM_PERMISSIONS)[number];
 
+/**
+ * Actions gated by fresh step-up MFA (SECURITY.md: money / permission / secret /
+ * attribution-change). Phase 1 subset — the money/attribution keys join as their
+ * domains land.
+ */
+export const STEP_UP_PERMISSIONS: ReadonlySet<string> = new Set<string>([
+  'users:manage',
+  'roles:manage',
+  'settings:tenant:manage',
+  'settings:branch:manage',
+  ...PLATFORM_PERMISSIONS.filter(
+    (k) =>
+      k === 'platform:tenants:manage' ||
+      k === 'platform:tenants:impersonate' ||
+      k === 'platform:limits:manage' ||
+      k === 'platform:entitlements:manage' ||
+      k === 'platform:tenant_users:manage' ||
+      k === 'platform:tenant_roles:manage' ||
+      k === 'platform:secrets:manage',
+  ),
+]);
+
+export function requiresStepUp(key: string): boolean {
+  return STEP_UP_PERMISSIONS.has(key);
+}
+
+/**
+ * Maps a permission key to the feature module that must be entitled for it to be
+ * usable (ARCHITECTURE §48 — "a permission whose module is not entitled is
+ * inert"). A key absent from this map is always available (the Phase 1 foundation
+ * keys). Grows as domains land.
+ */
+export const MODULE_OF_PERMISSION: Readonly<Record<string, string>> = Object.freeze({
+  'customer_web:view': 'customer_web',
+  'customer_web:manage': 'customer_web',
+  'customer_web:catalog:manage': 'customer_web',
+  'customer_web:slots:manage': 'customer_web',
+  'ai:settings:view': 'customer_web_ai',
+  'ai:settings:manage': 'customer_web_ai',
+  'ai:conversations:view': 'customer_web_ai',
+  'ai:conversations:reply': 'customer_web_ai',
+  'ai:handoff:handle': 'customer_web_ai',
+  'recipe:view': 'production_bom',
+  'recipe:manage': 'production_bom',
+  'attendance_device:manage': 'biometric_attendance',
+});
+
+export interface EffectivePermissionInput {
+  /** union of the keys from every role the user holds */
+  rolePermissions: Iterable<string>;
+  /** direct per-user grants: [key, 'ALLOW' | 'DENY'] */
+  directGrants: Iterable<readonly [string, 'ALLOW' | 'DENY']>;
+  /**
+   * Modules entitled for the tenant. A permission whose `MODULE_OF_PERMISSION`
+   * is not in this set is dropped. `null` disables the filter (platform realm).
+   */
+  entitledModules?: ReadonlySet<string> | null;
+}
+
+/**
+ * Pure effective-permission resolution (ARCHITECTURE §9):
+ *   (∪ role permissions ∪ direct ALLOW) − direct DENY, then ∩ entitlement.
+ * **Deny always wins.** The per-request scope intersection happens later, in the
+ * policy engine, against the resolved data scope.
+ */
+export function resolveEffectivePermissions(input: EffectivePermissionInput): Set<string> {
+  const allow = new Set<string>(input.rolePermissions);
+  const deny = new Set<string>();
+  for (const [key, effect] of input.directGrants) {
+    if (effect === 'DENY') deny.add(key);
+    else allow.add(key);
+  }
+  for (const d of deny) allow.delete(d); // deny wins
+
+  if (input.entitledModules) {
+    for (const key of [...allow]) {
+      const mod = MODULE_OF_PERMISSION[key];
+      if (mod !== undefined && !input.entitledModules.has(mod)) allow.delete(key);
+    }
+  }
+  return allow;
+}
+
 const KEY_RE = /^[a-z0-9_]+(?::[a-z0-9_]+){1,2}$/;
 
 export function isPermissionKey(value: string): value is PermissionKey {

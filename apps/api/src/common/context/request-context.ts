@@ -29,6 +29,8 @@ export interface RequestContextInit {
   deviceId?: string | null;
   companyScope?: ScopeSet;
   branchScope?: ScopeSet;
+  /** narrower permission sets in specific branches: branchId -> allowed keys */
+  perBranchOverlay?: ReadonlyMap<string, ReadonlySet<string>>;
   effectivePermissions?: Iterable<string>;
   entitlements?: Iterable<string>;
   planKey?: string | null;
@@ -50,6 +52,7 @@ export class RequestContext {
   readonly deviceId: string | null;
   readonly companyScope: ScopeSet;
   readonly branchScope: ScopeSet;
+  readonly perBranchOverlay: ReadonlyMap<string, ReadonlySet<string>>;
   readonly effectivePermissions: ReadonlySet<string>;
   readonly entitlements: ReadonlySet<string>;
   readonly planKey: string | null;
@@ -69,6 +72,7 @@ export class RequestContext {
     this.deviceId = init.deviceId ?? null;
     this.companyScope = normaliseScope(init.companyScope);
     this.branchScope = normaliseScope(init.branchScope);
+    this.perBranchOverlay = init.perBranchOverlay ?? new Map();
     this.effectivePermissions = new Set(init.effectivePermissions ?? []);
     this.entitlements = new Set(init.entitlements ?? []);
     this.planKey = init.planKey ?? null;
@@ -114,6 +118,7 @@ export class RequestContext {
       deviceId: this.deviceId,
       companyScope: this.companyScope,
       branchScope: this.branchScope,
+      perBranchOverlay: this.perBranchOverlay,
       effectivePermissions: this.effectivePermissions,
       entitlements: this.entitlements,
       planKey: this.planKey,

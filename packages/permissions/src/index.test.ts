@@ -5,6 +5,9 @@ import {
   PERMISSION_GROUP_OF,
   PHASE_1_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
+  STEP_UP_PERMISSIONS,
+  requiresStepUp,
+  resolveEffectivePermissions,
   isPermissionKey,
   isPlatformPermissionKey,
   isWellFormedPermissionKey,
@@ -57,5 +60,70 @@ describe('@flower/permissions registry', () => {
   it('exposes the finance + cash-register groups added in v0.3', () => {
     expect(PERMISSIONS.finance).toContain('financial_reports:view');
     expect(PERMISSIONS.cashRegister).toContain('z_report:close');
+  });
+});
+
+describe('step-up', () => {
+  it('gates the Phase 1 sensitive keys', () => {
+    expect(requiresStepUp('users:manage')).toBe(true);
+    expect(requiresStepUp('roles:manage')).toBe(true);
+    expect(requiresStepUp('platform:secrets:manage')).toBe(true);
+    expect(requiresStepUp('platform:tenants:impersonate')).toBe(true);
+    expect(requiresStepUp('users:view')).toBe(false);
+    expect(requiresStepUp('audit:view')).toBe(false);
+  });
+  it('never gates a plain read', () => {
+    for (const k of STEP_UP_PERMISSIONS) expect(k).not.toMatch(/:(view|list)$/);
+  });
+});
+
+describe('resolveEffectivePermissions', () => {
+  const grants = (
+    ...gs: [string, 'ALLOW' | 'DENY'][]
+  ): readonly (readonly [string, 'ALLOW' | 'DENY'])[] => gs;
+
+  it('unions role permissions', () => {
+    const eff = resolveEffectivePermissions({
+      rolePermissions: ['users:view', 'roles:manage'],
+      directGrants: [],
+    });
+    expect([...eff].sort()).toEqual(['roles:manage', 'users:view']);
+  });
+
+  it('a direct ALLOW adds a key', () => {
+    const eff = resolveEffectivePermissions({
+      rolePermissions: ['users:view'],
+      directGrants: grants(['audit:view', 'ALLOW']),
+    });
+    expect(eff.has('audit:view')).toBe(true);
+  });
+
+  it('DENY always wins — over a role and over an ALLOW', () => {
+    const eff = resolveEffectivePermissions({
+      rolePermissions: ['users:manage', 'users:view'],
+      directGrants: grants(['users:manage', 'DENY'], ['users:view', 'ALLOW']),
+    });
+    expect(eff.has('users:manage')).toBe(false);
+    expect(eff.has('users:view')).toBe(true);
+  });
+
+  it('drops a permission whose module is not entitled', () => {
+    const eff = resolveEffectivePermissions({
+      rolePermissions: ['users:view', 'customer_web:manage', 'recipe:manage'],
+      directGrants: [],
+      entitledModules: new Set(['customer_web']),
+    });
+    expect(eff.has('customer_web:manage')).toBe(true); // entitled
+    expect(eff.has('recipe:manage')).toBe(false); // production_bom not entitled
+    expect(eff.has('users:view')).toBe(true); // foundation key — no module gate
+  });
+
+  it('null entitledModules disables the filter (platform realm)', () => {
+    const eff = resolveEffectivePermissions({
+      rolePermissions: ['recipe:manage'],
+      directGrants: [],
+      entitledModules: null,
+    });
+    expect(eff.has('recipe:manage')).toBe(true);
   });
 });
