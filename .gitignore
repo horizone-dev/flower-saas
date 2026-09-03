@@ -48,3 +48,7 @@ Thumbs.db
 # Docker / local data volumes
 infra/docker/data/
 *.pid
+
+# generated scan artifacts
+sbom*.json
+trivy-results*

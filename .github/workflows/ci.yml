@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TURBO_TELEMETRY_DISABLED: '1'
+  NEXT_TELEMETRY_DISABLED: '1'
+  DO_NOT_TRACK: '1'
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+
+jobs:
+  # ── Gate 1: correctness (typecheck · lint · unit + integration · build) ──────
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable corepack (pins pnpm from package.json)
+        run: corepack enable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -w typecheck
+
+      - name: Lint (boundaries + no-raw-prisma + route-permission + no-scope-from-request)
+        run: pnpm -w lint
+
+      - name: Unit + integration tests
+        # includes @flower/db (Testcontainers Postgres) and spike-rls
+        # (PgBouncer). Docker is available on ubuntu-latest. Run Docker-heavy
+        # test tasks with limited concurrency so the runner does not thrash.
+        run: pnpm turbo run test --concurrency=2
+
+      - name: Build (every app + package)
+        run: pnpm -w build
+
+      - name: Negative-test — boundary + scope violation must fail lint
+        run: pnpm --filter @flower/config test:negative
+
+  # ── Gate 2: supply-chain & secret scanning ─────────────────────────────────
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans history
+
+      - name: SBOM (CycloneDX, via Syft — understands pnpm-lock.yaml)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          artifact-name: sbom.cdx.json
+
+      - name: Dependency vulnerability scan (osv-scanner)
+        uses: google/osv-scanner-action/osv-scanner-action@v2.0.2
+        with:
+          scan-args: |-
+            --lockfile=pnpm-lock.yaml
+            --recursive
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+
+      - name: Trivy — Dockerfile misconfiguration
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: infra/docker
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Trivy — filesystem vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0' # report-only for now; tighten during hardening (Phase 10)
