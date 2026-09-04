@@ -15,6 +15,22 @@ describe('loadConfig', () => {
     expect(cfg.REDIS_PORT).toBe(6380);
   });
 
+  it('has explicit idempotency defaults, coercible from the environment', () => {
+    const cfg = loadConfig({});
+    expect(cfg.IDEMPOTENCY_TTL_SECONDS).toBe(60 * 60 * 24);
+    expect(cfg.IDEMPOTENCY_STALE_LOCK_SECONDS).toBe(120);
+    expect(cfg.IDEMPOTENCY_MAX_SNAPSHOT_BYTES).toBe(64 * 1024);
+    const overridden = loadConfig({
+      IDEMPOTENCY_TTL_SECONDS: '3600',
+      IDEMPOTENCY_STALE_LOCK_SECONDS: '30',
+      IDEMPOTENCY_MAX_SNAPSHOT_BYTES: '4096',
+    });
+    expect(overridden.IDEMPOTENCY_TTL_SECONDS).toBe(3600);
+    expect(overridden.IDEMPOTENCY_STALE_LOCK_SECONDS).toBe(30);
+    expect(overridden.IDEMPOTENCY_MAX_SNAPSHOT_BYTES).toBe(4096);
+    expect(() => loadConfig({ IDEMPOTENCY_TTL_SECONDS: '0' })).toThrow(EnvValidationError);
+  });
+
   it('fails fast on an invalid value', () => {
     expect(() => loadConfig({ NODE_ENV: 'staging' })).toThrow(EnvValidationError);
     expect(() => loadConfig({ API_PORT: '-1' })).toThrow(EnvValidationError);

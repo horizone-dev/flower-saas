@@ -357,50 +357,74 @@ a different `principal_id` (FC-2).
 `@Idempotent({ scope })` where `scope` is the canonical operation name (not the
 raw path). Flow:
 
-1. Read `Idempotency-Key` (uuid, required on decorated routes).
-2. **Identity (FC-2):** `(tenant_id, scope, principal_id, key)` where
-   `principal_id = ctx.userId ?? ctx.platformUserId` (the stable authenticated
-   principal — a legitimate retry after re-login still dedupes; a _different_
-   principal cannot be handed this principal's response). `request_hash =
-sha256(method + canonical path + scope + principal_id + normalized body)`.
-   **No raw JWT / refresh token / cookie / secret / credential** enters the hash.
-3. Upsert on the unique key:
-   - **new row** → `PENDING`, `locked_at = now()`; run the handler; store a
-     **field-allowlisted** `response_snapshot` (never `Set-Cookie`,
-     `Authorization`, `*token*`, `*secret*`, `*password*`, `*credential*`) +
-     `http_status`; mark `DONE`.
-   - existing `DONE` + **same** `request_hash` → return the stored snapshot +
-     status.
-   - existing + **different** `request_hash` → `409 IDEMPOTENCY_KEY_REUSED`.
-   - existing `PENDING` **and** `locked_at > now() - STALE_THRESHOLD` (a live
-     concurrent request) → `409 IDEMPOTENCY_IN_PROGRESS`.
-   - existing `PENDING` **and** `locked_at <= now() - STALE_THRESHOLD` (**stale —
-     FC-2**) → take over: `UPDATE … SET locked_at = now() WHERE status = 'PENDING'
-AND locked_at = <observed>` (compare-and-swap); if it wins, **re-execute the
-     handler** (the underlying domain op is itself transactional/idempotent — its
-     prior partial attempt either committed or rolled back); store the result.
-     **No permanent dead key** — stale locks are recoverable and the TTL sweep
-     removes expired rows.
+1. Read `Idempotency-Key` (8–200 chars of `[A-Za-z0-9._~:-]`, required on decorated
+   routes → `400 IDEMPOTENCY_KEY_MISSING` / `IDEMPOTENCY_KEY_INVALID`).
+2. **Identity (FC-2):** `(tenant_id, scope, principal_id, key)`. `principal_id` is
+   the authenticated **tenant user** (`ctx.userId`); idempotency requires a
+   tenant-realm user (a platform / no-tenant request → `500
+IDEMPOTENCY_MISCONFIGURED`, which also catches an accidentally-`@Public` or
+   platform route). `request_hash = sha256(canonical({ method, route pattern,
+path params, query, scope, tenant, principal, body }))` — object-key order and
+   whitespace do not matter, array order does. **No raw JWT / refresh token /
+   cookie / secret / credential / header** enters the hash.
+3. `acquire` (one `runScoped` txn → RLS confines it to the tenant):
+   - `DELETE` an expired row for this identity first (constraint 8 — never blocks
+     a retry).
+   - `INSERT … ON CONFLICT DO NOTHING RETURNING "lockedAt"::text` — the returned
+     `lockedAt` (microsecond precision) is this request's **owner token**.
+   - if the insert won → **run the handler**.
+   - else `SELECT` the existing row:
+     - `DONE` + same hash → **replay** the stored `http_status` + scrubbed body
+       (header `Idempotency-Replayed: true`). If the body was not cached
+       (oversize / stream / non-serialisable) → `409
+IDEMPOTENCY_REPLAY_UNAVAILABLE` (the mutation is still protected).
+     - any-status + **different** hash → `409 IDEMPOTENCY_KEY_REUSED`.
+     - `PENDING`, not yet stale → `409 IDEMPOTENCY_IN_PROGRESS` (client retries).
+     - `PENDING`, **stale** (`now() - lockedAt > STALE_LOCK`) + same hash → an
+       atomic CAS takeover (`UPDATE … SET lockedAt = clock_timestamp() WHERE
+status='PENDING' AND lockedAt::text = <observed> AND now()-lockedAt >
+STALE_LOCK`) — exactly one concurrent reclaimer wins; the loser gets
+       `IN_PROGRESS`. **No permanent dead key.**
+4. On a **2xx** handler result → `markDone` (PENDING→DONE, `WHERE lockedAt::text =
+<my owner token>` so a stale-reclaimed row is never clobbered), storing a
+   **field-allowlisted** snapshot (redacts `*token*` / `*secret*` / `*password*` /
+   `*credential*` / `authorization` / `cookie` / … in camel/snake/kebab case;
+   response **headers are never captured**, so `Set-Cookie` cannot leak; a body
+   over `IDEMPOTENCY_MAX_SNAPSHOT_BYTES` or a stream/binary/circular body → key
+   still `DONE` but `response_snapshot = null`).
+5. On a **non-2xx / thrown** result → `release` (delete the PENDING row, owner-token
+   scoped) so a retry re-executes. **A transient 5xx is never cached; a failed
+   transaction never leaves a falsely-DONE key** (only a 2xx after the handler's
+   own txn committed marks DONE).
 
-`STALE_THRESHOLD` is config (default ~ 2 min). TTL sweep + the stale metric are
-scheduler jobs (run by 2.3's scheduler).
+Config: `IDEMPOTENCY_TTL_SECONDS` (24h), `IDEMPOTENCY_STALE_LOCK_SECONDS` (120),
+`IDEMPOTENCY_MAX_SNAPSHOT_BYTES` (64 KiB). TTL sweep (`sweepExpired`) is provided
+and wired to the scheduler in task 2.3.
 
 **Never applied to:** `/v1/auth/*` (login, mfa/verify, refresh, logout, step-up,
-set-password), the `provider-credentials` routes. A test asserts no auth/secret
-route is decorated and that a snapshot never contains a token/secret-shaped string.
+set-password), the `provider-credentials` / secret routes. A **bootstrap
+assertion** (`assertNoIdempotencyOnCredentialRoutes`, called from `main.ts`)
+refuses to start if a decorated route matches an `auth|login|logout|token|refresh|
+mfa|password|reset|provider-credentials|secret` path family; the interceptor also
+rejects such a path at request time.
 
-**Tests (Testcontainers pg):**
+**Tests (unit + Testcontainers pg):**
 
-- replay same key+hash → cached, handler runs once; different hash → 409.
-- **FC-2 cross-principal:** principal A stores a response under key K; principal B
-  (same tenant) sends key K → B gets a **fresh execution**, never A's response.
-- N concurrent same-(principal,key) → exactly one execution; others get
-  409-in-progress, then the cached result.
-- **FC-2 stale recovery:** start a decorated request, kill the process before
-  completion (row left `PENDING`); after `STALE_THRESHOLD`, a retry **takes over,
-  re-executes, completes**; no dead key remains; the TTL sweep later clears it.
-- tenant B's key never collides with tenant A's; snapshot scrub (no token/secret
-  substrings); auth routes carry no decorator.
+- canonical-hash unit (key/whitespace insensitivity, array order sensitivity,
+  method case, tenant/principal/scope/route/param/query separation).
+- snapshot unit (redaction in camel/snake case, size limit, Buffer/stream/circular
+  → not stored).
+- integration (15): missing/invalid key → 400; replay (handler runs once);
+  semantically-equal body still replays; different hash → 409; **N=8 concurrent
+  identical → exactly one execution + one DB mutation, 7×`IN_PROGRESS`, a later
+  retry replays**; transient 5xx not cached (row dropped, retry re-executes); 4xx
+  not cached; **stale-PENDING reclaimed by exactly one of two concurrent
+  reclaimers → one mutation**; an expired stored result does not block a fresh
+  retry; **snapshot scrubs secrets, keeps safe fields**; oversize body not cached
+  but mutation protected; **tenant A's key never affects tenant B** (RLS);
+  **user A's stored response never replays to user B**; an undecorated route
+  ignores the header; the credential-route startup guard throws for a bad route.
+- full `@flower/api` suite unchanged (additive).
 
 **Gate:** HG-IDEM.
 

@@ -7,6 +7,7 @@ import { AppModule } from './app.module.js';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter.js';
 import { installRequestContext } from './common/context/index.js';
 import { assertEveryRouteDeclaresIntent } from './common/auth/index.js';
+import { assertNoIdempotencyOnCredentialRoutes } from './common/idempotency/index.js';
 import { rootLogger } from './common/logger/logger.js';
 import { loadConfig } from './config/env.js';
 
@@ -64,6 +65,8 @@ async function bootstrap(): Promise<void> {
 
   // hard gate G8 — refuse to start if any route lacks @RequirePermission / @Public
   assertEveryRouteDeclaresIntent(app);
+  // task 2.2 — refuse to start if @Idempotent is on an auth / credential route
+  assertNoIdempotencyOnCredentialRoutes(app);
 
   const openapi = new DocumentBuilder()
     .setTitle('Flower SaaS API')

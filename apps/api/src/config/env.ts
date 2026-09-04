@@ -44,6 +44,22 @@ const envSchema = z.object({
   AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   AUTH_LOGIN_LOCKOUT_SECONDS: z.coerce.number().int().positive().default(900),
 
+  // Idempotency store (Phase 2-core task 2.2). Opt-in per route via `@Idempotent`.
+  // TTL: how long a stored result stays replayable. STALE_LOCK: after this long a
+  // crashed PENDING key is reclaimable. MAX_SNAPSHOT_BYTES: a larger 2xx body is
+  // not cached (the key still transitions to DONE; a replay says so).
+  IDEMPOTENCY_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60 * 60 * 24),
+  IDEMPOTENCY_STALE_LOCK_SECONDS: z.coerce.number().int().positive().default(120),
+  IDEMPOTENCY_MAX_SNAPSHOT_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(64 * 1024),
+
   // Browser origins allowed to call the API (the POS PWA — Bearer for protected
   // calls, plus the HttpOnly refresh cookie on `/v1/auth/*`). Comma separated,
   // exact match, never `*`. Empty → CORS disabled. Production MUST set real

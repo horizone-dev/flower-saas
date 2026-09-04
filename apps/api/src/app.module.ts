@@ -3,6 +3,7 @@ import { ConfigModule } from './config/config.module.js';
 import { DbModule } from './common/db/db.module.js';
 import { RedisModule } from './common/redis/redis.module.js';
 import { AuditModule } from './common/audit/audit.module.js';
+import { IdempotencyModule } from './common/idempotency/index.js';
 import { PipelineModule } from './common/auth/index.js';
 import { AccessModule } from './modules/access/access.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
@@ -22,6 +23,7 @@ import { HealthModule } from './health/health.module.js';
     DbModule,
     RedisModule,
     AuditModule,
+    IdempotencyModule,
     PipelineModule,
     AccessModule,
     PlatformModule,
