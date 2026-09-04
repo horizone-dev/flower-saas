@@ -1,22 +1,32 @@
 /**
- * Realtime client primitives (ARCHITECTURE §13-14, ADR-0009).
+ * Realtime client primitives (ARCHITECTURE §13-14, ADR-0009, ADR-0017).
  *
  * Phase 0 seed: the pure, deterministic parts — the resume-tracker and the
  * idempotent event reducer. The WebSocket transport (connect / auth / topic
- * subscribe / reconnect) is built in Phase 2.
+ * subscribe / reconnect) is built in Phase 2-core task 2.5; this reducer's logic
+ * is rewritten against the frozen acceptance suite in task 2.6.
  *
- * Phase 2 protocol work MUST resolve two open questions in the gap/stale logic
- * below before this is wired to a live gateway — see
- * `docs/phase-2/REALTIME-PROTOCOL-INPUTS.md` (ultra-review F8 / F9). Do not
- * "fix" them here in isolation; they depend on the `seq` granularity decision.
+ * The F8/F9 open questions are now RESOLVED — `docs/decisions/ADR-0017.md`
+ * (2026-09-04). Summary of what task 2.6 must implement here:
+ *   - the resume cursor is the Redis Stream entry id, NOT `seq`;
+ *   - `seq` is per-tenant-global, a logical ordering / diagnostic value only —
+ *     there is NO per-topic arithmetic gap test (that was F8);
+ *   - the stream position advances for EVERY consumed event, including
+ *     `duplicate` / `stale` (that was F9);
+ *   - resync is triggered by retention position (stored id below the stream's
+ *     retained floor) + the heartbeat high-water mark, not `DEFAULT_MAX_SEQ_GAP`.
+ * The code below is unchanged in task 2.0 (docs-only); it still carries the
+ * Phase-0 gap logic and MUST NOT be relied on until task 2.6.
  */
 
 export interface RealtimeEvent {
   eventId: string;
   /**
-   * per-tenant monotonic sequence number (ARCHITECTURE §13-14). NOTE: whether the
-   * gap check should be per-tenant or per-topic is a Phase 2 decision —
-   * `docs/phase-2/REALTIME-PROTOCOL-INPUTS.md` (F8).
+   * per-tenant-global monotonic sequence number (ARCHITECTURE §13-14, ADR-0017).
+   * Assigned ONCE by the outbox dispatcher and immutable — a crash-induced
+   * re-publish carries the identical `seq`. It is a logical ordering / diagnostic
+   * value and the heartbeat high-water source; it is NOT the resume cursor (that
+   * is the Redis Stream entry id) and NOT an arithmetic gap-test input.
    */
   seq: number;
   tenantId: string;
@@ -31,7 +41,11 @@ export interface RealtimeEvent {
 
 export type ApplyDecision = 'applied' | 'duplicate' | 'stale' | 'gap-needs-resync';
 
-/** How far behind `seq` a client may fall before a full REST resync is required. */
+/**
+ * Phase-0 seed value only. Per ADR-0017 this is RETIRED as the primary resync
+ * trigger (task 2.6): resync is retention-based, not a per-topic `seq` delta.
+ * May survive only as a defensive sanity ceiling.
+ */
 export const DEFAULT_MAX_SEQ_GAP = 500;
 
 /**
@@ -61,9 +75,13 @@ export class EventReducer {
   }
 
   offer(e: RealtimeEvent): ApplyDecision {
-    // Phase 2 (F9): the `stale` branch below records the eventId but does not
-    // advance `lastSeqByTopic`, which can later feed a false `gap-needs-resync`.
-    // Resolve alongside the F8 `seq`-granularity decision, not standalone.
+    // TASK 2.6 (ADR-0017): rewrite this method —
+    //   * drop the per-topic `prevSeq + maxSeqGap` gap test entirely (F8);
+    //   * advance the stream position for the `stale` and `duplicate` paths too
+    //     (F9 — "seeing an event != applying its payload");
+    //   * the position marker becomes the Redis Stream entry id, tracked by the
+    //     transport layer; `versionByResource` still gates payload application.
+    // Until then this still carries the Phase-0 logic and is not wired live.
     if (this.seenEventIds.has(e.eventId)) return 'duplicate';
 
     const tk = this.topicKey(e);

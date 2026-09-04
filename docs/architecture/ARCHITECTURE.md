@@ -490,16 +490,26 @@ operations, operate on the same authoritative branch data and see each other's
 changes within ~1–2 seconds. Realtime is an accelerator; the backend is the source
 of truth.
 
-**Pipeline:** PostgreSQL (write + outbox in 1 txn) → outbox dispatch (`SKIP LOCKED`
-poll) → Redis Stream (per tenant, retained 24h) → realtime gateway (stateless,
-consumer group) → POS-01/02/03 + Owner/manager clients. The client tracks `last_seq`
-per topic → on reconnect, replay from the Redis Stream; if beyond retention → full
-REST resync.
+**Pipeline** (refined in [ADR-0017](../decisions/ADR-0017.md), 2026-09-04):
+PostgreSQL (write + outbox in 1 txn) → outbox dispatch (`SKIP LOCKED` poll;
+assigns `seq` once, persists it before publish) → **durable Redis Stream per
+tenant** (`rt:stream:{tenantId}`, ≈ 24h time-based retention — _not_ a `MAXLEN`
+guarantee) → **realtime relay** (one logical consumer of the stream) → **Redis
+Pub/Sub** (`rt:live:{tenantId}` — live multi-gateway fanout) → every realtime
+gateway instance → POS-01/02/03 + Owner/manager clients. A gateway **consumer
+group is not the socket-broadcast path** (a consumer group would split events
+across instances). Live delivery is **at-least-once**; duplicates are suppressed
+by `event_id`. **Resume/replay always reads the durable Stream**; the client's
+resume cursor is the **Redis Stream entry ID**, and on reconnect it replays from
+that id — if the id is below the stream's retained floor → full REST resync.
 
 **Event model:** every event carries
-`{ event_id, seq (per tenant, monotonic), tenant_id, branch_id, type, resource_type,
-resource_id, resource_version, occurred_at, actor_summary }`. Payload is a small
-summary; the client refetches the resource for full detail. Types:
+`{ event_id, seq (per tenant, monotonic — a logical ordering / diagnostic value,
+not the resume cursor), tenant_id, branch_id, type, resource_type, resource_id,
+resource_version, occurred_at, actor_summary }`. `event_id` and `seq` are assigned
+**once** and are immutable — a crash-induced re-publish carries the identical
+values. Payload is a small summary; the client refetches the resource for full
+detail. Types:
 `order.created · order.updated · order.status_changed · payment.updated ·
 customer.updated · inventory.changed · inventory.reservation_changed ·
 online_order.created · production.updated · staff.updated · attendance.updated ·
@@ -511,14 +521,14 @@ gateway resolves the session → tenant + branch scope, and only lets it subscri
 server-side. On token refresh the subscription set is re-evaluated; on session
 revocation the socket closes immediately (Redis pub/sub to all gateway instances).
 
-| Concern                             | Handling                                                                                                                                                                                      |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Reconnect / missed events           | Client stores `last_seq` per topic; on reconnect it sends them; the gateway replays from the Redis Stream. Beyond 24h / N-event retention → full REST resync of the affected lists.           |
-| Duplicates                          | `event_id` + `seq`; the client reducer is idempotent (apply-once by id).                                                                                                                      |
-| Out-of-order                        | Each event carries `resource_version`; the client applies an update only if newer, else refetches.                                                                                            |
-| Stale client state                  | A heartbeat carries the current tenant `seq` high-water mark; a client far behind triggers a resync. On tab focus after sleep → resync.                                                       |
-| Server restart                      | Gateway instances are stateless; events live in the outbox + Redis Stream; a restarted dispatcher resumes from its committed offset (consumer group).                                         |
-| Multiple backend instances (future) | Redis Stream consumer groups distribute delivery; the outbox dispatcher runs as a single active leader (advisory lock) or an idempotent consumer group — publish is exactly-effectively-once. |
+| Concern                    | Handling                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reconnect / missed events  | Client stores the last **Redis Stream entry id** it processed; on reconnect the gateway replays from that id (`XRANGE`, filtered to authorized topics). If the id is below the stream's retained floor (≈ 24h time-based) → full REST resync of the affected lists, then position = current stream tail. **No per-topic arithmetic `seq` gap test** (that was the F8 bug — [ADR-0017](../decisions/ADR-0017.md)). |
+| Duplicates                 | `event_id`; the client reducer is idempotent (apply-once by id). Live Pub/Sub delivery is at-least-once, so dedup is mandatory.                                                                                                                                                                                                                                                                                   |
+| Out-of-order               | Each event carries `resource_version`; the client applies an update only if newer, else refetches. The **stream position advances for every consumed event** — including `stale`/`duplicate` (fixes F9) — so a stale event never feeds a false gap.                                                                                                                                                               |
+| Stale client state         | A heartbeat carries the tenant `seq` high-water mark + the current stream tail id; a client far behind resyncs. On tab focus after sleep → check the stored id against the stream; resync if beyond retention.                                                                                                                                                                                                    |
+| Server restart             | Gateway instances are stateless; events live in the outbox + Redis Stream; the relay resumes from its consumer-group offset. `seq`/`event_id` immutability makes a re-publish after a dispatcher crash safe (identical values).                                                                                                                                                                                   |
+| Multiple backend instances | The relay's own consumer group scales the stream→Pub/Sub step; every gateway instance `SUBSCRIBE`s to the Pub/Sub channel, so all instances get every event. The outbox dispatcher runs as a single active leader per tenant (advisory lock) so `seq` is strictly increasing. Publish is **at-least-once; effect is effectively-once** (idempotent consumers keyed on `event_id`).                                |
 
 Transport: WebSocket (SSE fallback for restrictive networks). `packages/realtime-client`
 encapsulates subscribe / resume / dedup / backoff so all four apps behave identically.
