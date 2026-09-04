@@ -2,9 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { runPlatform, type ScopedTx } from '@flower/db';
 import { DbService } from '../data/index.js';
 import { getContext } from '../context/index.js';
+import { AUDITABLE_ACTIONS, type AuditableAction } from './actions.js';
 
 export interface AuditRecordInput {
-  action: string;
+  /** must be a registered auditable action (`common/audit/actions.ts`) */
+  action: AuditableAction;
   resourceType: string;
   resourceId?: string | null;
   tenantId?: string | null;
@@ -14,8 +16,11 @@ export interface AuditRecordInput {
   reason?: string | null;
   before?: unknown;
   after?: unknown;
-  /** override — normally taken from the request context */
+  /** overrides — normally taken from the request context (needed when the write
+   *  happens outside the request's async-context, e.g. a post-response interceptor) */
+  actorUserId?: string | null;
   actorPlatformUserId?: string | null;
+  actorAccountType?: string | null;
   impersonatorPlatformUserId?: string | null;
 }
 
@@ -34,6 +39,11 @@ export class AuditWriter {
 
   async record(tx: ScopedTx, input: AuditRecordInput): Promise<void> {
     const ctx = getContext();
+    // defence in depth — the type already constrains this, but a cast at a call
+    // site must not slip an unregistered action past G12.
+    if (!(input.action in AUDITABLE_ACTIONS)) {
+      throw new Error(`audit: "${input.action}" is not a registered auditable action`);
+    }
     await tx.auditLog.create({
       data: {
         action: input.action,
@@ -43,9 +53,9 @@ export class AuditWriter {
         companyId: input.companyId ?? null,
         branchId: input.branchId ?? null,
         posTerminalId: input.posTerminalId ?? ctx?.posTerminalId ?? null,
-        actorUserId: ctx?.userId ?? null,
+        actorUserId: input.actorUserId ?? ctx?.userId ?? null,
         actorPlatformUserId: input.actorPlatformUserId ?? ctx?.platformUserId ?? null,
-        actorAccountType: ctx?.accountType ?? 'SYSTEM',
+        actorAccountType: input.actorAccountType ?? ctx?.accountType ?? 'SYSTEM',
         impersonatorPlatformUserId:
           input.impersonatorPlatformUserId ?? ctx?.impersonatorPlatformUserId ?? null,
         reason: input.reason ?? null,

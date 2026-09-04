@@ -1,8 +1,8 @@
 import { Controller, Delete, Get, HttpCode, NotFoundException, Param } from '@nestjs/common';
 import { PlatformRealm } from '../../common/auth/pipeline.decorators.js';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
-import { Ctx, type RequestContext } from '../../common/context/index.js';
 import { SessionService } from './session.service.js';
+import { AuthService } from './auth.service.js';
 
 /**
  * `/v1/platform/tenants/:tenantId/sessions` — the Super Admin sessions viewer +
@@ -13,7 +13,10 @@ import { SessionService } from './session.service.js';
 @Controller('platform/tenants/:tenantId/sessions')
 @PlatformRealm()
 export class PlatformSessionsController {
-  constructor(private readonly sessions: SessionService) {}
+  constructor(
+    private readonly sessions: SessionService,
+    private readonly auth: AuthService,
+  ) {}
 
   @Get()
   @RequirePermission('platform:sessions:revoke')
@@ -24,16 +27,14 @@ export class PlatformSessionsController {
   @Delete(':sessionId')
   @RequirePermission('platform:sessions:revoke')
   @HttpCode(200)
-  async revoke(
-    @Param('tenantId') tenantId: string,
-    @Param('sessionId') sessionId: string,
-    @Ctx() ctx: RequestContext,
-  ) {
+  async revoke(@Param('tenantId') tenantId: string, @Param('sessionId') sessionId: string) {
     const session = await this.sessions.get(sessionId);
     if (!session || session.tenantId !== tenantId) {
       throw new NotFoundException('session not found');
     }
-    await this.sessions.revoke(sessionId, `revoked by platform ${ctx.platformUserId ?? 'admin'}`);
+    // routes through AuthService so the `session.revoked` audit row + the
+    // login_security_event are written (task 1.14).
+    await this.auth.revokeSession(sessionId, null);
     return { status: 'revoked' };
   }
 }

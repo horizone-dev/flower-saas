@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { runPlatform, type PrismaClient } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
+import { OutboxWriter } from '../../common/audit/outbox.writer.js';
 import { SYSTEM_ROLE_TEMPLATES } from './system-roles.js';
 
 export interface ProvisionInput {
@@ -31,7 +32,10 @@ export interface ProvisionResult {
 
 @Injectable()
 export class ProvisioningRepository {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly outbox: OutboxWriter,
+  ) {}
   private get c(): PrismaClient {
     return this.db.platformClient();
   }
@@ -206,14 +210,12 @@ export class ProvisioningRepository {
 
         // external effects (owner invite, etc.) go via the outbox — never a call
         // inside this transaction (amendment 3). The dispatcher is Phase 2.
-        await tx.outbox.create({
-          data: {
-            tenantId,
-            aggregateType: 'tenant',
-            aggregateId: tenantId,
-            eventType: 'tenant.provisioned',
-            payload: { tenantId, ownerUserId, ownerEmail: input.ownerEmail },
-          },
+        await this.outbox.enqueue(tx, {
+          tenantId,
+          aggregateType: 'tenant',
+          aggregateId: tenantId,
+          eventType: 'tenant.provisioned',
+          payload: { tenantId, ownerUserId, ownerEmail: input.ownerEmail },
         });
 
         await tx.tenant.update({ where: { id: tenantId }, data: { status: 'ACTIVE' } });

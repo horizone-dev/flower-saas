@@ -5,6 +5,7 @@ import { APP_CONFIG, type AppConfig } from '../../config/env.js';
 import { DomainError } from '../../common/errors/domain-error.js';
 import { PasswordService } from '../../common/crypto/password.service.js';
 import { TotpService } from '../../common/crypto/totp.service.js';
+import { AuditWriter } from '../../common/audit/audit.writer.js';
 import type { MfaLevel } from '../../common/context/index.js';
 import { RefreshReuseError, RefreshInvalidError } from './refresh-token.store.js';
 import { IdentityRepository } from './identity.repository.js';
@@ -45,6 +46,7 @@ export class AuthService {
     private readonly platformIdentity: PlatformIdentityRepository,
     private readonly sessions: SessionService,
     private readonly bruteForce: BruteForceService,
+    private readonly audit: AuditWriter,
   ) {
     this.mfaKey = new TextEncoder().encode(config.AUTH_JWT_SECRET + ':mfa');
   }
@@ -270,6 +272,11 @@ export class AuthService {
       ip: null,
       userAgent: null,
       detail: { targetSessionId },
+    });
+    await this.audit.emit({
+      action: 'session.revoked',
+      resourceType: 'session',
+      resourceId: targetSessionId,
     });
   }
 

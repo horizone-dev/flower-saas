@@ -485,6 +485,7 @@ describe('cross-tenant isolation probe suite', () => {
       'PUT /v1/platform/plans/versions/:planVersionId/limits',
       'GET /v1/platform/tenants',
       'GET /v1/platform/audit',
+      'GET /v1/platform/audit/security-events',
       'POST /v1/platform/tenants',
     ]);
     const PROBED_PREFIXES = [

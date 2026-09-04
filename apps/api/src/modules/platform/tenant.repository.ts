@@ -17,7 +17,7 @@ export class TenantRepository {
   /** Flip a tenant's status + write the audit row in one transaction. */
   async setStatus(
     tenantId: string,
-    action: string,
+    action: 'suspend' | 'resume' | 'terminate',
     next: string,
     actorPlatformUserId: string | null,
     reason: string | undefined,

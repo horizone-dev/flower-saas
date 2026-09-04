@@ -1,13 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { runPlatform, runScoped, type PrismaClient } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
+import { AuditWriter } from '../../common/audit/audit.writer.js';
 
 /** Reads/writes a tenant's resolved entitlements + limits. Provisioning + the
  *  Super Admin editors write here (platform path); LimitService reads counts
  *  tenant-scoped. */
 @Injectable()
 export class TenantConfigRepository {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly audit: AuditWriter,
+  ) {}
   private get platform(): PrismaClient {
     return this.db.platformClient();
   }
@@ -67,13 +71,25 @@ export class TenantConfigRepository {
   }
 
   async setEntitlement(tenantId: string, moduleKey: string, enabled: boolean): Promise<void> {
-    await runPlatform(this.platform, (tx) =>
-      tx.tenantEntitlement.upsert({
+    await runPlatform(this.platform, async (tx) => {
+      const before = await tx.tenantEntitlement.findUnique({
+        where: { tenantId_moduleKey: { tenantId, moduleKey } },
+        select: { enabled: true },
+      });
+      await tx.tenantEntitlement.upsert({
         where: { tenantId_moduleKey: { tenantId, moduleKey } },
         create: { tenantId, moduleKey, enabled, source: 'OVERRIDE' },
         update: { enabled, source: 'OVERRIDE' },
-      }),
-    );
+      });
+      await this.audit.record(tx, {
+        action: 'tenant.entitlement_overridden',
+        resourceType: 'tenant_entitlement',
+        resourceId: `${tenantId}/${moduleKey}`,
+        tenantId,
+        before: { enabled: before?.enabled ?? null },
+        after: { enabled },
+      });
+    });
   }
 
   async overrideLimit(
@@ -83,8 +99,12 @@ export class TenantConfigRepository {
     reason: string,
     setByPlatformUserId: string | null,
   ): Promise<void> {
-    await runPlatform(this.platform, (tx) =>
-      tx.tenantLimit.upsert({
+    await runPlatform(this.platform, async (tx) => {
+      const before = await tx.tenantLimit.findUnique({
+        where: { tenantId_limitKey: { tenantId, limitKey } },
+        select: { value: true, isOverride: true },
+      });
+      await tx.tenantLimit.upsert({
         where: { tenantId_limitKey: { tenantId, limitKey } },
         create: {
           tenantId,
@@ -102,8 +122,17 @@ export class TenantConfigRepository {
           setByPlatformUserId,
           setAt: new Date(),
         },
-      }),
-    );
+      });
+      await this.audit.record(tx, {
+        action: 'tenant.limit_overridden',
+        resourceType: 'tenant_limit',
+        resourceId: `${tenantId}/${limitKey}`,
+        tenantId,
+        reason,
+        before: before ? { value: Number(before.value), isOverride: before.isOverride } : null,
+        after: { value: Number(value), isOverride: true },
+      });
+    });
   }
 
   /** Current usage counts, tenant-scoped through RLS. */

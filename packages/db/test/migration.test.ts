@@ -85,14 +85,16 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
   });
 
   // ── migration bookkeeping ──────────────────────────────────────────────────
-  it('records both migrations as applied', async () => {
+  it('records the Phase 1 migrations as applied, in order', async () => {
     const { rows } = await pool.query<{ migration_name: string; finished_at: Date | null }>(
       'SELECT migration_name, finished_at FROM _prisma_migrations ORDER BY started_at',
     );
-    expect(rows.map((r) => r.migration_name)).toEqual([
-      expect.stringMatching(/_baseline$/),
-      expect.stringMatching(/_phase_1_identity_tenancy_rbac$/),
-    ]);
+    const names = rows.map((r) => r.migration_name);
+    expect(names[0]).toMatch(/_baseline$/);
+    expect(names).toContain(
+      names.find((n) => n.endsWith('_phase_1_identity_tenancy_rbac')) ?? 'missing',
+    );
+    expect(names.at(-1)).toMatch(/_security_event_view$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 

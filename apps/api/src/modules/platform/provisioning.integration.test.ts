@@ -283,11 +283,17 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
     try {
       const rows = await c
         .query(
-          `SELECT action, "impersonatorPlatformUserId" FROM audit_log WHERE action LIKE 'IMPERSONATION:%' ORDER BY at`,
+          `SELECT action, "impersonatorPlatformUserId" FROM audit_log
+            WHERE action LIKE 'IMPERSONATION:%' AND action <> 'IMPERSONATION:read' ORDER BY at`,
         )
         .then((r) => r.rows);
       expect(rows.map((r) => r.action)).toEqual(['IMPERSONATION:started', 'IMPERSONATION:ended']);
       expect(rows[0].impersonatorPlatformUserId).toBe(PLATFORM_USER);
+      // every read served during impersonation is audited too (task 1.14 / OD7)
+      const reads = await c
+        .query(`SELECT count(*)::int AS n FROM audit_log WHERE action='IMPERSONATION:read'`)
+        .then((r) => r.rows[0].n);
+      expect(reads).toBeGreaterThanOrEqual(1);
     } finally {
       await c.end();
     }

@@ -4,6 +4,11 @@ import { PlatformRealm } from '../../common/auth/pipeline.decorators.js';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
 import { AuditReadRepository } from './audit-read.repository.js';
 
+const securityQuerySchema = z.object({
+  tenantId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
 const querySchema = z.object({
   tenantId: z.string().uuid().optional(),
   actorId: z.string().uuid().optional(),
@@ -34,5 +39,12 @@ export class AuditController {
       before: q.before ? new Date(q.before) : undefined,
       limit: q.limit,
     });
+  }
+
+  @Get('security-events')
+  @RequirePermission('platform:audit:view')
+  securityEvents(@Query() raw: Record<string, string>) {
+    const q = securityQuerySchema.parse(raw);
+    return this.audit.securityEvents({ tenantId: q.tenantId, limit: q.limit });
   }
 }
