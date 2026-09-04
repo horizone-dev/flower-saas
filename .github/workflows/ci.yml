@@ -49,10 +49,29 @@ jobs:
       - name: Lint (boundaries + no-raw-prisma + route-permission + no-scope-from-request)
         run: pnpm -w lint
 
+      - name: Security-invariant tests (fast pre-flight — fail before the heavy suite)
+        # PHASE-1-PLAN §1.15. The pure invariants: the policy truth-table, the
+        # auditable-action registry ↔ security_event sync, the probe harness,
+        # and realm disjointness / secret-custody in @flower/permissions.
+        run: |
+          pnpm --filter @flower/api exec vitest run \
+            src/modules/access/policy-engine.test.ts \
+            src/modules/access/policy.service.test.ts \
+            src/common/audit/actions.test.ts \
+            src/common/context/request-context.test.ts \
+            src/common/data/scoped-repository.test.ts
+          pnpm --filter @flower/permissions exec vitest run
+          pnpm --filter @flower/testing exec vitest run src/probes.test.ts
+
       - name: Unit + integration tests
-        # includes @flower/db (Testcontainers Postgres) and spike-rls
-        # (PgBouncer). Docker is available on ubuntu-latest. Run Docker-heavy
-        # test tasks with limited concurrency so the runner does not thrash.
+        # Build-blocking Phase 1 security gates (PHASE-1-PLAN §1.15):
+        #   - cross-tenant probe suite   apps/api/src/probes/cross-tenant.probe.test.ts
+        #   - guard-pipeline auth e2e     apps/api/src/common/auth/pipeline.e2e.test.ts
+        #   - auth / session integration  apps/api/src/modules/identity/auth.integration.test.ts
+        #   - limit enforcement           apps/api/src/modules/{platform,org}/*.integration.test.ts
+        #   - secret redaction            apps/api/src/modules/secrets/secrets.integration.test.ts
+        #   - audit compliance            apps/api/src/modules/platform/audit-foundation.integration.test.ts
+        # plus @flower/db (Testcontainers Postgres) and spike-rls (PgBouncer).
         run: pnpm turbo run test --concurrency=2
 
       - name: Build (every app + package)
@@ -113,6 +132,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # gitleaks scans history
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable corepack (pins pnpm from package.json)
+        run: corepack enable
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Secret custody — no tenant-realm permission key matches /secret/i
+        run: |
+          pnpm --filter @flower/permissions build
+          pnpm --filter @flower/tooling-scripts check:no-tenant-secret-key
 
       - name: SBOM (CycloneDX, via Syft — understands pnpm-lock.yaml)
         uses: anchore/sbom-action@v0.24.2

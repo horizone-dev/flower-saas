@@ -6,7 +6,11 @@
   "description": "Repo dev / verification scripts (Bash + small Node checks). Not shipped; linted like the rest of the monorepo — ultra-review F7.",
   "license": "UNLICENSED",
   "scripts": {
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "check:no-tenant-secret-key": "node check-no-tenant-secret-key.mjs"
+  },
+  "dependencies": {
+    "@flower/permissions": "workspace:*"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
