@@ -88,7 +88,22 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
   // fast rather than queuing it offline, matching the dispatcher's own
   // attempts/backoff loop rather than ioredis retrying silently underneath it).
   // Redis is already known reachable (the fail-fast check above passed).
+  //
+  // **Explicitly connected — a real bug, found by task 2.5's compiled-runtime
+  // smoke test, not a test.** `createRedis` builds a `lazyConnect: true,
+  // enableOfflineQueue: false` client. On an EMPTY database the dispatcher's
+  // first several ticks never reach an actual `outboxRedis` command at all
+  // (`discoverPublishableTenants`/allocation are Postgres-only) — so this gap
+  // stayed latent through all of task 2.4's own verification, which always
+  // inserted a row *some time after* boot. The task 2.5 relay's very first
+  // command (`SCAN`) fires immediately at boot regardless of whether there is
+  // any data yet, surfacing it immediately: "Stream isn't writeable and
+  // enableOfflineQueue options is false" — `lazyConnect` does not itself
+  // guarantee a command issued the instant a tick starts finds a `'ready'`
+  // connection. Every dedicated Redis connection this file hands to a loop
+  // that `.start()`s immediately at boot must be explicitly connected first.
   const outboxRedis = createRedis(opts.redisHost, opts.redisPort);
+  await connectRedis(outboxRedis, opts.redisConnectTimeoutMs ?? 5_000);
 
   const dispatcher = new OutboxDispatcher({
     db: context.get(DbService),
@@ -105,6 +120,7 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
   // connection would have worked too, but keeping workloads on separate
   // connections avoids any subtle cross-workload pipelining interference).
   const relayRedis = createRedis(opts.redisHost, opts.redisPort);
+  await connectRedis(relayRedis, opts.redisConnectTimeoutMs ?? 5_000);
   const relay = new RealtimeRelay({
     redis: relayRedis,
     logger,

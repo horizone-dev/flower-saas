@@ -304,6 +304,9 @@ importers:
       '@fastify/websocket':
         specifier: 11.3.0
         version: 11.3.0
+      '@flower/backend':
+        specifier: workspace:*
+        version: link:../../packages/backend
       '@flower/service-runtime':
         specifier: workspace:*
         version: link:../../packages/service-runtime
@@ -313,6 +316,9 @@ importers:
       ioredis:
         specifier: 6.0.0
         version: 6.0.0
+      reflect-metadata:
+        specifier: 0.2.2
+        version: 0.2.2
       zod:
         specifier: 4.5.4
         version: 4.5.4
@@ -320,6 +326,9 @@ importers:
       '@flower/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@flower/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3

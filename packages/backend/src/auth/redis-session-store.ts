@@ -38,6 +38,12 @@ const key = (id: string): string => `session:${id}`;
  * pipeline's OWN keys (`rt:stream:*` / `rt:live:*` / `rt:revoke:*`) are a
  * deliberately **separate**, unprefixed Redis connection in both processes —
  * never conflate the two connections/prefixes.
+ *
+ * (Verified, not just assumed: ioredis's `keyPrefix` only rewrites arguments
+ * Redis's own command table marks as key-positions — `PUBLISH`'s channel
+ * argument is not one, so `revoke()`'s `PUBLISH` below reaches an unprefixed
+ * `rt:revoke:{sessionId}` subscriber correctly even when this store's own
+ * `redis` client carries `keyPrefix: 'flower:'`.)
  */
 @Injectable()
 export class RedisSessionStore extends SessionStore {
