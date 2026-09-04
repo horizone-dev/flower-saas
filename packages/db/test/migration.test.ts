@@ -85,16 +85,15 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
   });
 
   // ── migration bookkeeping ──────────────────────────────────────────────────
-  it('records the Phase 1 migrations as applied, in order', async () => {
+  it('records every migration as applied, in order', async () => {
     const { rows } = await pool.query<{ migration_name: string; finished_at: Date | null }>(
       'SELECT migration_name, finished_at FROM _prisma_migrations ORDER BY started_at',
     );
     const names = rows.map((r) => r.migration_name);
     expect(names[0]).toMatch(/_baseline$/);
-    expect(names).toContain(
-      names.find((n) => n.endsWith('_phase_1_identity_tenancy_rbac')) ?? 'missing',
-    );
-    expect(names.at(-1)).toMatch(/_security_event_view$/);
+    expect(names.some((n) => n.endsWith('_phase_1_identity_tenancy_rbac'))).toBe(true);
+    expect(names.some((n) => n.endsWith('_security_event_view'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_phase_2_core_infra$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -211,6 +210,134 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       await c.query('RESET ROLE').catch(() => {});
       c.release();
     }
+  });
+
+  // ── Phase 2-core schema (task 2.1) ─────────────────────────────────────────
+  describe('Phase 2-core infra schema', () => {
+    it('idempotency_key is NOT partitioned and carries the principal-scoped unique key', async () => {
+      const kind = await pool.query<{ relkind: string }>(
+        `SELECT relkind FROM pg_class WHERE relname = 'idempotency_key'`,
+      );
+      expect(kind.rows[0]?.relkind, 'idempotency_key must be a plain table (r)').toBe('r');
+      const uniq = await pool.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes WHERE indexname = 'idempotency_key_tenantId_scope_principalId_key_key'`,
+      );
+      expect(uniq.rows[0]?.indexdef).toMatch(/"tenantId", scope, "principalId", key/);
+    });
+
+    it('the idempotency unique is per-principal — same (scope,key) for another principal is a new row (FC-2)', async () => {
+      const P1 = '11111111-1111-7111-8111-111111111111';
+      const P2 = '22222222-2222-7222-8222-222222222222';
+      await pool.query(
+        `INSERT INTO idempotency_key ("tenantId","scope","principalId","key","requestHash","expiresAt")
+         VALUES ($1,'orders.create',$2,'idem-1','h', now() + interval '1 day')`,
+        [TENANT_A, P1],
+      );
+      // same (tenant, scope, key), different principal -> allowed
+      await expect(
+        pool.query(
+          `INSERT INTO idempotency_key ("tenantId","scope","principalId","key","requestHash","expiresAt")
+           VALUES ($1,'orders.create',$2,'idem-1','h', now() + interval '1 day')`,
+          [TENANT_A, P2],
+        ),
+      ).resolves.toBeTruthy();
+      // same (tenant, scope, principal, key) -> unique violation
+      await expect(
+        pool.query(
+          `INSERT INTO idempotency_key ("tenantId","scope","principalId","key","requestHash","expiresAt")
+           VALUES ($1,'orders.create',$2,'idem-1','h', now() + interval '1 day')`,
+          [TENANT_A, P1],
+        ),
+      ).rejects.toThrow(/duplicate key value/i);
+      await pool.query(`DELETE FROM idempotency_key WHERE key = 'idem-1'`);
+    });
+
+    it('outbox gains the dispatcher columns + a partial work-queue index', async () => {
+      const cols = await pool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'outbox' AND column_name = ANY($1)`,
+        [['seq', 'attempts', 'availableAt', 'lastError']],
+      );
+      expect(cols.rows.map((r) => r.column_name).sort()).toEqual([
+        'attempts',
+        'availableAt',
+        'lastError',
+        'seq',
+      ]);
+      const idx = await pool.query(
+        `SELECT indexdef FROM pg_indexes WHERE tablename = 'outbox_default' AND indexname = 'outbox_default_availableAt_idx'`,
+      );
+      expect(idx.rowCount, 'partial index must propagate to the default partition').toBe(1);
+    });
+
+    it('audit_log gains nullable hash-chain columns (unwritten in core — OD-P2-1)', async () => {
+      const { rows } = await pool.query<{ column_name: string; is_nullable: string }>(
+        `SELECT column_name, is_nullable FROM information_schema.columns
+          WHERE table_name = 'audit_log' AND column_name IN ('prevHash','entryHash')`,
+      );
+      expect(rows).toHaveLength(2);
+      for (const r of rows) expect(r.is_nullable).toBe('YES');
+    });
+
+    it('company gains the legal-entity fiscal columns (country is the fiscal source, not tenant.region)', async () => {
+      const { rows } = await pool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'company' AND column_name = ANY($1)`,
+        [['countryCode', 'defaultCurrency', 'fiscalConfig']],
+      );
+      expect(rows.map((r) => r.column_name).sort()).toEqual([
+        'countryCode',
+        'defaultCurrency',
+        'fiscalConfig',
+      ]);
+      const fk = await pool.query(
+        `SELECT 1 FROM pg_constraint WHERE conname = 'company_countryCode_fkey' AND contype = 'f'`,
+      );
+      expect(fk.rowCount).toBe(1);
+    });
+
+    it('flower_app has SELECT-only on the localization reference tables', async () => {
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        await expect(c.query('SELECT count(*) FROM country')).resolves.toBeTruthy();
+        await expect(c.query('SELECT count(*) FROM tax_rate')).resolves.toBeTruthy();
+        await expect(
+          c.query(
+            `INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", "updatedAt")
+             VALUES ('ZZ','Z','Z','ZZ','ZZZ','FRI_SAT', now())`,
+          ),
+        ).rejects.toThrow(/permission denied/i);
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+    });
+
+    it('country_tax_config.regime rejects a value outside VAT|NONE (no VAT is modelled, not a 0% rate)', async () => {
+      await pool.query(
+        `INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
+         VALUES ('QAR', 2, 'ر.ق', 'Qatari Riyal', 'ريال قطري') ON CONFLICT (code) DO NOTHING`,
+      );
+      await pool.query(
+        `INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", "updatedAt")
+         VALUES ('QA','Qatar','قطر','QA','QAR','FRI_SAT', now())
+         ON CONFLICT (code) DO NOTHING`,
+      );
+      await expect(
+        pool.query(
+          `INSERT INTO country_tax_config ("countryCode","effectiveFrom","regime")
+           VALUES ('QA', '2026-01-01', 'ZERO_RATED')`,
+        ),
+      ).rejects.toThrow(/country_tax_config_regime_chk/i);
+      await expect(
+        pool.query(
+          `INSERT INTO country_tax_config ("countryCode","effectiveFrom","regime")
+           VALUES ('QA', '2026-01-01', 'NONE')`,
+        ),
+      ).resolves.toBeTruthy();
+      await pool.query(`DELETE FROM country_tax_config WHERE "countryCode" = 'QA'`);
+    });
   });
 
   // ── RLS behaviour (the ADR-0010 GO pattern) ────────────────────────────────

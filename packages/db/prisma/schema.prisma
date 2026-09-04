@@ -532,6 +532,15 @@ model Company {
   /// tax registration number / VAT number
   trn               String?
   registeredAddress String?
+  /// The legal-entity country — THE fiscal source (currency / VAT / e-invoicing),
+  /// never `tenant.region` (architecture correction 4). Nullable in the Phase
+  /// 2-core expand migration; task 2.7 provisioning sets it. FK -> country.code.
+  countryCode       String?
+  /// resolved from the country at provisioning; a branch may override *display*
+  /// currency only, never the legal currency. FK -> currency.code.
+  defaultCurrency   String?
+  /// non-secret fiscal profile (e-invoicing provider ref, invoice-series policy).
+  fiscalConfig      Json?
   /// ACTIVE | INACTIVE
   status            String        @default("ACTIVE")
   createdAt         DateTime      @default(now()) @db.Timestamptz(6)
@@ -682,6 +691,11 @@ model AuditLog {
   after                      Json?
   ip                         String?
   at                         DateTime @default(now()) @db.Timestamptz(6)
+  /// Per-tenant hash chain — NULLABLE and UNWRITTEN in Phase 2-core (OD-P2-1 /
+  /// ADR-0016 amendment). The chain + verification job land in Phase 4 with the
+  /// Z-Report hash chain. Columns exist now so that is not a migration rewrite.
+  prevHash                   Bytes?
+  entryHash                  Bytes?
 
   @@id([id, at])
   @@index([tenantId, at])
@@ -697,10 +711,183 @@ model Outbox {
   eventType     String
   payload       Json
   createdAt     DateTime  @default(now()) @db.Timestamptz(6)
-  /// stays null in Phase 1 — the SKIP LOCKED dispatcher is Phase 2
+  /// null until the SKIP LOCKED dispatcher publishes it (Phase 2-core task 2.4)
   dispatchedAt  DateTime? @db.Timestamptz(6)
+  /// per-tenant-global logical sequence — assigned ONCE by the dispatcher and
+  /// persisted BEFORE the Redis publish; never re-assigned (FC-1 / ADR-0017 §1).
+  /// Allocation mechanism settled in task 2.4 (OI-P2-1).
+  seq           BigInt?
+  attempts      Int       @default(0)
+  availableAt   DateTime  @default(now()) @db.Timestamptz(6)
+  lastError     String?
 
   @@id([id, createdAt])
   @@index([createdAt])
   @@map("outbox")
+}
+
+// ──────────── idempotency store (tenant-owned, Phase 2-core 2.2) ───────────────
+// NON-partitioned (architecture correction 1): a partitioned table cannot carry a
+// global unique key without the partition key in the constraint. RLS ENABLE+FORCE.
+// Identity = (tenantId, scope, principalId, key) — FC-2: a stored response is
+// never replayable across authenticated principals. Snapshots never hold a token /
+// secret / credential (scrubbed in the interceptor — task 2.2).
+
+model IdempotencyKey {
+  id               String   @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  /// canonical operation name, not the raw path (e.g. "orders.create")
+  scope            String
+  /// the authenticated principal: user id or platform-user id
+  principalId      String   @db.Uuid
+  /// the client-supplied Idempotency-Key (a uuid)
+  key              String
+  /// sha256(method + canonical path + scope + principalId + normalized body)
+  requestHash      String
+  /// PENDING | DONE
+  status           String   @default("PENDING")
+  /// field-allowlisted response body — never a Set-Cookie / Authorization / token
+  responseSnapshot Json?
+  httpStatus       Int?
+  /// drives stale-PENDING recovery (FC-2): a PENDING row older than the stale
+  /// threshold may be taken over and re-executed.
+  lockedAt         DateTime @default(now()) @db.Timestamptz(6)
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  expiresAt        DateTime @db.Timestamptz(6)
+
+  @@id([id])
+  @@unique([tenantId, scope, principalId, key])
+  @@index([expiresAt])
+  @@index([status, lockedAt])
+  @@map("idempotency_key")
+}
+
+// ──────────── translation (tenant-owned, Arabic/RTL-ready — OD-P2-9) ───────────
+// Every user-facing tenant content field gets a translation path from the core.
+// UI message catalogs / full Arabic content are a backlog item; the DATA MODEL is
+// RTL-ready now. RLS ENABLE+FORCE. `locale` -> locale.code.
+
+model Translation {
+  id         String   @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  /// the owning entity kind, e.g. "product", "category", "branch"
+  entityType String
+  entityId   String   @db.Uuid
+  /// the field on that entity, e.g. "name", "description"
+  field      String
+  /// locale code — FK to `locale`
+  locale     String
+  value      String
+  updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+
+  @@id([id])
+  @@unique([tenantId, entityType, entityId, field, locale])
+  @@index([tenantId])
+  @@map("translation")
+}
+
+// ═══════════ localization reference data (platform-global, RLS-exempt) ═════════
+// No `tenant_id`. `flower_app` gets SELECT only (like plan*); writes go via the
+// platform path / the seed. Seeded with the GCC set in task 2.7. Tax data is
+// EFFECTIVE-DATED — no legal rate is frozen in code (architecture correction 4).
+
+/// A country Flower SaaS can operate a legal entity in.
+model Country {
+  code                String   @id
+  nameEn              String
+  nameAr              String
+  /// region grouping; mirrors tenant.region semantics, not a fiscal source
+  region              String
+  defaultCurrencyCode String
+  /// FRI_SAT | SAT_SUN | SUN_ONLY …
+  weekendModel        String
+  /// Hijri display, Ramadan hours, etc.
+  calendarFlags       Json     @default("{}")
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("country")
+}
+
+/// A currency with its minor-unit exponent (2 for AED/SAR/QAR, 3 for KWD/BHD/OMR).
+model Currency {
+  code     String @id
+  exponent Int
+  symbol   String
+  nameEn   String
+  nameAr   String
+
+  @@map("currency")
+}
+
+/// The fiscal regime for a country, effective-dated. QA / KW are seeded as
+/// `regime = NONE` (no VAT) — modelled as "no tax", never a 0% rate.
+model CountryTaxConfig {
+  id            String    @default(dbgenerated("uuidv7()")) @db.Uuid
+  countryCode   String
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+  /// VAT | NONE
+  regime        String
+  config        Json      @default("{}")
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@id([id])
+  @@index([countryCode, effectiveFrom])
+  @@map("country_tax_config")
+}
+
+/// A tax category key (STANDARD | ZERO_RATED | EXEMPT …).
+model TaxCategory {
+  key         String  @id
+  nameEn      String
+  nameAr      String
+  description String?
+
+  @@map("tax_category")
+}
+
+/// A tax rate for a (country, category), effective-dated. Data only — the
+/// calculation engine is Phase 3.
+model TaxRate {
+  id             String    @default(dbgenerated("uuidv7()")) @db.Uuid
+  countryCode    String
+  taxCategoryKey String
+  /// basis points (500 = 5.00%)
+  rateBps        Int
+  effectiveFrom  DateTime  @db.Date
+  effectiveTo    DateTime? @db.Date
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@id([id])
+  @@index([countryCode, taxCategoryKey, effectiveFrom])
+  @@map("tax_rate")
+}
+
+/// A UI locale + its writing direction.
+model Locale {
+  code      String @id
+  nameEn    String
+  nameAr    String
+  /// ltr | rtl
+  direction String
+
+  @@map("locale")
+}
+
+/// A public holiday for a country (consumed by scheduling / delivery slots).
+model Holiday {
+  id          String   @default(dbgenerated("uuidv7()")) @db.Uuid
+  countryCode String
+  onDate      DateTime @db.Date
+  nameEn      String
+  nameAr      String
+  /// PUBLIC | RELIGIOUS | NATIONAL …
+  kind        String
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@id([id])
+  @@index([countryCode, onDate])
+  @@map("holiday")
 }

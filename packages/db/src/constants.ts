@@ -39,6 +39,9 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   'provider_credential',
   'audit_log',
   'outbox',
+  // Phase 2-core (task 2.1)
+  'idempotency_key',
+  'translation',
 ]);
 
 /**
@@ -61,6 +64,15 @@ export const PLATFORM_GLOBAL_TABLES: readonly string[] = Object.freeze([
   'platform_user_role',
   'platform_session',
   'app_meta',
+  // Phase 2-core localization reference (task 2.1) — RLS-exempt, effective-dated
+  // tax data. `flower_app` gets SELECT only; writes go via the platform path/seed.
+  'country',
+  'currency',
+  'country_tax_config',
+  'tax_category',
+  'tax_rate',
+  'locale',
+  'holiday',
 ]);
 
 /** Range-partitioned tables (declared in the Phase 1 migration; a DEFAULT
