@@ -61,6 +61,47 @@ jobs:
       - name: Negative-test — boundary + scope violation must fail lint
         run: pnpm --filter @flower/config test:negative
 
+  # ── Gate 1b: Super Admin Web end-to-end smoke ──────────────────────────────
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable corepack (pins pnpm from package.json)
+        run: corepack enable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (api dist + web .next + workspace deps)
+        run: pnpm -w build
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @flower/super-admin-web exec playwright install --with-deps chromium
+
+      - name: Smoke (Testcontainers Postgres + Redis, api + web processes)
+        run: pnpm --filter @flower/super-admin-web test:e2e
+
+      - name: Upload trace on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-trace
+          path: apps/super-admin-web/test-results/
+          if-no-files-found: ignore
+
   # ── Gate 2: supply-chain & secret scanning ─────────────────────────────────
   security:
     runs-on: ubuntu-latest

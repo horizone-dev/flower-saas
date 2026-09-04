@@ -20,6 +20,9 @@ apps/*/CLAUDE.md
 coverage/
 *.lcov
 .vitest/
+test-results/
+playwright-report/
+apps/super-admin-web/e2e/.smoke-auth.json
 
 # Env & secrets — NEVER commit real values
 .env

@@ -120,7 +120,12 @@ export class SessionService {
       posTerminalId: input.posTerminalId ?? null,
       deviceId: null,
       mfaLevel: input.mfaLevel,
-      stepUpUntil: null,
+      // a session issued at `STEP_UP` (platform login, tenant MFA-verify,
+      // impersonation) carries a fresh step-up window — otherwise `isStepUpActive`
+      // is false and the request context downgrades to `MFA`, so no step-up
+      // action can run right after authenticating with the second factor.
+      stepUpUntil:
+        input.mfaLevel === 'STEP_UP' ? now + this.config.AUTH_STEP_UP_TTL_SECONDS * 1000 : null,
       createdAt: now,
       expiresAt,
       revokedAt: null,

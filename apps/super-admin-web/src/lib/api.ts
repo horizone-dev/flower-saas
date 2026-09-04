@@ -3,20 +3,26 @@ import { getAccessToken } from './session';
 
 export { ApiError };
 
-const BASE_URL = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:3001';
+function baseUrl(): string {
+  return (
+    process.env['API_BASE_URL'] ??
+    process.env['NEXT_PUBLIC_API_BASE_URL'] ??
+    'http://localhost:3001'
+  );
+}
 
 /** A request-scoped API client that carries the Super Admin's HttpOnly-cookie
  *  token. Server components + server actions only. */
 export function serverApi(): ApiClient {
   return createApiClient({
-    baseUrl: BASE_URL,
+    baseUrl: baseUrl(),
     getAccessToken,
   });
 }
 
 /** A client bound to a one-off bearer token (impersonation flows). */
 export function tokenApi(token: string): ApiClient {
-  return createApiClient({ baseUrl: BASE_URL, getAccessToken: () => token });
+  return createApiClient({ baseUrl: baseUrl(), getAccessToken: () => token });
 }
 
 export function errorMessage(err: unknown): string {
