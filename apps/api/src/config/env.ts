@@ -48,6 +48,9 @@ const envSchema = z.object({
   // TTL: how long a stored result stays replayable. STALE_LOCK: after this long a
   // crashed PENDING key is reclaimable. MAX_SNAPSHOT_BYTES: a larger 2xx body is
   // not cached (the key still transitions to DONE; a replay says so).
+  // WAIT_MS: a concurrent identical request waits (bounded, small backoff poll)
+  // this long for the owner to finish, then replays its result; only if the wait
+  // is exhausted does it get `IDEMPOTENCY_IN_PROGRESS`.
   IDEMPOTENCY_TTL_SECONDS: z.coerce
     .number()
     .int()
@@ -59,6 +62,7 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(64 * 1024),
+  IDEMPOTENCY_WAIT_MS: z.coerce.number().int().positive().default(5000),
 
   // Browser origins allowed to call the API (the POS PWA — Bearer for protected
   // calls, plus the HttpOnly refresh cookie on `/v1/auth/*`). Comma separated,

@@ -93,7 +93,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names[0]).toMatch(/_baseline$/);
     expect(names.some((n) => n.endsWith('_phase_1_identity_tenancy_rbac'))).toBe(true);
     expect(names.some((n) => n.endsWith('_security_event_view'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_phase_2_core_infra$/);
+    expect(names.some((n) => n.endsWith('_phase_2_core_infra'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_idempotency_claim_token$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -223,6 +224,12 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         `SELECT indexdef FROM pg_indexes WHERE indexname = 'idempotency_key_tenantId_scope_principalId_key_key'`,
       );
       expect(uniq.rows[0]?.indexdef).toMatch(/"tenantId", scope, "principalId", key/);
+      // task 2.2 hardening: an opaque per-claim lease token
+      const claim = await pool.query<{ data_type: string; is_nullable: string }>(
+        `SELECT data_type, is_nullable FROM information_schema.columns
+          WHERE table_name = 'idempotency_key' AND column_name = 'claimToken'`,
+      );
+      expect(claim.rows[0]).toMatchObject({ data_type: 'uuid', is_nullable: 'YES' });
     });
 
     it('the idempotency unique is per-principal — same (scope,key) for another principal is a new row (FC-2)', async () => {

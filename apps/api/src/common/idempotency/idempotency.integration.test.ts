@@ -34,6 +34,8 @@ const T2 = '00000000-0000-7000-8000-0000000ee002';
 interface RunDto {
   marker: string;
   mode?: 'ok' | 'boom' | 'reject' | 'slow' | 'big';
+  /** explicit handler delay (ms) — overrides `slow`'s default 300 */
+  sleepMs?: number;
 }
 
 @Controller('_idem')
@@ -48,7 +50,8 @@ class IdemTestController {
     const mode = dto.mode ?? 'ok';
     if (mode === 'boom') throw new DomainError('BOOM', 'transient failure', 500);
     if (mode === 'reject') throw new DomainError('REJECTED', 'business rejection', 422);
-    if (mode === 'slow') await sleep(300);
+    const delay = dto.sleepMs ?? (mode === 'slow' ? 300 : 0);
+    if (delay > 0) await sleep(delay);
 
     // a real tenant-scoped mutation — one row per handler execution
     await runScoped(this.db.appClient(), { tenantId: ctx.tenantId! }, (tx) =>
@@ -94,7 +97,8 @@ describe('idempotency store (integration — Postgres)', () => {
     process.env['PLATFORM_DATABASE_URL'] = stack.postgres.url;
     process.env['REDIS_URL'] = stack.redis.url;
     process.env['AUTH_JWT_SECRET'] = 'integration-test-jwt-secret-0000000000';
-    process.env['IDEMPOTENCY_STALE_LOCK_SECONDS'] = '2';
+    process.env['IDEMPOTENCY_STALE_LOCK_SECONDS'] = '3';
+    process.env['IDEMPOTENCY_WAIT_MS'] = '1500';
 
     const moduleRef = await Test.createTestingModule({ imports: [IdemTestModule] }).compile();
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
@@ -128,6 +132,7 @@ describe('idempotency store (integration — Postgres)', () => {
       'REDIS_URL',
       'AUTH_JWT_SECRET',
       'IDEMPOTENCY_STALE_LOCK_SECONDS',
+      'IDEMPOTENCY_WAIT_MS',
     ]) {
       delete process.env[k];
     }
@@ -200,23 +205,42 @@ describe('idempotency store (integration — Postgres)', () => {
     expect(clash.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 
-  it('N concurrent identical requests execute the handler exactly once', async () => {
+  it('8 concurrent identical requests: handler runs once, all 8 get the same result, one mutation', async () => {
     const m = `conc-${randomUUID()}`;
+    // the owner finishes (~300ms) well within IDEMPOTENCY_WAIT_MS (1500ms)
     const results = await Promise.all(
       Array.from({ length: 8 }, () => run(tokenA1, 'conc-key-1', { marker: m, mode: 'slow' })),
     );
-    const ok = results.filter((r) => r.statusCode === 201);
-    const inProgress = results.filter(
-      (r) => r.statusCode === 409 && r.json().error.code === 'IDEMPOTENCY_IN_PROGRESS',
-    );
-    expect(ok).toHaveLength(1);
-    expect(inProgress.length).toBe(7);
-    expect(await markerCount(m, T1)).toBe(1);
+    expect(results.every((r) => r.statusCode === 201)).toBe(true);
+    const nonces = new Set(results.map((r) => r.json().nonce));
+    expect(nonces.size).toBe(1); // one handler execution → one nonce, replayed to all
+    expect(results.every((r) => r.json().marker === m)).toBe(true);
+    expect(await markerCount(m, T1)).toBe(1); // exactly one business mutation
 
-    // a later retry replays the winner's result
+    // a later retry still replays the same result
     const late = await run(tokenA1, 'conc-key-1', { marker: m, mode: 'slow' });
     expect(late.statusCode).toBe(201);
-    expect(late.json().nonce).toBe(ok[0]!.json().nonce);
+    expect(late.json().nonce).toBe([...nonces][0]);
+    expect(await markerCount(m, T1)).toBe(1);
+  });
+
+  it('the owner exceeds the wait window → the waiter gets IDEMPOTENCY_IN_PROGRESS, a later retry replays', async () => {
+    const m = `wait-${randomUUID()}`;
+    const key = 'wait-key-1';
+    // owner sleeps 2500ms > IDEMPOTENCY_WAIT_MS (1500ms) but < STALE_LOCK (3s)
+    const ownerP = run(tokenA1, key, { marker: m, sleepMs: 2500 });
+    await sleep(120); // let the owner claim first
+    const waiter = await run(tokenA1, key, { marker: m, sleepMs: 2500 });
+    expect(waiter.statusCode).toBe(409);
+    expect(waiter.json().error.code).toBe('IDEMPOTENCY_IN_PROGRESS');
+
+    const owner = await ownerP;
+    expect(owner.statusCode).toBe(201);
+    expect(await markerCount(m, T1)).toBe(1);
+
+    const retry = await run(tokenA1, key, { marker: m, sleepMs: 2500 });
+    expect(retry.statusCode).toBe(201);
+    expect(retry.json().nonce).toBe(owner.json().nonce); // replayed
     expect(await markerCount(m, T1)).toBe(1);
   });
 
@@ -240,12 +264,12 @@ describe('idempotency store (integration — Postgres)', () => {
     );
   });
 
-  it('stale PENDING is reclaimable and cannot be reclaimed by two owners at once', async () => {
+  it('stale PENDING is reclaimed by exactly one of two concurrent requests; the other replays', async () => {
     const m = `stale-${randomUUID()}`;
     const key = `stale-key-${randomUUID()}`;
-    // plant a PENDING row locked > STALE_LOCK_SECONDS ago, with the hash this
-    // request would compute
-    const h = await hashForRun(m, userA1Id);
+    // plant a PENDING row leased > STALE_LOCK_SECONDS ago, with the hash this
+    // request would compute (no claimToken — a crashed owner)
+    const h = await hashForRun(userA1Id, { marker: m });
     await pool.query(
       `INSERT INTO "idempotency_key"
          ("tenantId","scope","principalId","key","requestHash","status","lockedAt","createdAt","expiresAt")
@@ -257,20 +281,74 @@ describe('idempotency store (integration — Postgres)', () => {
       run(tokenA1, key, { marker: m }),
       run(tokenA1, key, { marker: m }),
     ]);
-    const codes = [a.statusCode, b.statusCode].sort();
-    expect(codes).toEqual([201, 409]); // exactly one reclaimer executes
-    expect(await markerCount(m, T1)).toBe(1);
-    const { rows } = await pool.query<{ status: string }>(
-      `SELECT status FROM "idempotency_key" WHERE key = $1`,
+    expect([a.statusCode, b.statusCode]).toEqual([201, 201]); // one executes, one waits + replays
+    expect(a.json().nonce).toBe(b.json().nonce);
+    expect(await markerCount(m, T1)).toBe(1); // exactly one execution
+    const { rows } = await pool.query<{ status: string; claimToken: string }>(
+      `SELECT status, "claimToken"::text AS "claimToken" FROM "idempotency_key" WHERE key = $1`,
       [key],
     );
     expect(rows[0]!.status).toBe('DONE');
+    expect(rows[0]!.claimToken).not.toBeNull(); // a real reclaimer's fresh token
+  });
+
+  it('a stale owner cannot markDone / release a newer owner’s claim while it is still PENDING (claim-token guard)', async () => {
+    const m = `token-${randomUUID()}`;
+    const key = `token-key-${randomUUID()}`;
+    const h = await hashForRun(userA1Id, { marker: m, sleepMs: 800 });
+
+    // owner A: a stale PENDING row with a known claim token
+    const tokenAOld = randomUUID();
+    await pool.query(
+      `INSERT INTO "idempotency_key"
+         ("tenantId","scope","principalId","key","requestHash","status","claimToken","lockedAt","createdAt","expiresAt")
+       VALUES ($1::uuid,'idem.test.run',$2::uuid,$3,$4,'PENDING',$5::uuid, now() - interval '1 hour', now(), now() + interval '1 hour')`,
+      [T1, userA1Id, key, h, tokenAOld],
+    );
+
+    // owner B reclaims it via a real (slow) request → a fresh claim token; it
+    // holds the row PENDING while it sleeps.
+    const bP = run(tokenA1, key, { marker: m, sleepMs: 800 });
+    await sleep(250); // B has reclaimed by now
+    const bToken = (
+      await pool.query<{ t: string; s: string }>(
+        `SELECT "claimToken"::text AS t, status AS s FROM "idempotency_key" WHERE key = $1`,
+        [key],
+      )
+    ).rows[0]!;
+    expect(bToken.s).toBe('PENDING');
+    expect(bToken.t).not.toBe(tokenAOld);
+
+    // owner A (stale) tries to markDone / release with its OLD token while the
+    // row is still PENDING — the claim-token guard makes both a no-op.
+    // (raw pool = superuser, bypasses RLS — enough to prove the token guard.)
+    const hijack = await pool.query(
+      `UPDATE "idempotency_key" SET status='DONE', "responseSnapshot"='{"hijacked":true}'::jsonb
+        WHERE key=$1 AND "claimToken"=$2::uuid AND status='PENDING'`,
+      [key, tokenAOld],
+    );
+    expect(hijack.rowCount).toBe(0);
+    const stealRelease = await pool.query(
+      `DELETE FROM "idempotency_key" WHERE key=$1 AND "claimToken"=$2::uuid`,
+      [key, tokenAOld],
+    );
+    expect(stealRelease.rowCount).toBe(0);
+
+    const b = await bP; // B completes and markDone's with its own token
+    expect(b.statusCode).toBe(201);
+    expect(b.json()).not.toHaveProperty('hijacked');
+
+    const replay = await run(tokenA1, key, { marker: m, sleepMs: 800 });
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json().nonce).toBe(b.json().nonce);
+    expect(replay.json()).not.toHaveProperty('hijacked');
+    expect(await markerCount(m, T1)).toBe(1);
   });
 
   it('an expired stored result does not block a fresh retry', async () => {
     const m = `exp-${randomUUID()}`;
     const key = `exp-key-${randomUUID()}`;
-    const h = await hashForRun(m, userA1Id);
+    const h = await hashForRun(userA1Id, { marker: m });
     await pool.query(
       `INSERT INTO "idempotency_key"
          ("tenantId","scope","principalId","key","requestHash","status","httpStatus","responseSnapshot","lockedAt","createdAt","expiresAt")
@@ -355,7 +433,7 @@ describe('idempotency store (integration — Postgres)', () => {
   });
 
   // recomputes the interceptor's request hash for a planted row
-  async function hashForRun(marker: string, principalId: string): Promise<string> {
+  async function hashForRun(principalId: string, body: Record<string, unknown>): Promise<string> {
     const { requestHash } = await import('./canonical-hash.js');
     return requestHash({
       method: 'POST',
@@ -365,7 +443,7 @@ describe('idempotency store (integration — Postgres)', () => {
       scope: 'idem.test.run',
       tenantId: T1,
       principalId,
-      body: { marker },
+      body,
     });
   }
 });

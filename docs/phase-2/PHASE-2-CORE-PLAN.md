@@ -370,36 +370,50 @@ path params, query, scope, tenant, principal, body }))` — object-key order and
 3. `acquire` (one `runScoped` txn → RLS confines it to the tenant):
    - `DELETE` an expired row for this identity first (constraint 8 — never blocks
      a retry).
-   - `INSERT … ON CONFLICT DO NOTHING RETURNING "lockedAt"::text` — the returned
-     `lockedAt` (microsecond precision) is this request's **owner token**.
+   - `INSERT … ("claimToken" = gen_random_uuid(), …) ON CONFLICT DO NOTHING
+RETURNING "claimToken"` — a fresh **opaque per-claim lease token** (dedicated
+     `claim_token uuid` column, additive migration `…_idempotency_claim_token`;
+     `lockedAt` is only the lease/staleness timestamp).
    - if the insert won → **run the handler**.
-   - else `SELECT` the existing row:
+   - else `SELECT` the existing row and classify:
      - `DONE` + same hash → **replay** the stored `http_status` + scrubbed body
-       (header `Idempotency-Replayed: true`). If the body was not cached
-       (oversize / stream / non-serialisable) → `409
-IDEMPOTENCY_REPLAY_UNAVAILABLE` (the mutation is still protected).
+       (header `Idempotency-Replayed: true`). Body not cached (oversize / stream /
+       non-serialisable) → `409 IDEMPOTENCY_REPLAY_UNAVAILABLE` (mutation still
+       protected).
      - any-status + **different** hash → `409 IDEMPOTENCY_KEY_REUSED`.
-     - `PENDING`, not yet stale → `409 IDEMPOTENCY_IN_PROGRESS` (client retries).
-     - `PENDING`, **stale** (`now() - lockedAt > STALE_LOCK`) + same hash → an
-       atomic CAS takeover (`UPDATE … SET lockedAt = clock_timestamp() WHERE
-status='PENDING' AND lockedAt::text = <observed> AND now()-lockedAt >
-STALE_LOCK`) — exactly one concurrent reclaimer wins; the loser gets
-       `IN_PROGRESS`. **No permanent dead key.**
-4. On a **2xx** handler result → `markDone` (PENDING→DONE, `WHERE lockedAt::text =
-<my owner token>` so a stale-reclaimed row is never clobbered), storing a
+     - `PENDING`, **stale** (`now() - lockedAt > STALE_LOCK`) + same hash + the
+       `claim_token` still the one observed → atomic CAS takeover (`UPDATE … SET
+lockedAt = clock_timestamp(), claimToken = gen_random_uuid() WHERE …
+status='PENDING' AND claimToken IS NOT DISTINCT FROM <observed> AND
+now()-lockedAt > STALE_LOCK`) — at most one concurrent reclaimer wins the
+       token, executes the handler; a loser falls through to the bounded wait.
+     - `PENDING`, live owner → the request enters the **bounded wait** (3a).
+4. **3a — bounded wait for the owner (constraint 1).** A concurrent identical
+   request does **not** re-execute while a valid owner exists. It re-runs `acquire`
+   on a small capped backoff (50 ms → ×1.5, capped 500 ms — no busy loop) until
+   `IDEMPOTENCY_WAIT_MS` elapses:
+   - owner finishes → row is `DONE` → **replay** the stored result.
+   - owner fails / releases → row is gone → the waiter `INSERT`s and becomes the
+     new owner (a retry, not a duplicate — a non-2xx did not mutate).
+   - owner's lease goes stale → the waiter CAS-reclaims and executes.
+   - wait exhausted while a live owner still holds the claim → `409
+IDEMPOTENCY_IN_PROGRESS` (documented in-progress response; the client retries and
+     then replays the completed result).
+5. On a **2xx** handler result → `markDone` (PENDING→DONE, `WHERE claimToken =
+<my claim token>` so a stale-reclaimed row is never clobbered), storing a
    **field-allowlisted** snapshot (redacts `*token*` / `*secret*` / `*password*` /
    `*credential*` / `authorization` / `cookie` / … in camel/snake/kebab case;
    response **headers are never captured**, so `Set-Cookie` cannot leak; a body
    over `IDEMPOTENCY_MAX_SNAPSHOT_BYTES` or a stream/binary/circular body → key
    still `DONE` but `response_snapshot = null`).
-5. On a **non-2xx / thrown** result → `release` (delete the PENDING row, owner-token
-   scoped) so a retry re-executes. **A transient 5xx is never cached; a failed
-   transaction never leaves a falsely-DONE key** (only a 2xx after the handler's
-   own txn committed marks DONE).
+6. On a **non-2xx / thrown** result → `release` (delete the PENDING row,
+   claim-token scoped) so a retry / waiter re-executes. **A transient 5xx is never
+   cached; a failed transaction never leaves a falsely-DONE key** (only a 2xx
+   after the handler's own txn committed marks DONE).
 
 Config: `IDEMPOTENCY_TTL_SECONDS` (24h), `IDEMPOTENCY_STALE_LOCK_SECONDS` (120),
-`IDEMPOTENCY_MAX_SNAPSHOT_BYTES` (64 KiB). TTL sweep (`sweepExpired`) is provided
-and wired to the scheduler in task 2.3.
+`IDEMPOTENCY_MAX_SNAPSHOT_BYTES` (64 KiB), `IDEMPOTENCY_WAIT_MS` (5000). TTL sweep
+(`sweepExpired`) is provided and wired to the scheduler in task 2.3.
 
 **Never applied to:** `/v1/auth/*` (login, mfa/verify, refresh, logout, step-up,
 set-password), the `provider-credentials` / secret routes. A **bootstrap
@@ -414,13 +428,16 @@ rejects such a path at request time.
   method case, tenant/principal/scope/route/param/query separation).
 - snapshot unit (redaction in camel/snake case, size limit, Buffer/stream/circular
   → not stored).
-- integration (15): missing/invalid key → 400; replay (handler runs once);
-  semantically-equal body still replays; different hash → 409; **N=8 concurrent
-  identical → exactly one execution + one DB mutation, 7×`IN_PROGRESS`, a later
-  retry replays**; transient 5xx not cached (row dropped, retry re-executes); 4xx
-  not cached; **stale-PENDING reclaimed by exactly one of two concurrent
-  reclaimers → one mutation**; an expired stored result does not block a fresh
-  retry; **snapshot scrubs secrets, keeps safe fields**; oversize body not cached
+- integration (17): missing/invalid key → 400; replay (handler runs once);
+  semantically-equal body still replays; different hash → 409; **8 concurrent
+  identical → exactly one execution + one DB mutation, all 8 replay the same
+  result**; **owner exceeds `IDEMPOTENCY_WAIT_MS` → the waiter gets
+  `IN_PROGRESS`, a later retry replays**; transient 5xx not cached (row dropped,
+  retry re-executes); 4xx not cached; **stale-PENDING reclaimed by exactly one of
+  two concurrent requests, the other waits + replays → one mutation**; **a stale
+  owner cannot markDone/release a newer owner's claim (claim-token guard)**; an
+  expired stored result does not block a fresh retry; **snapshot scrubs secrets,
+  keeps safe fields**; oversize body not cached
   but mutation protected; **tenant A's key never affects tenant B** (RLS);
   **user A's stored response never replays to user B**; an undecorated route
   ignores the header; the credential-route startup guard throws for a bad route.

@@ -20,15 +20,19 @@ describe('loadConfig', () => {
     expect(cfg.IDEMPOTENCY_TTL_SECONDS).toBe(60 * 60 * 24);
     expect(cfg.IDEMPOTENCY_STALE_LOCK_SECONDS).toBe(120);
     expect(cfg.IDEMPOTENCY_MAX_SNAPSHOT_BYTES).toBe(64 * 1024);
+    expect(cfg.IDEMPOTENCY_WAIT_MS).toBe(5000);
     const overridden = loadConfig({
       IDEMPOTENCY_TTL_SECONDS: '3600',
       IDEMPOTENCY_STALE_LOCK_SECONDS: '30',
       IDEMPOTENCY_MAX_SNAPSHOT_BYTES: '4096',
+      IDEMPOTENCY_WAIT_MS: '2000',
     });
     expect(overridden.IDEMPOTENCY_TTL_SECONDS).toBe(3600);
     expect(overridden.IDEMPOTENCY_STALE_LOCK_SECONDS).toBe(30);
     expect(overridden.IDEMPOTENCY_MAX_SNAPSHOT_BYTES).toBe(4096);
+    expect(overridden.IDEMPOTENCY_WAIT_MS).toBe(2000);
     expect(() => loadConfig({ IDEMPOTENCY_TTL_SECONDS: '0' })).toThrow(EnvValidationError);
+    expect(() => loadConfig({ IDEMPOTENCY_WAIT_MS: '0' })).toThrow(EnvValidationError);
   });
 
   it('fails fast on an invalid value', () => {

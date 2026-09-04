@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { HTTP_CODE_METADATA } from '@nestjs/common/constants.js';
 import { Reflector } from '@nestjs/core';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { catchError, from, mergeMap, type Observable, throwError } from 'rxjs';
 import { APP_CONFIG, type AppConfig } from '../../config/env.js';
@@ -23,7 +24,9 @@ const KEY_RE = /^[A-Za-z0-9._~:-]{8,200}$/;
 /** never idempotency-cache these route families (defence in depth — the startup
  *  assertion already rejects a decorated one) */
 const FORBIDDEN_PATH = /\/v1\/auth\/|provider-credentials|\/secret(s)?(\/|$)/i;
-const MAX_RETRY = 3;
+/** poll backoff while waiting for the owner: 50ms → ×1.5 → capped at 500ms */
+const POLL_MIN_MS = 50;
+const POLL_MAX_MS = 500;
 const MARK_DONE_ATTEMPTS = 3;
 
 @Injectable()
@@ -47,7 +50,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
     const routePattern = req.routeOptions?.url ?? req.url;
 
     if (FORBIDDEN_PATH.test(routePattern)) {
-      // a misconfiguration — @Idempotent on a credential route must never ship.
+      // a misconfiguration — @Idempotent on a credential route must never ship
+      // (the startup assertion already rejects one; this is request-time defence).
       return throwError(
         () =>
           new DomainError(
@@ -109,11 +113,11 @@ export class IdempotencyInterceptor implements NestInterceptor {
     return from(this.resolve(identity, hash)).pipe(
       mergeMap((decision) => {
         if (decision.execute) {
-          const { ownerToken } = decision;
+          const { claimToken } = decision;
           return next.handle().pipe(
-            mergeMap((value) => from(this.onSuccess(identity, ownerToken, httpStatus, value))),
+            mergeMap((value) => from(this.onSuccess(identity, claimToken, httpStatus, value))),
             catchError((err: unknown) =>
-              from(this.repo.release(identity, ownerToken).catch(() => undefined)).pipe(
+              from(this.repo.release(identity, claimToken).catch(() => undefined)).pipe(
                 mergeMap(() => throwError(() => err)),
               ),
             ),
@@ -137,15 +141,27 @@ export class IdempotencyInterceptor implements NestInterceptor {
     );
   }
 
-  /** Resolve to `execute` (we own the key, run the handler) or a replay result. */
+  /**
+   * Acquire the claim, or wait (bounded) for the current owner and replay its
+   * result. Returns `execute` only when this request itself holds a fresh claim
+   * — so the handler never runs twice while a valid owner exists. If the owner
+   * fails / releases, the freed row lets a waiter acquire it and re-execute
+   * (a retry, not a duplicate — a non-2xx did not mutate).
+   */
   private async resolve(
     identity: IdemIdentity,
     hash: string,
   ): Promise<
-    | { execute: true; ownerToken: string }
+    | { execute: true; claimToken: string }
     | { execute: false; snapshotStored: boolean; httpStatus: number; snapshot: unknown }
   > {
-    for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
+    // Every branch below either returns/throws or sleeps ≥ POLL_MIN_MS and
+    // re-checks this deadline, so the loop is hard-bounded by IDEMPOTENCY_WAIT_MS
+    // — no busy loop, no unbounded spin.
+    const deadline = Date.now() + this.config.IDEMPOTENCY_WAIT_MS;
+    let backoff = POLL_MIN_MS;
+
+    for (;;) {
       const outcome = await this.repo.acquire(
         identity,
         hash,
@@ -154,7 +170,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
       );
       switch (outcome.kind) {
         case 'acquired':
-          return { execute: true, ownerToken: outcome.ownerToken };
+          return { execute: true, claimToken: outcome.claimToken };
         case 'replay':
           return {
             execute: false,
@@ -168,38 +184,51 @@ export class IdempotencyInterceptor implements NestInterceptor {
             'this Idempotency-Key was already used for a different request',
             409,
           );
-        case 'in_progress':
-          throw new DomainError(
-            'IDEMPOTENCY_IN_PROGRESS',
-            'a request with this Idempotency-Key is still being processed — retry shortly',
-            409,
-          );
-        case 'retry':
+        case 'retry': {
+          // raced with cleanup (row deleted / expired mid-acquire) — re-acquire
+          // with a minimal yield, still bounded by the same deadline.
+          if (Date.now() >= deadline) {
+            throw new DomainError(
+              'IDEMPOTENCY_IN_PROGRESS',
+              'could not acquire the Idempotency-Key — retry shortly',
+              409,
+            );
+          }
+          await sleep(POLL_MIN_MS);
           continue;
+        }
+        case 'in_progress': {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            throw new DomainError(
+              'IDEMPOTENCY_IN_PROGRESS',
+              'a request with this Idempotency-Key is still being processed — retry shortly',
+              409,
+            );
+          }
+          await sleep(Math.min(backoff, remaining));
+          backoff = Math.min(Math.ceil(backoff * 1.5), POLL_MAX_MS);
+          continue;
+        }
       }
     }
-    throw new DomainError(
-      'IDEMPOTENCY_IN_PROGRESS',
-      'could not acquire the Idempotency-Key — retry shortly',
-      409,
-    );
   }
 
   private async onSuccess(
     identity: IdemIdentity,
-    ownerToken: string,
+    claimToken: string,
     httpStatus: number,
     value: unknown,
   ): Promise<unknown> {
     if (httpStatus < 200 || httpStatus >= 300) {
       // defensive: a value-returning handler that set a non-2xx status.
-      await this.repo.release(identity, ownerToken).catch(() => undefined);
+      await this.repo.release(identity, claimToken).catch(() => undefined);
       return value;
     }
     const snap = buildSnapshot(value, this.config.IDEMPOTENCY_MAX_SNAPSHOT_BYTES);
     for (let i = 0; i < MARK_DONE_ATTEMPTS; i++) {
       try {
-        await this.repo.markDone(identity, ownerToken, httpStatus, snap);
+        await this.repo.markDone(identity, claimToken, httpStatus, snap);
         return value;
       } catch (err) {
         if (i === MARK_DONE_ATTEMPTS - 1) {

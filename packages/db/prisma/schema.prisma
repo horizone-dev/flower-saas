@@ -749,8 +749,13 @@ model IdempotencyKey {
   /// field-allowlisted response body — never a Set-Cookie / Authorization / token
   responseSnapshot Json?
   httpStatus       Int?
-  /// drives stale-PENDING recovery (FC-2): a PENDING row older than the stale
-  /// threshold may be taken over and re-executed.
+  /// opaque per-claim lease token (task 2.2 hardening). Rotated on every
+  /// acquire / stale-reclaim; `markDone` / `release` only act on a row whose
+  /// token still matches, so a stale owner can never complete or release a newer
+  /// owner's claim. `lockedAt` is only the lease/staleness timestamp.
+  claimToken       String?  @db.Uuid
+  /// lease timestamp — a PENDING row older than the stale threshold may be
+  /// reclaimed (with a fresh `claimToken`) and re-executed (FC-2).
   lockedAt         DateTime @default(now()) @db.Timestamptz(6)
   createdAt        DateTime @default(now()) @db.Timestamptz(6)
   expiresAt        DateTime @db.Timestamptz(6)
