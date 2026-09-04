@@ -170,6 +170,7 @@ jobs:
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2.3.9
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # required by gitleaks-action >=2.3.3 to scan pull_request events
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
           GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
 
