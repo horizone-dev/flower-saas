@@ -49,13 +49,17 @@ export class PolicyService {
 
   /** Permission-preview: what would this user's access be under `proposed`, and
    *  how does it differ from now. Read-only — never writes. */
-  async preview(userId: string, proposed: ProposedAccess): Promise<AccessPreview> {
-    const currentRow = await this.repo.loadUserAccess(userId);
+  async preview(
+    userId: string,
+    proposed: ProposedAccess,
+    tenantId?: string,
+  ): Promise<AccessPreview> {
+    const currentRow = await this.repo.loadUserAccess(userId, tenantId);
     if (!currentRow) throw new UserNotFoundError(userId);
     const current = this.materialise(userId, currentRow);
 
     const proposedRolePerms = proposed.roleIds
-      ? await this.repo.permissionsForRoles(proposed.roleIds)
+      ? await this.repo.permissionsForRoles(proposed.roleIds, tenantId)
       : currentRow.rolePermissions;
 
     const proposedRow: UserAccessRow = {

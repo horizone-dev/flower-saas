@@ -2,61 +2,16 @@ import { Body, Controller, Get, Param, Post, Put } from '@nestjs/common';
 import { z } from 'zod';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
 import { ZodBody } from '../../common/validation/zod-body.js';
-import { Ctx, type RequestContext } from '../../common/context/index.js';
-import { AccessAdminService } from './access-admin.service.js';
-
-const roleKey = z
-  .string()
-  .min(2)
-  .max(48)
-  .regex(/^[a-z][a-z0-9_]*$/, 'lowercase snake_case');
-const permissionKey = z.string().regex(/^[a-z0-9_]+(?::[a-z0-9_]+){1,2}$/);
-const uuid = z.string().uuid();
-
-const createRoleSchema = z.object({
-  key: roleKey,
-  name: z.string().min(1).max(80),
-  permissionKeys: z.array(permissionKey).max(200).default([]),
-});
-const rolePermissionsSchema = z.object({
-  permissionKeys: z.array(permissionKey).max(200),
-});
-const userRolesSchema = z.object({
-  roleIds: z.array(uuid).max(50),
-});
-const grantsSchema = z.object({
-  grants: z
-    .array(
-      z.object({
-        permissionKey,
-        effect: z.enum(['ALLOW', 'DENY']),
-        reason: z.string().min(3).max(280),
-      }),
-    )
-    .max(200),
-});
-const scopeSchema = z.object({
-  companyScopeAll: z.boolean(),
-  companyIds: z.array(uuid).max(200).default([]),
-  branchScopeAll: z.boolean(),
-  branchIds: z.array(uuid).max(500).default([]),
-  perBranchOverlay: z.record(z.string().uuid(), z.array(permissionKey)).optional(),
-});
-const previewSchema = z.object({
-  roleIds: z.array(uuid).max(50).optional(),
-  grants: z
-    .array(z.object({ permissionKey, effect: z.enum(['ALLOW', 'DENY']) }))
-    .max(200)
-    .optional(),
-  scope: z
-    .object({
-      companyScopeAll: z.boolean().optional(),
-      companyIds: z.array(uuid).optional(),
-      branchScopeAll: z.boolean().optional(),
-      branchIds: z.array(uuid).optional(),
-    })
-    .optional(),
-});
+import { Ctx, requireTenantContext, type RequestContext } from '../../common/context/index.js';
+import { AccessAdminService, tenantActorFromContext } from './access-admin.service.js';
+import {
+  createRoleSchema,
+  grantsSchema,
+  previewSchema,
+  rolePermissionsSchema,
+  scopeSchema,
+  userRolesSchema,
+} from './access.schemas.js';
 
 /**
  * `/v1/access` — role / grant / scope administration (PHASE-1-PLAN §1.9). All
@@ -70,7 +25,7 @@ export class AccessController {
   @Get('roles')
   @RequirePermission('roles:manage')
   listRoles() {
-    return this.access.listRoles();
+    return this.access.listRoles(requireTenantContext().tenantId);
   }
 
   @Post('roles')
@@ -79,7 +34,7 @@ export class AccessController {
     @Ctx() ctx: RequestContext,
     @Body(new ZodBody(createRoleSchema)) dto: z.infer<typeof createRoleSchema>,
   ) {
-    return this.access.createRole(ctx, dto);
+    return this.access.createRole(tenantActorFromContext(ctx), dto);
   }
 
   @Put('roles/:roleId/permissions')
@@ -89,14 +44,14 @@ export class AccessController {
     @Param('roleId') roleId: string,
     @Body(new ZodBody(rolePermissionsSchema)) dto: z.infer<typeof rolePermissionsSchema>,
   ) {
-    await this.access.setRolePermissions(ctx, roleId, dto.permissionKeys);
+    await this.access.setRolePermissions(tenantActorFromContext(ctx), roleId, dto.permissionKeys);
     return { status: 'ok' };
   }
 
   @Get('users/:userId')
   @RequirePermission('users:manage')
   getUser(@Param('userId') userId: string) {
-    return this.access.getUser(userId);
+    return this.access.getUser(requireTenantContext().tenantId, userId);
   }
 
   @Put('users/:userId/roles')
@@ -106,7 +61,7 @@ export class AccessController {
     @Param('userId') userId: string,
     @Body(new ZodBody(userRolesSchema)) dto: z.infer<typeof userRolesSchema>,
   ) {
-    await this.access.setUserRoles(ctx, userId, dto.roleIds);
+    await this.access.setUserRoles(tenantActorFromContext(ctx), userId, dto.roleIds);
     return { status: 'ok' };
   }
 
@@ -117,7 +72,7 @@ export class AccessController {
     @Param('userId') userId: string,
     @Body(new ZodBody(grantsSchema)) dto: z.infer<typeof grantsSchema>,
   ) {
-    await this.access.setUserGrants(ctx, userId, dto.grants);
+    await this.access.setUserGrants(tenantActorFromContext(ctx), userId, dto.grants);
     return { status: 'ok' };
   }
 
@@ -128,7 +83,7 @@ export class AccessController {
     @Param('userId') userId: string,
     @Body(new ZodBody(scopeSchema)) dto: z.infer<typeof scopeSchema>,
   ) {
-    await this.access.setUserScope(ctx, userId, {
+    await this.access.setUserScope(tenantActorFromContext(ctx), userId, {
       companyScopeAll: dto.companyScopeAll,
       companyIds: dto.companyIds,
       branchScopeAll: dto.branchScopeAll,
@@ -144,6 +99,6 @@ export class AccessController {
     @Param('userId') userId: string,
     @Body(new ZodBody(previewSchema)) dto: z.infer<typeof previewSchema>,
   ) {
-    return this.access.preview(userId, dto);
+    return this.access.preview(requireTenantContext().tenantId, userId, dto);
   }
 }

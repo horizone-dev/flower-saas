@@ -7,9 +7,11 @@ import { EntitlementService } from './entitlement.service.js';
 import { LimitService } from './limit.service.js';
 import { ProvisioningService } from './provisioning.service.js';
 import { TenantLifecycleService } from './tenant-lifecycle.service.js';
+import { AuditReadRepository } from './audit-read.repository.js';
 import { PlanController } from './plan.controller.js';
 import { TenantConfigController } from './tenant-config.controller.js';
 import { TenantController } from './tenant.controller.js';
+import { AuditController } from './audit.controller.js';
 
 /**
  * `platform` module (ARCHITECTURE §3): plans + versions, entitlements, limits,
@@ -26,8 +28,9 @@ import { TenantController } from './tenant.controller.js';
     LimitService,
     ProvisioningService,
     TenantLifecycleService,
+    AuditReadRepository,
   ],
-  controllers: [PlanController, TenantConfigController, TenantController],
+  controllers: [PlanController, TenantConfigController, TenantController, AuditController],
   exports: [
     PlanRepository,
     TenantConfigRepository,

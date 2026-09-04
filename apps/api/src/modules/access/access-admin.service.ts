@@ -11,11 +11,46 @@ import {
   type GrantInput,
   type RoleRow,
   type ScopeInput,
+  type UserListRow,
 } from './access.repository.js';
 import { PolicyService, type AccessPreview, type ProposedAccess } from './policy.service.js';
 import { SessionAccessRefresher } from './session-access.refresher.js';
 
-/** The isKnownUniqueError shape Prisma throws on a unique-constraint violation. */
+/**
+ * Who is performing an access-admin mutation, and the constraints that apply to
+ * them. A **tenant-realm** caller (Owner / Admin) supplies `heldPermissions` —
+ * they can never grant a key they do not themselves hold, or a scope id outside
+ * their own scope. A **platform-realm** Super Admin's authority is the platform
+ * permission (`platform:tenant_users:manage` / `platform:tenant_roles:manage`,
+ * both step-up), so `heldPermissions` is `null` and scope is `'ALL'` — but the
+ * realm / entitlement / no-future-key checks still apply, and the write is fully
+ * audited.
+ */
+export interface AdminActor {
+  tenantId: string;
+  heldPermissions: ReadonlySet<string> | null;
+  companyScope: ScopeSet;
+  branchScope: ScopeSet;
+  /** enabled feature modules for the **target** tenant */
+  entitledModules: ReadonlySet<string>;
+  /** the acting tenant user id, if any (recorded as `permission_grant.granted_by`) */
+  actingUserId: string | null;
+}
+
+/** The `AdminActor` for a tenant-realm caller (Owner / Admin acting in their own
+ *  tenant) — carries their held permissions and scope for the escalation guard. */
+export function tenantActorFromContext(ctx: RequestContext): AdminActor {
+  const c = requireTenantContext();
+  return {
+    tenantId: c.tenantId,
+    heldPermissions: ctx.effectivePermissions,
+    companyScope: ctx.companyScope,
+    branchScope: ctx.branchScope,
+    entitledModules: ctx.entitlements,
+    actingUserId: ctx.userId,
+  };
+}
+
 function isUniqueViolation(err: unknown): boolean {
   return (
     typeof err === 'object' &&
@@ -26,15 +61,10 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
- * Role / grant / scope administration (PHASE-1-PLAN §1.9). Every mutation:
- *   1. passes the **escalation guard** — a tenant admin can never introduce a
- *      platform-realm key, a key the tenant is not entitled to, a key they do not
- *      themselves hold, or a scope id outside their own scope;
- *   2. writes its `audit_log` row inside the mutation's transaction (in the repo);
- *   3. refreshes the affected users' live sessions so it takes effect next request.
- *
- * `roles:manage` / `users:manage` are step-up permissions, enforced by the guard
- * pipeline before this service runs.
+ * Role / grant / scope administration (PHASE-1-PLAN §1.9 + §1.11). Every
+ * mutation: (1) passes the escalation guard, (2) writes its `audit_log` row in
+ * the mutation transaction (in the repo), (3) refreshes the affected users' live
+ * sessions so it takes effect on their next request.
  */
 @Injectable()
 export class AccessAdminService {
@@ -44,12 +74,24 @@ export class AccessAdminService {
     private readonly refresher: SessionAccessRefresher,
   ) {}
 
-  listRoles(): Promise<RoleRow[]> {
-    return this.repo.listRoles();
+  listRoles(tenantId: string): Promise<RoleRow[]> {
+    return this.repo.listRoles(tenantId);
   }
 
-  getUser(userId: string): Promise<AccessPreview['current'] & { accountType: string }> {
-    return this.policy.resolveForUser(userId).then((r) => ({
+  listUsers(tenantId: string): Promise<UserListRow[]> {
+    return this.repo.listUsers(tenantId);
+  }
+
+  getUser(
+    tenantId: string,
+    userId: string,
+  ): Promise<{
+    accountType: string;
+    permissions: string[];
+    companyScope: ScopeSet;
+    branchScope: ScopeSet;
+  }> {
+    return this.policy.resolveForUser(userId, tenantId).then((r) => ({
       accountType: r.accountType,
       permissions: [...r.effectivePermissions].sort(),
       companyScope: r.companyScope,
@@ -57,20 +99,20 @@ export class AccessAdminService {
     }));
   }
 
-  preview(userId: string, proposed: ProposedAccess): Promise<AccessPreview> {
-    return this.policy.preview(userId, proposed);
+  preview(tenantId: string, userId: string, proposed: ProposedAccess): Promise<AccessPreview> {
+    return this.policy.preview(userId, proposed, tenantId);
   }
 
   async createRole(
-    ctx: RequestContext,
+    actor: AdminActor,
     input: { key: string; name: string; permissionKeys: string[] },
   ): Promise<{ id: string }> {
     if (/^platform([:_]|$)/i.test(input.key)) {
       throw new ForbiddenError('the "platform" key prefix is reserved', 'RESERVED_ROLE_KEY');
     }
-    await this.assertGrantable(ctx, input.permissionKeys);
+    await this.assertGrantable(actor, input.permissionKeys);
     try {
-      return await this.repo.createRole(input);
+      return await this.repo.createRole(actor.tenantId, input);
     } catch (err) {
       if (isUniqueViolation(err)) {
         throw new DomainError('ROLE_KEY_TAKEN', `a role "${input.key}" already exists`, 409);
@@ -80,62 +122,64 @@ export class AccessAdminService {
   }
 
   async setRolePermissions(
-    ctx: RequestContext,
+    actor: AdminActor,
     roleId: string,
     permissionKeys: string[],
   ): Promise<void> {
-    const role = await this.repo.roleById(roleId);
+    const role = await this.repo.roleById(actor.tenantId, roleId);
     if (!role) throw new NotFoundError('role');
     if (role.isSystem) {
       throw new ForbiddenError('system roles are managed by the platform', 'SYSTEM_ROLE_READONLY');
     }
-    await this.assertGrantable(ctx, permissionKeys);
-    await this.repo.replaceRolePermissions(roleId, permissionKeys);
+    await this.assertGrantable(actor, permissionKeys);
+    await this.repo.replaceRolePermissions(actor.tenantId, roleId, permissionKeys);
     await this.refresher.refreshUsers(
-      requireTenantContext().tenantId,
-      await this.repo.userIdsWithRole(roleId),
+      actor.tenantId,
+      await this.repo.userIdsWithRole(actor.tenantId, roleId),
     );
   }
 
-  async setUserRoles(ctx: RequestContext, userId: string, roleIds: string[]): Promise<void> {
+  async setUserRoles(actor: AdminActor, userId: string, roleIds: string[]): Promise<void> {
     const unique = [...new Set(roleIds)];
-    if (!(await this.repo.userExists(userId))) throw new NotFoundError('user');
-    if ((await this.repo.countRoles(unique)) !== unique.length) throw new NotFoundError('role');
-    await this.assertGrantable(ctx, await this.repo.permissionsForRoles(unique));
-    await this.repo.setUserRoles(userId, unique);
-    await this.refresher.refreshUser(requireTenantContext().tenantId, userId);
+    if (!(await this.repo.userExists(actor.tenantId, userId))) throw new NotFoundError('user');
+    if ((await this.repo.countRoles(actor.tenantId, unique)) !== unique.length) {
+      throw new NotFoundError('role');
+    }
+    await this.assertGrantable(actor, await this.repo.permissionsForRoles(unique, actor.tenantId));
+    await this.repo.setUserRoles(actor.tenantId, userId, unique);
+    await this.refresher.refreshUser(actor.tenantId, userId);
   }
 
-  async setUserGrants(ctx: RequestContext, userId: string, grants: GrantInput[]): Promise<void> {
-    if (!(await this.repo.userExists(userId))) throw new NotFoundError('user');
+  async setUserGrants(actor: AdminActor, userId: string, grants: GrantInput[]): Promise<void> {
+    if (!(await this.repo.userExists(actor.tenantId, userId))) throw new NotFoundError('user');
     // Only ALLOW grants can escalate; a DENY only ever removes access.
     await this.assertGrantable(
-      ctx,
+      actor,
       grants.filter((g) => g.effect === 'ALLOW').map((g) => g.permissionKey),
     );
-    await this.repo.replaceUserGrants(userId, grants);
-    await this.refresher.refreshUser(requireTenantContext().tenantId, userId);
+    await this.repo.replaceUserGrants(actor.tenantId, userId, grants, actor.actingUserId);
+    await this.refresher.refreshUser(actor.tenantId, userId);
   }
 
-  async setUserScope(ctx: RequestContext, userId: string, scope: ScopeInput): Promise<void> {
-    if (!(await this.repo.userExists(userId))) throw new NotFoundError('user');
-    if (!scope.companyScopeAll) assertIdsWithin(ctx.companyScope, scope.companyIds, 'company');
-    if (!scope.branchScopeAll) assertIdsWithin(ctx.branchScope, scope.branchIds, 'branch');
-    await this.repo.setUserScope(userId, scope);
-    await this.refresher.refreshUser(requireTenantContext().tenantId, userId);
+  async setUserScope(actor: AdminActor, userId: string, scope: ScopeInput): Promise<void> {
+    if (!(await this.repo.userExists(actor.tenantId, userId))) throw new NotFoundError('user');
+    if (!scope.companyScopeAll) assertIdsWithin(actor.companyScope, scope.companyIds, 'company');
+    if (!scope.branchScopeAll) assertIdsWithin(actor.branchScope, scope.branchIds, 'branch');
+    await this.repo.setUserScope(actor.tenantId, userId, scope);
+    await this.refresher.refreshUser(actor.tenantId, userId);
   }
 
   /**
    * The escalation guard. `keys` is every permission key the mutation would add
    * (role permission set, assigned roles' union, or ALLOW grants).
    */
-  private async assertGrantable(ctx: RequestContext, keys: readonly string[]): Promise<void> {
+  private async assertGrantable(actor: AdminActor, keys: readonly string[]): Promise<void> {
     if (keys.length === 0) return;
     const unique = [...new Set(keys)];
 
     // 1 — must be a known TENANT-realm permission. A platform key or a
-    //     not-yet-seeded future key is not grantable.
-    const known = await this.repo.tenantRealmPermissionKeys(unique);
+    //     not-yet-seeded future key is not grantable (by anyone, any realm).
+    const known = await this.repo.tenantRealmPermissionKeys(unique, actor.tenantId);
     const notTenant = unique.filter((k) => !known.has(k));
     if (notTenant.length > 0) {
       throw new ForbiddenError(
@@ -144,10 +188,10 @@ export class AccessAdminService {
       );
     }
 
-    // 2 — the key's feature module must be entitled for this tenant.
+    // 2 — the key's feature module must be entitled for the target tenant.
     const notEntitled = unique.filter((k) => {
       const mod = MODULE_OF_PERMISSION[k];
-      return mod !== undefined && !ctx.entitlements.has(mod);
+      return mod !== undefined && !actor.entitledModules.has(mod);
     });
     if (notEntitled.length > 0) {
       throw new ForbiddenError(
@@ -156,13 +200,17 @@ export class AccessAdminService {
       );
     }
 
-    // 3 — no privilege escalation: the acting admin must hold every key they add.
-    const notHeld = unique.filter((k) => !ctx.effectivePermissions.has(k));
-    if (notHeld.length > 0) {
-      throw new ForbiddenError(
-        `cannot grant a permission you do not hold: ${notHeld.sort().join(', ')}`,
-        'PRIVILEGE_ESCALATION',
-      );
+    // 3 — no privilege escalation: a tenant admin must hold every key they add.
+    //     A platform Super Admin's authority is the platform permission itself.
+    if (actor.heldPermissions !== null) {
+      const held = actor.heldPermissions;
+      const notHeld = unique.filter((k) => !held.has(k));
+      if (notHeld.length > 0) {
+        throw new ForbiddenError(
+          `cannot grant a permission you do not hold: ${notHeld.sort().join(', ')}`,
+          'PRIVILEGE_ESCALATION',
+        );
+      }
     }
   }
 }

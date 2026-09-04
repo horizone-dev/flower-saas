@@ -6,6 +6,7 @@ import { PolicyEngine } from './policy-engine.js';
 import { SessionAccessRefresher } from './session-access.refresher.js';
 import { AccessAdminService } from './access-admin.service.js';
 import { AccessController } from './access.controller.js';
+import { PlatformTenantAccessController } from './platform-tenant-access.controller.js';
 
 /**
  * `access` module (ARCHITECTURE §3): roles, direct grants/denies, data-scope
@@ -24,7 +25,7 @@ import { AccessController } from './access.controller.js';
     SessionAccessRefresher,
     AccessAdminService,
   ],
-  controllers: [AccessController],
+  controllers: [AccessController, PlatformTenantAccessController],
   exports: [PolicyService, PolicyEngine],
 })
 export class AccessModule {}

@@ -1,4 +1,13 @@
-import { Body, Controller, Headers, HttpCode, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  NotFoundException,
+  Param,
+  Post,
+} from '@nestjs/common';
 import { z } from 'zod';
 import { PlatformRealm } from '../../common/auth/pipeline.decorators.js';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
@@ -6,6 +15,7 @@ import { Ctx, type RequestContext } from '../../common/context/index.js';
 import { ZodBody } from '../../common/validation/zod-body.js';
 import { ProvisioningService } from './provisioning.service.js';
 import { TenantLifecycleService } from './tenant-lifecycle.service.js';
+import { TenantRepository } from './tenant.repository.js';
 
 const provisionSchema = z.object({
   slug: z.string().min(2).max(63),
@@ -25,7 +35,22 @@ export class TenantController {
   constructor(
     private readonly provisioning: ProvisioningService,
     private readonly lifecycle: TenantLifecycleService,
+    private readonly tenants: TenantRepository,
   ) {}
+
+  @Get()
+  @RequirePermission('platform:tenants:view')
+  list() {
+    return this.tenants.list();
+  }
+
+  @Get(':tenantId')
+  @RequirePermission('platform:tenants:view')
+  async detail(@Param('tenantId') tenantId: string) {
+    const t = await this.tenants.get(tenantId);
+    if (!t) throw new NotFoundException('tenant not found');
+    return t;
+  }
 
   @Post()
   @RequirePermission('platform:tenants:manage')

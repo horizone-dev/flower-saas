@@ -14,6 +14,7 @@ import { AuthController } from './auth.controller.js';
 import { PlatformAuthController } from './platform-auth.controller.js';
 import { MeController } from './me.controller.js';
 import { ImpersonationController, EndImpersonationController } from './impersonation.controller.js';
+import { PlatformSessionsController } from './platform-sessions.controller.js';
 
 /**
  * `identity` module (ARCHITECTURE §3): users, credentials, MFA, sessions, refresh
@@ -27,6 +28,7 @@ import { ImpersonationController, EndImpersonationController } from './impersona
     MeController,
     ImpersonationController,
     EndImpersonationController,
+    PlatformSessionsController,
   ],
   providers: [
     PasswordService,

@@ -3,7 +3,8 @@ import { Inject, Injectable } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../../config/env.js';
 import { JwtService } from '../../common/auth/jwt.service.js';
 import { SessionStore } from '../../common/auth/session-store.js';
-import type { Realm, SessionData } from '../../common/auth/session.types.js';
+import { RedisService } from '../../common/redis/redis.module.js';
+import { isStepUpActive, type Realm, type SessionData } from '../../common/auth/session.types.js';
 import type { MfaLevel } from '../../common/context/index.js';
 import { PolicyService } from '../access/policy.service.js';
 import { toAccessSnapshot } from '../access/policy.types.js';
@@ -44,7 +45,41 @@ export class SessionService {
     private readonly limits: LimitService,
     private readonly identity: IdentityRepository,
     private readonly platformIdentity: PlatformIdentityRepository,
+    private readonly redis: RedisService,
   ) {}
+
+  /** Live sessions for a tenant (Super Admin sessions viewer — task 1.11). Reads
+   *  the `tenantsessions:<id>` index + the session blobs from the store. */
+  async listForTenant(tenantId: string): Promise<
+    {
+      sessionId: string;
+      userId: string | null;
+      posTerminalId: string | null;
+      mfaLevel: string;
+      createdAt: number;
+      expiresAt: number;
+      impersonated: boolean;
+    }[]
+  > {
+    const client = this.redis.get();
+    if (!client) return [];
+    const ids = await client.zrange(`tenantsessions:${tenantId}`, '0', '-1');
+    const out = [];
+    for (const id of ids) {
+      const s = await this.store.get(id);
+      if (!s || s.tenantId !== tenantId) continue;
+      out.push({
+        sessionId: s.sessionId,
+        userId: s.userId,
+        posTerminalId: s.posTerminalId,
+        mfaLevel: isStepUpActive(s) ? 'STEP_UP' : s.mfaLevel,
+        createdAt: s.createdAt,
+        expiresAt: s.expiresAt,
+        impersonated: s.impersonatorPlatformUserId !== null,
+      });
+    }
+    return out;
+  }
 
   async issue(input: IssueSessionInput): Promise<IssuedSession> {
     const now = Date.now();

@@ -54,6 +54,58 @@ export class TenantRepository {
     );
   }
 
+  list(): Promise<
+    { id: string; slug: string; name: string; region: string; status: string; createdAt: Date }[]
+  > {
+    return runPlatform(this.c, (tx) =>
+      tx.tenant.findMany({
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          region: true,
+          status: true,
+          createdAt: true,
+        },
+      }),
+    );
+  }
+
+  async get(tenantId: string): Promise<{
+    id: string;
+    slug: string;
+    name: string;
+    region: string;
+    status: string;
+    planVersionId: string | null;
+    createdAt: Date;
+    counts: { companies: number; branches: number; users: number; posTerminals: number };
+  } | null> {
+    return runPlatform(this.c, async (tx) => {
+      const t = await tx.tenant.findUnique({
+        where: { id: tenantId },
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          region: true,
+          status: true,
+          planVersionId: true,
+          createdAt: true,
+        },
+      });
+      if (!t) return null;
+      const [companies, branches, users, posTerminals] = await Promise.all([
+        tx.company.count({ where: { tenantId } }),
+        tx.branch.count({ where: { tenantId } }),
+        tx.user.count({ where: { tenantId } }),
+        tx.posTerminal.count({ where: { tenantId } }),
+      ]);
+      return { ...t, counts: { companies, branches, users, posTerminals } };
+    });
+  }
+
   async tenantStatus(tenantId: string): Promise<string | null> {
     const t = await runPlatform(this.c, (tx) =>
       tx.tenant.findUnique({ where: { id: tenantId }, select: { status: true } }),
