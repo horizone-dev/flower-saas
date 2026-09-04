@@ -30,14 +30,22 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     pool = new pg.Pool({ connectionString: stack.postgres.url });
     redis = new Redis(stack.redis.url);
 
-    const cfg: BackendConfig = {
+    db = new DbService(dbConfig());
+  }, 300_000);
+
+  /** `BackendConfig` for this stack — `AUTH_JWT_SECRET`/`AUTH_ACCESS_TOKEN_TTL_SECONDS`
+   *  (task 2.5) are unused by anything in this Postgres+Redis-only outbox suite,
+   *  a dev-default value satisfies the type. */
+  function dbConfig(): BackendConfig {
+    return {
       NODE_ENV: 'test',
       LOG_LEVEL: 'silent',
       DATABASE_URL: stack.postgres.url,
       PLATFORM_DATABASE_URL: stack.postgres.url,
+      AUTH_JWT_SECRET: 'dev-only-insecure-jwt-secret-change-me-000',
+      AUTH_ACCESS_TOKEN_TTL_SECONDS: 600,
     };
-    db = new DbService(cfg);
-  }, 300_000);
+  }
 
   afterAll(async () => {
     await redis?.quit();
@@ -61,13 +69,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
   /** A fresh `DbService` — its own Prisma client / connection pool, so an
    *  advisory lock taken through it is genuinely a separate Postgres session. */
   function freshDb(): DbService {
-    const cfg: BackendConfig = {
-      NODE_ENV: 'test',
-      LOG_LEVEL: 'silent',
-      DATABASE_URL: stack.postgres.url,
-      PLATFORM_DATABASE_URL: stack.postgres.url,
-    };
-    return new DbService(cfg);
+    return new DbService(dbConfig());
   }
 
   async function insertOutboxRow(over: {

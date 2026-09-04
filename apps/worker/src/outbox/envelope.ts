@@ -63,10 +63,12 @@ export function buildEnvelope(row: OutboxRow): OutboxEnvelope {
   };
 }
 
-/** One durable Redis Stream per tenant (ADR-0017 §3 / OD-P2-4). */
-export function streamKey(tenantId: string): string {
-  return `rt:stream:${tenantId}`;
-}
+/** One durable Redis Stream per tenant (ADR-0017 §3 / OD-P2-4). Re-exported
+ *  from `@flower/backend` (task 2.5) — the realtime relay (`../realtime-relay/`,
+ *  same app) needs the identical name to `XREADGROUP` from, and the canonical
+ *  definition lives in `@flower/backend` alongside `liveChannel`/`revokeChannel`
+ *  so `apps/realtime` never has to duplicate it either. */
+export { streamKey } from '@flower/backend';
 
 /** The single field name every envelope is written under in the Stream entry. */
 export const ENVELOPE_FIELD = 'event';

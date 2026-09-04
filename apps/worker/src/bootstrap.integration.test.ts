@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Queue, type Job } from 'bullmq';
+import { Redis } from 'ioredis';
 import { createLogger } from '@flower/service-runtime';
+import { streamKey, liveChannel } from '@flower/backend';
 import { startTestStack, type TestStack } from '@flower/testing';
 import { bootstrapWorker, type WorkerRuntime, type WorkerRuntimeOptions } from './bootstrap.js';
 import { DEAD_LETTER_QUEUE } from './queues.js';
@@ -127,6 +129,35 @@ describe('worker runtime (integration — Redis)', () => {
     const job = await probeQueue.getJob(jobId);
     expect(await job?.getState()).toBe('completed');
     await probeQueue.close();
+  });
+
+  it('the realtime relay (task 2.5) is wired in and actually relays a real stream entry', async () => {
+    const runtime = await boot();
+    expect(runtime.relay).toBeDefined();
+
+    const tenantId = randomUUID();
+    const probe = new Redis(stack.redis.url);
+    const env = JSON.stringify({
+      event_id: randomUUID(),
+      seq: '1',
+      tenant_id: tenantId,
+      type: 'x',
+    });
+    await probe.xadd(streamKey(tenantId), '*', 'event', env);
+
+    const sub = new Redis(stack.redis.url);
+    await sub.subscribe(liveChannel(tenantId));
+    const received = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timed out waiting for relay')), 5_000);
+      sub.on('message', (_ch, msg: string) => {
+        clearTimeout(timer);
+        resolve(msg);
+      });
+    });
+    expect(received).toBe(env);
+    await sub.unsubscribe(liveChannel(tenantId));
+    await sub.quit();
+    await probe.quit();
   });
 
   it('Redis unreachable at startup fails fast (documented policy)', async () => {

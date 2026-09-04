@@ -5,11 +5,12 @@ import { z } from 'zod';
  * consumes `@flower/backend` — `apps/api`, `apps/worker`, `apps/scheduler`.
  *
  * Kept deliberately small: only the fields the shared backend modules
- * (`DbService`, the root logger) genuinely need. `apps/api` `.extend()`s this
- * with its own HTTP / auth / CORS / secrets / idempotency fields
- * (`apps/api/src/config/env.ts`); `apps/worker` / `apps/scheduler` parse exactly
- * this set. Defining `DATABASE_URL` etc. **once, here** means the three processes
- * can never drift.
+ * (`DbService`, the root logger, the auth/session primitive — task 2.5) genuinely
+ * need. `apps/api` `.extend()`s this with its own HTTP / CORS / secrets /
+ * idempotency / refresh-token / lockout fields (`apps/api/src/config/env.ts`);
+ * `apps/worker` / `apps/scheduler` / `apps/realtime` parse exactly this set.
+ * Defining `DATABASE_URL` etc. **once, here** means every process can never
+ * drift.
  *
  * `@flower/backend` never imports an app's env module — dependency direction is
  * `apps/* → @flower/backend`, not the reverse (FC-3). A consumer supplies the
@@ -24,6 +25,15 @@ export const backendEnvSchema = z.object({
   // (`flower_platform`, BYPASSRLS — ADR-0014). In dev they can be the same URL.
   DATABASE_URL: z.string().optional(),
   PLATFORM_DATABASE_URL: z.string().optional(),
+
+  // Auth (task 1.4/1.5; moved here task 2.5 — `JwtService` needs it in every
+  // process that verifies a token, not just `apps/api`, which also *signs*).
+  // A dev default keeps unit tests self-contained; `apps/api`'s `loadConfig`
+  // still refuses this default in production (the production check is an
+  // apps/api-only concern — it is the only process that can be misconfigured
+  // this way in a way that matters, since it is the only signer).
+  AUTH_JWT_SECRET: z.string().min(32).default('dev-only-insecure-jwt-secret-change-me-000'),
+  AUTH_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(600),
 });
 
 export type BackendConfig = Readonly<z.infer<typeof backendEnvSchema>>;

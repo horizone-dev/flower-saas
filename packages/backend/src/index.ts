@@ -46,3 +46,25 @@ export {
 // data access — the sanctioned scoped / platform DB paths + the Prisma client host
 export { DbModule, DbService } from './db/index.js';
 export { ScopedRepository, PlatformRepository } from './data/index.js';
+
+// auth / session — the shared, framework-independent token+session primitive
+// (task 2.5). See auth/index.ts's module doc comment for exactly what is and
+// is not in scope here.
+export {
+  JwtService,
+  TokenInvalidError,
+  SessionStore,
+  SESSION_STORE,
+  InMemorySessionStore,
+  RedisSessionStore,
+  SessionAuthenticator,
+  SessionAuthError,
+  type SessionData,
+  type AccessTokenClaims,
+  type Realm,
+  isStepUpActive,
+} from './auth/index.js';
+
+// realtime channel naming — shared so apps/worker (publisher) and
+// apps/realtime (subscriber) never cross-import each other (task 2.5)
+export { streamKey, liveChannel, revokeChannel } from './realtime/channels.js';

@@ -15,6 +15,7 @@ export {
 export { PipelineModule } from './pipeline.module.js';
 export { JwtService, TokenInvalidError } from './jwt.service.js';
 export { SessionStore, SESSION_STORE, InMemorySessionStore } from './session-store.js';
+export { SessionAuthenticator, SessionAuthError } from '@flower/backend';
 export {
   type SessionData,
   type AccessTokenClaims,

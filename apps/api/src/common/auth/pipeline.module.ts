@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { APP_GUARD, DiscoveryModule, Reflector } from '@nestjs/core';
+import { SessionAuthenticator } from '@flower/backend';
 import { AccessModule } from '../../modules/access/access.module.js';
 import { JwtService } from './jwt.service.js';
 import { SessionModule } from './session.module.js';
@@ -24,9 +25,10 @@ import { PermissionGuard } from './permission.guard.js';
   providers: [
     Reflector,
     JwtService,
+    SessionAuthenticator,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },
   ],
-  exports: [JwtService, SessionModule],
+  exports: [JwtService, SessionAuthenticator, SessionModule],
 })
 export class PipelineModule {}

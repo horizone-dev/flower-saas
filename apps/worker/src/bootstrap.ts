@@ -19,6 +19,7 @@ import { ProcessorRegistry } from './processor-registry.js';
 import { probeProcessor } from './processors/probe.processor.js';
 import { QUEUES, type QueueName } from './queues.js';
 import { OutboxDispatcher, type OutboxDispatcherOptions } from './outbox/dispatcher.js';
+import { RealtimeRelay, type RealtimeRelayOptions } from './realtime-relay/relay-loop.js';
 
 export interface WorkerRuntimeOptions {
   readonly redisHost: string;
@@ -30,6 +31,8 @@ export interface WorkerRuntimeOptions {
   readonly redisConnectTimeoutMs?: number;
   /** outbox dispatcher tuning (task 2.4) — all optional, sane defaults apply */
   readonly outbox?: Partial<Omit<OutboxDispatcherOptions, 'db' | 'redis' | 'logger'>>;
+  /** realtime relay tuning (task 2.5) — all optional, sane defaults apply */
+  readonly relay?: Partial<Omit<RealtimeRelayOptions, 'redis' | 'logger'>>;
 }
 
 export interface WorkerRuntime {
@@ -37,6 +40,7 @@ export interface WorkerRuntime {
   readonly registry: ProcessorRegistry;
   readonly connection: Redis;
   readonly dispatcher: OutboxDispatcher;
+  readonly relay: RealtimeRelay;
   readonly health: Server;
   stop(): Promise<void>;
 }
@@ -94,12 +98,27 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
   });
   dispatcher.start();
 
+  // A third dedicated connection (task 2.5) — separate from both the BullMQ
+  // connection and the outbox dispatcher's XADD connection, matching this
+  // file's existing one-connection-per-distinct-workload pattern (independent
+  // failure isolation; none of the relay's commands are blocking, so a shared
+  // connection would have worked too, but keeping workloads on separate
+  // connections avoids any subtle cross-workload pipelining interference).
+  const relayRedis = createRedis(opts.redisHost, opts.redisPort);
+  const relay = new RealtimeRelay({
+    redis: relayRedis,
+    logger,
+    ...opts.relay,
+  });
+  relay.start();
+
   const health = startHealthServer(
     opts.metricsPort,
     'worker',
     async () => ({
       redis: (await redisHealthy(connection)) ? 'ok' : 'down',
       outboxRedis: (await redisHealthy(outboxRedis)) ? 'ok' : 'down',
+      relayRedis: (await redisHealthy(relayRedis)) ? 'ok' : 'down',
     }),
     {
       metrics: async () => {
@@ -115,15 +134,18 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
     registry,
     connection,
     dispatcher,
+    relay,
     health,
     async stop(): Promise<void> {
       health.close();
       await dispatcher.stop();
+      await relay.stop();
       await registry.stop();
       await Promise.allSettled([...metricsQueues.values()].map((q) => q.close()));
       await context.close();
       connection.disconnect();
       outboxRedis.disconnect();
+      relayRedis.disconnect();
     },
   };
 }

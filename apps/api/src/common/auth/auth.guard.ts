@@ -1,11 +1,10 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { FastifyRequest } from 'fastify';
+import { SessionAuthenticator, SessionAuthError } from '@flower/backend';
 import { requireContext, replaceContext } from '../context/index.js';
 import { IS_PUBLIC_KEY } from './public.decorator.js';
 import { PLATFORM_REALM_KEY } from './pipeline.decorators.js';
-import { JwtService, TokenInvalidError } from './jwt.service.js';
-import { SessionStore } from './session-store.js';
 import { isStepUpActive, type Realm, type SessionData } from './session.types.js';
 
 /**
@@ -14,14 +13,21 @@ import { isStepUpActive, type Realm, type SessionData } from './session.types.js
  * amendment 1). On success the full `RequestContext` is populated from the
  * session's cached access snapshot and swapped into the ALS frame.
  *
+ * Steps 1–3 (token verify → session lookup → realm/revoked/expired) run
+ * through `SessionAuthenticator` (`@flower/backend`, task 2.5) — the same
+ * primitive `apps/realtime`'s WS handler uses, so this app and the realtime
+ * gateway can never resolve a session differently. This guard's own job is
+ * purely HTTP-transport: extract the bearer token, map an authentication
+ * failure onto `UnauthorizedException`, and populate the HTTP-request-scoped
+ * `RequestContext`.
+ *
  * `@Public()` routes skip this entirely.
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
-    private readonly jwt: JwtService,
-    private readonly sessions: SessionStore,
+    private readonly authenticator: SessionAuthenticator,
   ) {}
 
   async canActivate(execCtx: ExecutionContext): Promise<boolean> {
@@ -38,20 +44,14 @@ export class AuthGuard implements CanActivate {
     const token = bearer(req);
     if (!token) throw new UnauthorizedException('missing bearer token');
 
-    let sessionId: string;
+    let session: SessionData;
     try {
-      ({ sid: sessionId } = await this.jwt.verify(token, realm));
+      session = await this.authenticator.authenticate(token, realm);
     } catch (err) {
       throw new UnauthorizedException(
-        err instanceof TokenInvalidError ? err.message : 'token invalid',
+        err instanceof SessionAuthError ? err.message : 'auth failed',
       );
     }
-
-    const session = await this.sessions.get(sessionId);
-    if (!session) throw new UnauthorizedException('session not found');
-    if (session.realm !== realm) throw new UnauthorizedException('wrong realm');
-    if (session.revokedAt !== null) throw new UnauthorizedException('session revoked');
-    if (session.expiresAt <= Date.now()) throw new UnauthorizedException('session expired');
 
     // step 4 — registered device: no-op in Phase 1 (the policy flag can never be
     // true; the full check lands with the devices module in Phase 2).

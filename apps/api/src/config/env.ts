@@ -42,10 +42,13 @@ const envSchema = backendEnvSchema.extend({
     .default(64 * 1024),
   IDEMPOTENCY_WAIT_MS: z.coerce.number().int().positive().default(5000),
 
-  // Auth (task 1.4/1.5). A dev default keeps unit tests self-contained; a real
-  // secret is required in production (checked at bootstrap).
-  AUTH_JWT_SECRET: z.string().min(32).default('dev-only-insecure-jwt-secret-change-me-000'),
-  AUTH_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(600),
+  // Auth (task 1.4/1.5). AUTH_JWT_SECRET / AUTH_ACCESS_TOKEN_TTL_SECONDS moved to
+  // `backendEnvSchema` (task 2.5) — `JwtService` now lives in `@flower/backend`
+  // and every process that verifies a token (not just the one that signs it)
+  // needs the secret; inherited here via `.extend()`, not redeclared, so there
+  // is exactly one definition. A real secret is required in production (checked
+  // below, an apps/api-only check — it is the only signer, so the only process
+  // that can be unsafely misconfigured this way).
   AUTH_REFRESH_TOKEN_TTL_SECONDS: z.coerce
     .number()
     .int()
