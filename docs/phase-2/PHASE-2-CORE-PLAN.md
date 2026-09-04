@@ -518,9 +518,13 @@ logger}` import paths — **zero import-path churn** across the ~50 files that
   a dedicated loop (not a BullMQ queue).
 - `apps/scheduler`: the `REPEATABLE_JOBS` registry — enqueue only
   (`Queue.upsertJobScheduler`, stamped with the same shared retry policy). Task
-  2.3 ships one entry: `probe` → the `probe` queue, every 60s. Domain / maintenance
-  schedules (the idempotency sweep — B14, outbox-lag alarm, realtime stream
-  `XTRIM`) stay in the backlog / their phases.
+  2.3 ships one entry: `probe` → the `probe` queue, every 60s. Truly-deferred
+  domain schedules (the idempotency sweep — backlog **B14**) stay in the
+  backlog. **Not backlog — still core, remaining, tracked before 2.8**: the
+  ~24h time-based `XTRIM` retention job and the outbox-lag alarm (§2.4) — a
+  2026-09-04 remediation review confirmed neither had shipped and the earlier
+  wording here wrongly grouped them with B14; they land in a later core task,
+  before `phase-2-core-complete`.
 - `packages/service-runtime`: extended with `createBullConnection` (BullMQ needs
   `maxRetriesPerRequest: null`), `DEFAULT_RETRY_POLICY` + `jobOptions` (shared by
   worker and scheduler — one retry policy, defined once), an optional `/metrics`
@@ -574,9 +578,12 @@ the 3 boundary tests (teeth + real-tree scan) pass in `packages/backend`,
 > current (only) producer, `tenant.provisioned`. The dispatcher only ever
 > processes `tenant_id IS NOT NULL` rows (Redis routing needs a tenant); a
 > platform-level (`tenant_id IS NULL`) outbox row has no producer yet and is
-> out of scope here. Fan-out to BullMQ + the outbox-lag alarm + `XTRIM`
-> scheduling are **not** built in this task (scope: dispatch → Stream only;
-> retention primitive + domain fan-out land with 2.5+/backlog).
+> out of scope here. Fan-out to BullMQ domain queues (backlog — no consumer
+> exists yet) and the outbox-lag alarm + `XTRIM` retention scheduling are
+> **not** built in this task (scope: dispatch → Stream only). **The `XTRIM`
+> retention job and the lag alarm are core, not backlog** — they must land in
+> a later core task, before `phase-2-core-complete`; do not fold this
+> confirmation into task 2.5's scope (2026-09-04 remediation review).
 
 In `apps/worker`, a dedicated dispatcher loop (single leader via a Postgres
 advisory lock so per-tenant `seq` is strictly increasing):

@@ -11,6 +11,7 @@ export * from './constants.js';
 export {
   runScoped,
   runPlatform,
+  runDispatcher,
   currentTenantGuc,
   type ScopedTx,
   type ScopeContext,

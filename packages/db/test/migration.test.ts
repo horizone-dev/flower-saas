@@ -95,7 +95,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_security_event_view'))).toBe(true);
     expect(names.some((n) => n.endsWith('_phase_2_core_infra'))).toBe(true);
     expect(names.some((n) => n.endsWith('_idempotency_claim_token'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_outbox_dispatcher$/);
+    expect(names.some((n) => /_outbox_dispatcher$/.test(n))).toBe(true);
+    expect(names.at(-1)).toMatch(/_outbox_dispatcher_least_privilege$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -184,7 +185,7 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
   });
 
   // ── DB roles ───────────────────────────────────────────────────────────────
-  it('creates flower_app (NOSUPERUSER, NOBYPASSRLS), flower_platform (BYPASSRLS), flower_migrate', async () => {
+  it('creates flower_app (NOSUPERUSER, NOBYPASSRLS), flower_platform (BYPASSRLS), flower_migrate, flower_dispatcher (BYPASSRLS)', async () => {
     const { rows } = await pool.query<{
       rolname: string;
       rolsuper: boolean;
@@ -194,6 +195,11 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(byName[DB_ROLES.app]).toMatchObject({ rolsuper: false, rolbypassrls: false });
     expect(byName[DB_ROLES.platform]).toMatchObject({ rolsuper: false, rolbypassrls: true });
     expect(byName[DB_ROLES.migrate]).toMatchObject({ rolsuper: false, rolbypassrls: false });
+    // task 2.4 remediation (concern #3): a dedicated, narrowly-grants role for
+    // the dispatcher — BYPASSRLS (it must scan every tenant's outbox rows,
+    // same reason flower_platform needs it) but see the describe block below
+    // for proof its GRANTs are narrowed to exactly outbox + outbox_tenant_seq.
+    expect(byName[DB_ROLES.dispatcher]).toMatchObject({ rolsuper: false, rolbypassrls: true });
   });
 
   it('flower_app has no access to the platform identity realm, and cannot write plan', async () => {
@@ -422,6 +428,86 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       expect(b).toBe(a + 1n);
       expect(c).toBe(b + 1n);
       await pool.query(`DELETE FROM outbox_tenant_seq WHERE "tenantId" = $1`, [tenant]);
+    });
+  });
+
+  // ── flower_dispatcher — least privilege (task 2.4 remediation, concern #3) ─
+  // The dispatcher runs BYPASSRLS (it must scan every tenant's outbox rows —
+  // there is no single app.tenant_id to scope a request to), but its GRANTs
+  // must be narrowed to exactly `outbox` + `outbox_tenant_seq`. These prove
+  // that narrowing holds — including that BYPASSRLS alone grants nothing
+  // without an explicit table GRANT.
+  describe('flower_dispatcher — least privilege', () => {
+    async function asDispatcher<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.dispatcher}`);
+        return await fn(c);
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+    }
+
+    it('can SELECT + UPDATE outbox, and SELECT + INSERT + UPDATE outbox_tenant_seq', async () => {
+      await asDispatcher(async (c) => {
+        await expect(c.query('SELECT count(*) FROM outbox')).resolves.toBeTruthy();
+        await expect(
+          c.query(`UPDATE outbox SET attempts = attempts WHERE false`),
+        ).resolves.toBeTruthy();
+        await expect(c.query('SELECT count(*) FROM outbox_tenant_seq')).resolves.toBeTruthy();
+
+        const tenant = 'dddddddd-dddd-7ddd-8ddd-dddddddddddd';
+        await expect(
+          c.query(
+            `INSERT INTO outbox_tenant_seq ("tenantId") VALUES ($1)
+               ON CONFLICT ("tenantId") DO UPDATE SET "nextSeq" = outbox_tenant_seq."nextSeq" + 1`,
+            [tenant],
+          ),
+        ).resolves.toBeTruthy();
+      });
+      await pool.query(`DELETE FROM outbox_tenant_seq WHERE "tenantId" = $1`, [
+        'dddddddd-dddd-7ddd-8ddd-dddddddddddd',
+      ]);
+    });
+
+    it('cannot INSERT or DELETE outbox — dispatch only claims/updates rows apps/api already wrote', async () => {
+      await asDispatcher(async (c) => {
+        await expect(
+          c.query(
+            `INSERT INTO outbox (id, "aggregateType", "aggregateId", "eventType", payload, "createdAt")
+             VALUES (uuidv7(), 'x', 'x', 'x', '{}'::jsonb, now())`,
+          ),
+        ).rejects.toThrow(/permission denied/i);
+        await expect(c.query(`DELETE FROM outbox WHERE false`)).rejects.toThrow(
+          /permission denied/i,
+        );
+      });
+    });
+
+    it('cannot DELETE outbox_tenant_seq', async () => {
+      await asDispatcher(async (c) => {
+        await expect(c.query(`DELETE FROM outbox_tenant_seq WHERE false`)).rejects.toThrow(
+          /permission denied/i,
+        );
+      });
+    });
+
+    it('cannot read or write ANY other table — no cross-tenant business-table access despite BYPASSRLS', async () => {
+      await asDispatcher(async (c) => {
+        await expect(c.query('SELECT count(*) FROM "user"')).rejects.toThrow(/permission denied/i);
+        await expect(c.query('SELECT count(*) FROM tenant')).rejects.toThrow(/permission denied/i);
+        await expect(c.query('SELECT count(*) FROM audit_log')).rejects.toThrow(
+          /permission denied/i,
+        );
+        await expect(c.query('SELECT count(*) FROM plan')).rejects.toThrow(/permission denied/i);
+        await expect(c.query('SELECT count(*) FROM platform_user')).rejects.toThrow(
+          /permission denied/i,
+        );
+        await expect(c.query(`UPDATE "user" SET status = 'DISABLED' WHERE false`)).rejects.toThrow(
+          /permission denied/i,
+        );
+      });
     });
   });
 

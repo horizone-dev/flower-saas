@@ -1,4 +1,4 @@
-import { runPlatform } from '@flower/db';
+import { runDispatcher } from '@flower/db';
 import type { DbService } from '@flower/backend';
 
 export interface AllocateResult {
@@ -14,7 +14,7 @@ export interface AllocateResult {
  * Only the process that wins `pg_try_advisory_xact_lock` for this tenant may
  * stamp its unstamped, undispatched rows — serialized allocation, so `seq` is
  * strictly increasing per tenant. The lock is transaction-scoped: it is held for
- * exactly this call's `runPlatform` transaction and is released the moment that
+ * exactly this call's `runDispatcher` transaction and is released the moment that
  * transaction commits (success) or rolls back (any error, or a crash — Postgres
  * itself frees every lock held by a backend whose connection drops), so a
  * "leadership handover" is nothing more than the *next* caller successfully
@@ -35,7 +35,7 @@ export async function allocateTenantSeq(
   tenantId: string,
   batchSize = 50,
 ): Promise<AllocateResult> {
-  return runPlatform(db.platformClient(), async (tx) => {
+  return runDispatcher(db.platformClient(), async (tx) => {
     const lock = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
       `SELECT pg_try_advisory_xact_lock(hashtext('outbox_seq:' || $1::text)) AS acquired`,
       tenantId,
@@ -91,7 +91,7 @@ export async function allocateTenantSeq(
  * in `allocateTenantSeq`.
  */
 export async function discoverUnstampedTenants(db: DbService, limit = 20): Promise<string[]> {
-  return runPlatform(db.platformClient(), async (tx) => {
+  return runDispatcher(db.platformClient(), async (tx) => {
     const rows = await tx.$queryRawUnsafe<{ tenantId: string }[]>(
       `SELECT DISTINCT "tenantId" FROM outbox
         WHERE "tenantId" IS NOT NULL AND seq IS NULL AND "dispatchedAt" IS NULL

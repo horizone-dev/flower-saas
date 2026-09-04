@@ -3,7 +3,7 @@ import type { Redis } from 'ioredis';
 import type { DbService } from '@flower/backend';
 import type { Logger } from '@flower/service-runtime';
 import { allocateTenantSeq, discoverUnstampedTenants } from './seq-allocator.js';
-import { publishReadyBatch } from './publisher.js';
+import { publishReadyAcrossTenants } from './publisher.js';
 import { DEFAULT_PUBLISH_BACKOFF, type PublishBackoffPolicy } from './backoff.js';
 
 export interface OutboxDispatcherOptions {
@@ -12,11 +12,12 @@ export interface OutboxDispatcherOptions {
   readonly logger: Logger;
   /** how often a tick runs when there's nothing left to do (ms) */
   readonly tickIntervalMs?: number;
-  /** candidate tenants (with unstamped work) considered per tick */
+  /** candidate tenants (with unstamped work, or with publishable work) considered per tick */
   readonly tenantBatchSize?: number;
   /** rows stamped per tenant per allocation attempt */
   readonly seqBatchSize?: number;
-  /** rows published per tick */
+  /** rows published per tenant per tick (each row is its own locked transaction —
+   *  see publisher.ts's same-tenant append-order note) */
   readonly publishBatchSize?: number;
   readonly backoff?: PublishBackoffPolicy;
 }
@@ -44,9 +45,11 @@ const DEFAULTS = {
  *      to become that tenant's advisory-lock leader and stamp its rows
  *      (`allocateTenantSeq`). One failing tenant (a thrown error) is isolated
  *      and never blocks another tenant's turn, or the publish phase below.
- *   B. **Publish** — drain already-stamped, eligible rows to their tenant's
- *      Redis Stream (`publishReadyBatch`), independent of which tenant they
- *      belong to or who stamped them.
+ *   B. **Publish** — for each tenant with already-stamped, eligible rows, drain
+ *      up to a batch's worth to that tenant's Redis Stream
+ *      (`publishReadyAcrossTenants`) — strictly in `seq` order **within** a
+ *      tenant (a per-tenant advisory lock independent of allocation's), while
+ *      different tenants publish fully independently.
  *
  * The outbox row + business mutation are already atomic in PostgreSQL (the
  * caller's transaction, via `OutboxWriter`); this dispatcher never treats Redis
@@ -80,7 +83,11 @@ export class OutboxDispatcher {
       }
     }
 
-    const { published, failed } = await publishReadyBatch(db, redis, publishBatchSize, backoff);
+    const { published, failed } = await publishReadyAcrossTenants(db, redis, {
+      tenantBatchSize,
+      perTenantBatchSize: publishBatchSize,
+      backoff,
+    });
     return { tenantsTried: candidates.length, stamped, published, failed };
   }
 

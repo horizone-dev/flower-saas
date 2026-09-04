@@ -3,12 +3,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { Redis } from 'ioredis';
-import { runPlatform } from '@flower/db';
+import { runDispatcher } from '@flower/db';
 import { DbService, type BackendConfig } from '@flower/backend';
 import { type Logger } from '@flower/service-runtime';
 import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
 import { allocateTenantSeq, discoverUnstampedTenants } from './seq-allocator.js';
-import { publishOne, publishReadyBatch } from './publisher.js';
+import { publishNextForTenant, publishReadyAcrossTenants } from './publisher.js';
 import { buildEnvelope, streamKey, ENVELOPE_FIELD, type OutboxRow } from './envelope.js';
 import { OutboxDispatcher } from './dispatcher.js';
 
@@ -45,12 +45,12 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     await stack?.stop();
   });
 
-  // `publishOne` / `publishReadyBatch` deliberately query GLOBALLY (oldest
-  // eligible row across every tenant, by design — see publisher.ts). A test
-  // that only stamps a row (never publishes it) would otherwise leave a
-  // "ready to publish" row lying around that a LATER test's publish call
-  // picks up instead of its own — full isolation between tests requires a
-  // clean slate every time, not just fresh tenant ids.
+  // `publishReadyAcrossTenants` discovers tenants GLOBALLY (any tenant with
+  // ready work, by design — see publisher.ts). A test that only stamps a row
+  // (never publishes it) would otherwise leave a "ready to publish" row lying
+  // around that a LATER test's publish call picks up instead of its own —
+  // full isolation between tests requires a clean slate every time, not just
+  // fresh tenant ids.
   afterEach(async () => {
     await pool.query('DELETE FROM outbox');
     await pool.query('DELETE FROM outbox_tenant_seq');
@@ -154,7 +154,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     const alloc = await allocateTenantSeq(db, tenantId);
     expect(alloc).toEqual({ leader: true, stamped: 1 });
 
-    const pub = await publishReadyBatch(db, redis);
+    const pub = await publishReadyAcrossTenants(db, redis);
     expect(pub).toEqual({ published: 1, failed: 0 });
 
     const entries = await streamEntries(tenantId);
@@ -199,7 +199,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     const s3 = await fetchRow(r3.id);
     expect([s1.seq, s2.seq, s3.seq]).toEqual(['1', '2', '3']);
 
-    await publishReadyBatch(db, redis, 10);
+    await publishReadyAcrossTenants(db, redis, { perTenantBatchSize: 10 });
     const entries = await streamEntries(tenantId);
     expect(entries.map((e) => e['type'])).toEqual(['e1', 'e2', 'e3']);
     expect(entries.map((e) => e['seq'])).toEqual(['1', '2', '3']);
@@ -236,7 +236,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     // transactions can easily run fully sequentially even when "started
     // concurrently"; only an explicitly-held lock guarantees the second
     // attempt genuinely happens while the first is still active).
-    const heldTx = runPlatform(dbA.platformClient(), async (tx) => {
+    const heldTx = runDispatcher(dbA.platformClient(), async (tx) => {
       const lock = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
         `SELECT pg_try_advisory_xact_lock(hashtext('outbox_seq:' || $1::text)) AS acquired`,
         tenantId,
@@ -259,6 +259,64 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
 
     // no unstamped work left for anyone
     expect(await discoverUnstampedTenants(db)).not.toContain(tenantId);
+  });
+
+  // ── 4b. same-tenant publish ordering under concurrent processes (remediation, 2026-09-04) ──
+  // Concern #1: seq uniqueness/monotonicity alone does not guarantee STREAM
+  // APPEND order. This proves the `outbox_publish:` lock, not just distinct
+  // `seq` values, is what prevents a faster process from appending seq=2
+  // ahead of a slower, still-in-flight seq=1 for the SAME tenant.
+  it('same-tenant publish is strictly ordered: a concurrent attempt cannot append seq N+1 ahead of a slow, in-flight seq N', async () => {
+    const tenantId = randomUUID();
+    const t0 = new Date();
+    const rLow = await insertOutboxRow({ tenantId, eventType: 'slow-n', createdAt: t0 });
+    const rHigh = await insertOutboxRow({
+      tenantId,
+      eventType: 'fast-n-plus-1',
+      createdAt: new Date(t0.getTime() + 10),
+    });
+    await allocateTenantSeq(db, tenantId, 10);
+    expect((await fetchRow(rLow.id)).seq).toBe('1');
+    expect((await fetchRow(rHigh.id)).seq).toBe('2');
+
+    // Deliberately slow down XADD for exactly the first call issued through
+    // this client — long enough that a genuinely concurrent
+    // `publishNextForTenant` attempt for the SAME tenant is issued (and must
+    // defer) while seq=1's publish transaction — and its `outbox_publish:`
+    // advisory lock — is still open.
+    type XaddFn = (...args: unknown[]) => Promise<unknown>;
+    const originalXadd = redis.xadd.bind(redis) as unknown as XaddFn;
+    const releaseXadd = deferred();
+    let xaddCalls = 0;
+    redis.xadd = (async (...args: unknown[]) => {
+      xaddCalls++;
+      if (xaddCalls === 1) await releaseXadd.promise;
+      return originalXadd(...args);
+    }) as unknown as typeof redis.xadd;
+
+    try {
+      const slowPublish = publishNextForTenant(freshDb(), tenantId, redis);
+      await waitFor(async () => (xaddCalls > 0 ? true : undefined), 5_000);
+
+      // a second, independent process races for the SAME tenant while seq=1's
+      // publish transaction is still open — it must defer, never publish
+      // seq=2 ahead of it.
+      const concurrent = await publishNextForTenant(freshDb(), tenantId, redis);
+      expect(concurrent).toBe('not-leader');
+      expect(await streamEntries(tenantId)).toHaveLength(0); // nothing appended yet, at all
+
+      releaseXadd.resolve();
+      expect(await slowPublish).toBe('published');
+    } finally {
+      redis.xadd = originalXadd as unknown as typeof redis.xadd;
+    }
+
+    // seq=2 is free to publish now that seq=1 has committed.
+    expect(await publishNextForTenant(freshDb(), tenantId, redis)).toBe('published');
+
+    const entries = await streamEntries(tenantId);
+    expect(entries.map((e) => e['seq'])).toEqual(['1', '2']);
+    expect(entries.map((e) => e['type'])).toEqual(['slow-n', 'fast-n-plus-1']);
   });
 
   // ── 5. leader handover ───────────────────────────────────────────────────
@@ -304,7 +362,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     expect(before.dispatchedAt).toBeNull();
     expect(await streamEntries(tenantId)).toHaveLength(0);
 
-    const outcome = await publishOne(db, redis);
+    const outcome = await publishNextForTenant(db, tenantId, redis);
     expect(outcome).toBe('published');
     expect(await streamEntries(tenantId)).toHaveLength(1);
     expect((await fetchRow(row.id)).dispatchedAt).not.toBeNull();
@@ -316,17 +374,25 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     const row = await insertOutboxRow({ tenantId, eventType: 'crash-after-xadd' });
     await allocateTenantSeq(db, tenantId);
 
-    // Reproduce the crash precisely: the same SELECT+XADD publishOne performs,
-    // but the transaction is forced to roll back before the ack UPDATE commits.
+    // Reproduce the crash precisely: the same lock+SELECT+XADD
+    // publishNextForTenant performs, but the transaction is forced to roll
+    // back before the ack UPDATE commits.
     await expect(
-      runPlatform(db.platformClient(), async (tx) => {
+      runDispatcher(db.platformClient(), async (tx) => {
+        const lock = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
+          `SELECT pg_try_advisory_xact_lock(hashtext('outbox_publish:' || $1::text)) AS acquired`,
+          tenantId,
+        );
+        expect(lock[0]?.acquired).toBe(true);
         const rows = await tx.$queryRawUnsafe<OutboxRow[]>(
           `SELECT id, "tenantId", "branchId", "aggregateType", "aggregateId", "eventType",
                   "resourceVersion", "actorSummary", "createdAt", seq, attempts
              FROM outbox
-            WHERE id = $1::uuid AND seq IS NOT NULL AND "dispatchedAt" IS NULL
+            WHERE "tenantId" = $1::uuid AND seq IS NOT NULL AND "dispatchedAt" IS NULL
+            ORDER BY seq
+            LIMIT 1
             FOR UPDATE`,
-          row.id,
+          tenantId,
         );
         const envelope = buildEnvelope(rows[0]!);
         await redis.xadd(streamKey(tenantId), '*', ENVELOPE_FIELD, JSON.stringify(envelope));
@@ -341,8 +407,8 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     expect(midway.attempts).toBe(0);
     expect(await streamEntries(tenantId)).toHaveLength(1); // the "crashed" XADD did land in Redis
 
-    // the retry: publishOne re-selects the SAME row and republishes it.
-    const outcome = await publishOne(db, redis);
+    // the retry: publishNextForTenant re-selects the SAME row and republishes it.
+    const outcome = await publishNextForTenant(db, tenantId, redis);
     expect(outcome).toBe('published');
 
     const entries = await streamEntries(tenantId);
@@ -371,13 +437,11 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     const tenantId = randomUUID();
     const row = await insertOutboxRow({ tenantId });
     await allocateTenantSeq(db, tenantId);
-    await publishOne(db, redis);
+    await publishNextForTenant(db, tenantId, redis);
     expect(await streamEntries(tenantId)).toHaveLength(1);
 
-    const again = await publishOne(db, redis); // nothing eligible for THIS tenant/row
-    // a fresh publishOne scans globally, so it may find OTHER tenants' work in
-    // a shared test run; assert this specific row + stream are untouched.
-    void again;
+    const again = await publishNextForTenant(db, tenantId, redis); // nothing eligible for THIS tenant
+    expect(again).toBe('empty');
     expect(await streamEntries(tenantId)).toHaveLength(1);
     expect((await fetchRow(row.id)).dispatchedAt).not.toBeNull();
   });
@@ -399,7 +463,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     // CPU/IO) a tight window (tens of ms) is genuinely reachable between two
     // sequential `await`s and makes the "too soon" assertion below flaky.
     const shortBackoff = { baseMs: 2_000, maxMs: 3_000 };
-    const outcome = await publishOne(db, deadRedis, shortBackoff);
+    const outcome = await publishNextForTenant(db, tenantId, deadRedis, shortBackoff);
     expect(outcome).toBe('failed');
     deadRedis.disconnect();
 
@@ -414,7 +478,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     // the future (a raw timestamp comparison against a fresh Date.now() would
     // be flaky under real DB/CI round-trip jitter; this behavioural check is
     // not).
-    const tooSoon = await publishOne(db, redis, shortBackoff);
+    const tooSoon = await publishNextForTenant(db, tenantId, redis, shortBackoff);
     expect(tooSoon).toBe('empty');
     expect(await streamEntries(tenantId)).toHaveLength(0);
 
@@ -422,7 +486,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     // succeeds. waitFor polls (well past maxMs) rather than a single fixed
     // sleep, so this isn't sensitive to exactly how long the window was.
     const recovered = await waitFor(async () => {
-      const o = await publishOne(db, redis, shortBackoff);
+      const o = await publishNextForTenant(db, tenantId, redis, shortBackoff);
       return o === 'published' ? o : undefined;
     }, 15_000);
     expect(recovered).toBe('published');
@@ -444,7 +508,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     await insertOutboxRow({ tenantId: tenantOk, eventType: 'after-a-failure' });
     const alloc = await allocateTenantSeq(db, tenantOk); // same DbService / pool as the failed call above
     expect(alloc).toEqual({ leader: true, stamped: 1 });
-    await publishReadyBatch(db, redis, 10);
+    await publishReadyAcrossTenants(db, redis, { perTenantBatchSize: 10 });
     expect(await streamEntries(tenantOk)).toHaveLength(1);
   });
 
@@ -458,7 +522,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
       actorSummary: { userId: randomUUID(), accountType: 'OWNER' },
     });
     await allocateTenantSeq(db, tenantId);
-    await publishOne(db, redis);
+    await publishNextForTenant(db, tenantId, redis);
 
     const raw = await redis.xrange(streamKey(tenantId), '-', '+');
     const rawText = JSON.stringify(raw);
@@ -481,6 +545,76 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
       ].sort(),
     );
     void row;
+  });
+
+  // ── routing metadata for Phase 2.5 (remediation, 2026-09-04, concern #2) ──
+  // The gateway (Task 2.5) must be able to route/authorize off first-class
+  // envelope fields alone — never by parsing `payload`. These prove that
+  // guarantee end to end, through the real dispatcher and into the actual
+  // Redis Stream entry (not just `buildEnvelope` in isolation — see
+  // envelope.test.ts for the unit-level coverage).
+  it('a branch-scoped event preserves branch_id through the full pipeline into the Stream entry', async () => {
+    const tenantId = randomUUID();
+    const branchId = randomUUID();
+    const row = await insertOutboxRow({
+      tenantId,
+      branchId,
+      eventType: 'branch.scoped.event',
+      resourceVersion: 7n,
+      actorSummary: { userId: randomUUID(), accountType: 'STAFF' },
+    });
+    await allocateTenantSeq(db, tenantId);
+    await publishNextForTenant(db, tenantId, redis);
+
+    const entries = await streamEntries(tenantId);
+    expect(entries[0]).toMatchObject({
+      event_id: row.id,
+      tenant_id: tenantId,
+      branch_id: branchId,
+      resource_version: '7',
+    });
+  });
+
+  it('a tenant-global event (no branch) yields branch_id: null in the Stream entry, not an omitted field', async () => {
+    const tenantId = randomUUID();
+    await insertOutboxRow({ tenantId, branchId: null, eventType: 'tenant.global.event' });
+    await allocateTenantSeq(db, tenantId);
+    await publishNextForTenant(db, tenantId, redis);
+
+    const entries = await streamEntries(tenantId);
+    expect(entries[0]).toHaveProperty('branch_id', null);
+  });
+
+  it('a payload field shaped like routing metadata never overrides the real branch_id/tenant_id (the publisher never derives routing/authorization from untrusted payload)', async () => {
+    const tenantId = randomUUID();
+    const realBranchId = randomUUID();
+    const spoofedTenantId = randomUUID();
+    const spoofedBranchId = randomUUID();
+    const row = await insertOutboxRow({
+      tenantId,
+      branchId: realBranchId,
+      eventType: 'spoof-attempt',
+      // an attacker-influenced (or merely buggy) payload claiming a DIFFERENT
+      // tenant/branch — must never leak into the envelope's routing fields.
+      payload: {
+        tenant_id: spoofedTenantId,
+        tenantId: spoofedTenantId,
+        branch_id: spoofedBranchId,
+        branchId: spoofedBranchId,
+      },
+    });
+    await allocateTenantSeq(db, tenantId);
+    await publishNextForTenant(db, tenantId, redis);
+
+    const entries = await streamEntries(tenantId);
+    expect(entries[0]).toMatchObject({
+      event_id: row.id,
+      tenant_id: tenantId,
+      branch_id: realBranchId,
+    });
+    const rawText = JSON.stringify(entries[0]);
+    expect(rawText).not.toContain(spoofedTenantId);
+    expect(rawText).not.toContain(spoofedBranchId);
   });
 
   // ── dispatcher orchestration end to end (tick loop) ──────────────────────

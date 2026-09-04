@@ -75,7 +75,9 @@ export const PLATFORM_GLOBAL_TABLES: readonly string[] = Object.freeze([
   'holiday',
   // Phase 2-core outbox dispatcher (task 2.4) — dispatcher-internal `seq`
   // allocator bookkeeping. `flower_app` has NO privilege on it at all (stricter
-  // than the reference tables above); only `flower_platform` ever reaches it.
+  // than the reference tables above); only `flower_platform` (broad, for
+  // platform operations) and `flower_dispatcher` (narrowed to exactly this +
+  // `outbox` — task 2.4 remediation) ever reach it.
   'outbox_tenant_seq',
 ]);
 
@@ -91,4 +93,9 @@ export const DB_ROLES = Object.freeze({
   platform: 'flower_platform',
   /** the DDL / migration role */
   migrate: 'flower_migrate',
+  /** the outbox dispatcher (task 2.4 remediation) — BYPASSRLS (it must scan
+   *  every tenant's undispatched rows) but with grants narrowed to exactly
+   *  `outbox` + `outbox_tenant_seq`; it cannot read or write any other table,
+   *  tenant-owned or platform-global, regardless of RLS. */
+  dispatcher: 'flower_dispatcher',
 } as const);

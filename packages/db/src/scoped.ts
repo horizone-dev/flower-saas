@@ -94,6 +94,34 @@ export async function runPlatform<T>(
   );
 }
 
+/**
+ * The outbox dispatcher's path (task 2.4 remediation — least-privilege review,
+ * 2026-09-04). Runs `fn` as `flower_dispatcher`: BYPASSRLS (the dispatcher must
+ * scan every tenant's undispatched rows — there is no single `app.tenant_id` to
+ * scope to), but the role's *grants* are narrowed to exactly `outbox`
+ * (SELECT, UPDATE) and `outbox_tenant_seq` (SELECT, INSERT, UPDATE) — it cannot
+ * read or write `user` / `credential` / `session` / any tenant business table,
+ * or any other platform-global table, regardless of RLS. Reachable only from
+ * `apps/worker`'s outbox module (`seq-allocator.ts` / `publisher.ts`) — never
+ * use this for anything else.
+ */
+export async function runDispatcher<T>(
+  prisma: PrismaClient,
+  fn: (tx: ScopedTx) => Promise<T>,
+  opts: Pick<RunOptions, 'maxWait' | 'timeout' | 'role'> = {},
+): Promise<T> {
+  const role = opts.role === undefined ? DB_ROLES.dispatcher : opts.role;
+  if (role != null && !ROLE_RE.test(role))
+    throw new Error(`runDispatcher: bad role ${JSON.stringify(role)}`);
+  return prisma.$transaction(
+    async (tx) => {
+      if (role != null) await tx.$executeRawUnsafe(`SET LOCAL ROLE "${role}"`);
+      return fn(tx as unknown as ScopedTx);
+    },
+    { maxWait: opts.maxWait ?? 15_000, timeout: opts.timeout ?? 20_000 },
+  );
+}
+
 /** Read back the `app.tenant_id` GUC the current connection sees (bleed tests). */
 export async function currentTenantGuc(tx: ScopedTx): Promise<string> {
   const rows = await tx.$queryRaw<{ v: string }[]>`

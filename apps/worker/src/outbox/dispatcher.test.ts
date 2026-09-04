@@ -8,8 +8,8 @@ const { allocateTenantSeq, discoverUnstampedTenants } = vi.hoisted(() => ({
 }));
 vi.mock('./seq-allocator.js', () => ({ allocateTenantSeq, discoverUnstampedTenants }));
 
-const { publishReadyBatch } = vi.hoisted(() => ({ publishReadyBatch: vi.fn() }));
-vi.mock('./publisher.js', () => ({ publishReadyBatch }));
+const { publishReadyAcrossTenants } = vi.hoisted(() => ({ publishReadyAcrossTenants: vi.fn() }));
+vi.mock('./publisher.js', () => ({ publishReadyAcrossTenants }));
 
 /**
  * `OutboxDispatcher.tick()` orchestration in isolation (constraint 4/7/9 —
@@ -26,8 +26,8 @@ describe('OutboxDispatcher.tick() — per-tenant isolation', () => {
   beforeEach(() => {
     allocateTenantSeq.mockReset();
     discoverUnstampedTenants.mockReset();
-    publishReadyBatch.mockReset();
-    publishReadyBatch.mockResolvedValue({ published: 0, failed: 0 });
+    publishReadyAcrossTenants.mockReset();
+    publishReadyAcrossTenants.mockResolvedValue({ published: 0, failed: 0 });
   });
 
   it('a rejected allocation for one tenant does not stop tick(), other tenants still get tried', async () => {
@@ -55,12 +55,12 @@ describe('OutboxDispatcher.tick() — per-tenant isolation', () => {
   it('the publish phase still runs even when every tenant allocation failed', async () => {
     discoverUnstampedTenants.mockResolvedValue(['tenant-bad-1', 'tenant-bad-2']);
     allocateTenantSeq.mockRejectedValue(new Error('SIMULATED_ALLOCATION_FAILURE'));
-    publishReadyBatch.mockResolvedValue({ published: 5, failed: 1 });
+    publishReadyAcrossTenants.mockResolvedValue({ published: 5, failed: 1 });
 
     const dispatcher = new OutboxDispatcher({ db: fakeDb, redis: fakeRedis, logger: log });
     const result = await dispatcher.tick();
 
-    expect(publishReadyBatch).toHaveBeenCalledTimes(1);
+    expect(publishReadyAcrossTenants).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ tenantsTried: 2, stamped: 0, published: 5, failed: 1 });
   });
 
