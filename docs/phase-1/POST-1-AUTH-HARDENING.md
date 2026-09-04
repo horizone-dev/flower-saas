@@ -112,7 +112,7 @@ Local (`main` + this change, 2026-09-04):
 | `pnpm --filter @flower/api-client test`           | 7 ✅ (was 5)                                                                                                                                                                                                                                                                                   |
 | `pnpm --filter @flower/pos-pwa test`              | 4 ✅ (new file)                                                                                                                                                                                                                                                                                |
 | Super Admin Web e2e smoke (`test:e2e`)            | 1 passed ✅ — login (TOTP) → provision → lifecycle → role assign → preview → impersonation (mutation blocked) → secret (masked). Unaffected: the web apps send no `X-Auth-Transport` header, so login keeps the body transport.                                                                |
-| GitHub CI (`verify` / `security` / `e2e`)         | _linked in the commit / PR note on push_                                                                                                                                                                                                                                                       |
+| GitHub CI (`verify` / `security` / `e2e`)         | ✅ all three green — commit `57952a4`, run [`33849116789`](https://github.com/horizone-dev/flower-saas/actions/runs/33849116789).                                                                                                                                                              |
 
 ---
 
