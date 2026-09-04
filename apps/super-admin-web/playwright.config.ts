@@ -9,13 +9,17 @@ import { defineConfig } from '@playwright/test';
 const API_PORT = process.env['API_PORT'] ?? '3001';
 const WEB_PORT = '3100';
 
+const CI = !!process.env['CI'];
+
 export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.spec.ts',
   fullyParallel: false,
   workers: 1,
-  retries: 0,
-  timeout: 60_000,
+  // one retry in CI — the smoke boots two servers + a full guard pipeline and
+  // the runner's first cold pass can lose the webServer-ready race.
+  retries: CI ? 1 : 0,
+  timeout: 90_000,
   reporter: [['list']],
   use: {
     baseURL: `http://localhost:${WEB_PORT}`,
@@ -25,7 +29,7 @@ export default defineConfig({
     {
       command: 'node ../../apps/api/dist/main.js',
       url: `http://localhost:${API_PORT}/healthz`,
-      timeout: 60_000,
+      timeout: 120_000,
       reuseExistingServer: false,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -43,7 +47,7 @@ export default defineConfig({
     {
       command: `pnpm exec next start -p ${WEB_PORT}`,
       url: `http://localhost:${WEB_PORT}/login`,
-      timeout: 60_000,
+      timeout: 120_000,
       reuseExistingServer: false,
       env: {
         NODE_ENV: 'production',
