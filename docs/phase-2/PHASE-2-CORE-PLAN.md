@@ -554,6 +554,30 @@ the 3 boundary tests (teeth + real-tree scan) pass in `packages/backend`,
 
 ### 2.4 — Outbox dispatcher → durable per-tenant Redis Stream
 
+> **Execution note (2026-09-04):** OI-P2-1 resolved as a durable
+> `outbox_tenant_seq` counter table (one row per tenant), not a dynamic
+> per-tenant `SEQUENCE` — see the ADR-0017 OI-P2-1 resolution note for why
+> (transactional rollback semantics). The two dispatcher phases are split
+> cleanly: **allocation** (`apps/worker/src/outbox/seq-allocator.ts`) is the
+> only lock-protected step and commits before any `XADD`; **publish**
+> (`.../publisher.ts`, one row per transaction) is lock-free and needs none —
+> by the time a row is publishable its `seq` is already immutable, and a
+> reordered/duplicate _live_ delivery is explicitly tolerated by the approved
+> client protocol (§3). Every row-identifying `UPDATE` is keyed on `id` alone,
+> never `id AND created_at` — a `createdAt` value round-tripped through a JS
+> `Date` loses the `timestamptz(6)` column's sub-millisecond precision, so an
+> equality match against it can silently affect zero rows; `id` (a `uuidv7()`)
+> is already globally unique on its own (the composite `(id, created_at)`
+> primary key exists only to satisfy Postgres's partitioning requirement).
+> `outbox` gained three optional envelope columns this task —
+> `branch_id`/`resource_version`/`actor_summary` — never populated by the
+> current (only) producer, `tenant.provisioned`. The dispatcher only ever
+> processes `tenant_id IS NOT NULL` rows (Redis routing needs a tenant); a
+> platform-level (`tenant_id IS NULL`) outbox row has no producer yet and is
+> out of scope here. Fan-out to BullMQ + the outbox-lag alarm + `XTRIM`
+> scheduling are **not** built in this task (scope: dispatch → Stream only;
+> retention primitive + domain fan-out land with 2.5+/backlog).
+
 In `apps/worker`, a dedicated dispatcher loop (single leader via a Postgres
 advisory lock so per-tenant `seq` is strictly increasing):
 

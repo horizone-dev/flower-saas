@@ -73,6 +73,10 @@ export const PLATFORM_GLOBAL_TABLES: readonly string[] = Object.freeze([
   'tax_rate',
   'locale',
   'holiday',
+  // Phase 2-core outbox dispatcher (task 2.4) — dispatcher-internal `seq`
+  // allocator bookkeeping. `flower_app` has NO privilege on it at all (stricter
+  // than the reference tables above); only `flower_platform` ever reaches it.
+  'outbox_tenant_seq',
 ]);
 
 /** Range-partitioned tables (declared in the Phase 1 migration; a DEFAULT

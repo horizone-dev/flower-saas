@@ -706,24 +706,50 @@ model AuditLog {
 model Outbox {
   id            String    @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId      String?   @db.Uuid
+  /// optional — set when the event is branch-scoped (ADR-0017 envelope field)
+  branchId      String?   @db.Uuid
   aggregateType String
   aggregateId   String
   eventType     String
   payload       Json
+  /// optional resource version for the ADR-0017 envelope (`resource_version`) —
+  /// gates payload application client-side; never authoritative business state.
+  resourceVersion BigInt?
+  /// optional safe actor summary for the envelope (`actor_summary`) — e.g.
+  /// `{ "userId": "...", "accountType": "OWNER" }`. Never a token, secret or
+  /// full user record.
+  actorSummary  Json?
   createdAt     DateTime  @default(now()) @db.Timestamptz(6)
-  /// null until the SKIP LOCKED dispatcher publishes it (Phase 2-core task 2.4)
+  /// null until the dispatcher publishes it (Phase 2-core task 2.4)
   dispatchedAt  DateTime? @db.Timestamptz(6)
   /// per-tenant-global logical sequence — assigned ONCE by the dispatcher and
   /// persisted BEFORE the Redis publish; never re-assigned (FC-1 / ADR-0017 §1).
-  /// Allocation mechanism settled in task 2.4 (OI-P2-1).
+  /// Allocated from `OutboxTenantSeq` by whichever dispatcher holds the
+  /// per-tenant advisory lock (task 2.4 / OI-P2-1).
   seq           BigInt?
   attempts      Int       @default(0)
   availableAt   DateTime  @default(now()) @db.Timestamptz(6)
+  /// bounded, sanitised (never a secret/credential) — task 2.4
   lastError     String?
 
   @@id([id, createdAt])
   @@index([createdAt])
   @@map("outbox")
+}
+
+/// Durable per-tenant `seq` allocator (task 2.4 / OI-P2-1) — one row per tenant,
+/// incremented atomically inside the transaction that holds
+/// `pg_advisory_xact_lock` for that tenant (the dispatcher leader). A
+/// database-backed counter row, not a dynamic per-tenant `SEQUENCE` object —
+/// simpler to migrate, test and operate. Platform-global (dispatcher-internal
+/// bookkeeping, not tenant-owned application data); `flower_app` has no
+/// privilege on it — only `flower_platform` (the dispatcher's connection role).
+model OutboxTenantSeq {
+  tenantId  String   @id @db.Uuid
+  nextSeq   BigInt   @default(1)
+  updatedAt DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@map("outbox_tenant_seq")
 }
 
 // ──────────── idempotency store (tenant-owned, Phase 2-core 2.2) ───────────────

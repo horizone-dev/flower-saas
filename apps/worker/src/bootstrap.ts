@@ -7,15 +7,18 @@ import {
   type RetryPolicy,
   DEFAULT_RETRY_POLICY,
   createBullConnection,
+  createRedis,
   connectRedis,
   redisHealthy,
   startHealthServer,
 } from '@flower/service-runtime';
+import { DbService } from '@flower/backend';
 import type { Server } from 'node:http';
 import { WorkerModule } from './worker.module.js';
 import { ProcessorRegistry } from './processor-registry.js';
 import { probeProcessor } from './processors/probe.processor.js';
 import { QUEUES, type QueueName } from './queues.js';
+import { OutboxDispatcher, type OutboxDispatcherOptions } from './outbox/dispatcher.js';
 
 export interface WorkerRuntimeOptions {
   readonly redisHost: string;
@@ -25,12 +28,15 @@ export interface WorkerRuntimeOptions {
   readonly retryPolicy?: RetryPolicy;
   /** fail fast if Redis is not reachable within this window (documented policy) */
   readonly redisConnectTimeoutMs?: number;
+  /** outbox dispatcher tuning (task 2.4) — all optional, sane defaults apply */
+  readonly outbox?: Partial<Omit<OutboxDispatcherOptions, 'db' | 'redis' | 'logger'>>;
 }
 
 export interface WorkerRuntime {
   readonly context: INestApplicationContext;
   readonly registry: ProcessorRegistry;
   readonly connection: Redis;
+  readonly dispatcher: OutboxDispatcher;
   readonly health: Server;
   stop(): Promise<void>;
 }
@@ -73,10 +79,28 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
     QUEUES.map((name) => [name, new Queue(name, { connection })] as const),
   );
 
+  // A dedicated connection for XADD (task 2.4) — separate from the BullMQ
+  // connection above (different tuning: no blocking commands, fails a command
+  // fast rather than queuing it offline, matching the dispatcher's own
+  // attempts/backoff loop rather than ioredis retrying silently underneath it).
+  // Redis is already known reachable (the fail-fast check above passed).
+  const outboxRedis = createRedis(opts.redisHost, opts.redisPort);
+
+  const dispatcher = new OutboxDispatcher({
+    db: context.get(DbService),
+    redis: outboxRedis,
+    logger,
+    ...opts.outbox,
+  });
+  dispatcher.start();
+
   const health = startHealthServer(
     opts.metricsPort,
     'worker',
-    async () => ({ redis: (await redisHealthy(connection)) ? 'ok' : 'down' }),
+    async () => ({
+      redis: (await redisHealthy(connection)) ? 'ok' : 'down',
+      outboxRedis: (await redisHealthy(outboxRedis)) ? 'ok' : 'down',
+    }),
     {
       metrics: async () => {
         const counts: Record<string, unknown> = {};
@@ -90,13 +114,16 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
     context,
     registry,
     connection,
+    dispatcher,
     health,
     async stop(): Promise<void> {
       health.close();
+      await dispatcher.stop();
       await registry.stop();
       await Promise.allSettled([...metricsQueues.values()].map((q) => q.close()));
       await context.close();
       connection.disconnect();
+      outboxRedis.disconnect();
     },
   };
 }

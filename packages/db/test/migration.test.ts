@@ -94,7 +94,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_phase_1_identity_tenancy_rbac'))).toBe(true);
     expect(names.some((n) => n.endsWith('_security_event_view'))).toBe(true);
     expect(names.some((n) => n.endsWith('_phase_2_core_infra'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_idempotency_claim_token$/);
+    expect(names.some((n) => n.endsWith('_idempotency_claim_token'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_outbox_dispatcher$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -344,6 +345,83 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         ),
       ).resolves.toBeTruthy();
       await pool.query(`DELETE FROM country_tax_config WHERE "countryCode" = 'QA'`);
+    });
+  });
+
+  // ── task 2.4 — outbox dispatcher schema ────────────────────────────────────
+  describe('outbox dispatcher schema (task 2.4)', () => {
+    it('outbox gains the optional envelope columns (branch/resourceVersion/actorSummary)', async () => {
+      const cols = await pool.query<{ column_name: string; is_nullable: string }>(
+        `SELECT column_name, is_nullable FROM information_schema.columns
+          WHERE table_name = 'outbox' AND column_name = ANY($1)`,
+        [['branchId', 'resourceVersion', 'actorSummary']],
+      );
+      expect(cols.rows.map((r) => r.column_name).sort()).toEqual([
+        'actorSummary',
+        'branchId',
+        'resourceVersion',
+      ]);
+      for (const r of cols.rows) expect(r.is_nullable).toBe('YES');
+    });
+
+    it('outbox carries the two dispatcher partial indexes, propagated to the default partition', async () => {
+      const unstamped = await pool.query(
+        `SELECT indexdef FROM pg_indexes WHERE tablename = 'outbox_default' AND indexname = 'outbox_default_tenantId_createdAt_id_idx'`,
+      );
+      expect(unstamped.rowCount, 'unstamped-work index must propagate').toBe(1);
+      expect(unstamped.rows[0]?.indexdef).toMatch(
+        /WHERE \(\(seq IS NULL\) AND \("dispatchedAt" IS NULL\)\)/,
+      );
+
+      const readyToPublish = await pool.query(
+        `SELECT indexdef FROM pg_indexes WHERE tablename = 'outbox_default' AND indexname = 'outbox_default_availableAt_idx1'`,
+      );
+      expect(readyToPublish.rowCount, 'ready-to-publish index must propagate').toBe(1);
+      expect(readyToPublish.rows[0]?.indexdef).toMatch(
+        /WHERE \(\(seq IS NOT NULL\) AND \("dispatchedAt" IS NULL\)\)/,
+      );
+    });
+
+    it('outbox_tenant_seq is the durable per-tenant seq allocator — flower_app has NO privilege at all', async () => {
+      const pk = await pool.query(
+        `SELECT a.attname FROM pg_index i
+           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+          WHERE i.indrelid = 'outbox_tenant_seq'::regclass AND i.indisprimary`,
+      );
+      expect(pk.rows.map((r) => r.attname)).toEqual(['tenantId']);
+
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        await expect(c.query('SELECT count(*) FROM outbox_tenant_seq')).rejects.toThrow(
+          /permission denied/i,
+        );
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+    });
+
+    it('outbox_tenant_seq: an UPDATE ... RETURNING next_seq - 1 allocates strictly increasing, gap-tolerant values', async () => {
+      const tenant = 'cccccccc-cccc-7ccc-8ccc-cccccccccccc';
+      await pool.query(
+        `INSERT INTO outbox_tenant_seq ("tenantId") VALUES ($1) ON CONFLICT ("tenantId") DO NOTHING`,
+        [tenant],
+      );
+      const allocate = async (): Promise<bigint> => {
+        const { rows } = await pool.query<{ allocated: string }>(
+          `UPDATE outbox_tenant_seq SET "nextSeq" = "nextSeq" + 1
+            WHERE "tenantId" = $1 RETURNING "nextSeq" - 1 AS allocated`,
+          [tenant],
+        );
+        return BigInt(rows[0]!.allocated);
+      };
+      const a = await allocate();
+      const b = await allocate();
+      const c = await allocate();
+      expect(b).toBe(a + 1n);
+      expect(c).toBe(b + 1n);
+      await pool.query(`DELETE FROM outbox_tenant_seq WHERE "tenantId" = $1`, [tenant]);
     });
   });
 
