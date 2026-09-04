@@ -1,11 +1,11 @@
+/**
+ * The request-context primitive (`RequestContext`, ALS accessors, errors) now
+ * lives in `@flower/backend` (FC-3 — shared by `api` / `worker` / `scheduler`).
+ * The HTTP-bound pieces — the `@Ctx()` param decorator and the Fastify
+ * `installRequestContext` onRequest hook — stay here in `apps/api`.
+ */
 export {
   RequestContext,
-  type AccountType,
-  type MfaLevel,
-  type ScopeSet,
-  type RequestContextInit,
-} from './request-context.js';
-export {
   contextStorage,
   runWithContext,
   enterContext,
@@ -15,6 +15,10 @@ export {
   replaceContext,
   NoRequestContextError,
   NotTenantScopedError,
-} from './context.als.js';
+  type AccountType,
+  type MfaLevel,
+  type ScopeSet,
+  type RequestContextInit,
+} from '@flower/backend';
 export { Ctx } from './ctx.decorator.js';
 export { installRequestContext } from './request-context.hook.js';

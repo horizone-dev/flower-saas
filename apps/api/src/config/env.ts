@@ -1,14 +1,19 @@
 import { z } from 'zod';
+import { backendEnvSchema } from '@flower/backend';
 
 /**
  * Environment contract for `apps/api`. Parsed once at boot; a missing or
  * malformed value fails fast with a readable error (never a silent default in a
  * money/security path).
+ *
+ * The shared **infrastructure** fields (NODE_ENV, LOG_LEVEL, DATABASE_URL,
+ * PLATFORM_DATABASE_URL) are defined **once** in `@flower/backend`
+ * (`backendEnvSchema`) and reused by `apps/worker` / `apps/scheduler` — the three
+ * runtimes can never drift. This schema `.extend()`s that set with every field
+ * that is API-only (HTTP, auth, CORS, secrets, idempotency, the readiness-probe
+ * infra endpoints).
  */
-const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-
+const envSchema = backendEnvSchema.extend({
   API_PORT: z.coerce.number().int().positive().default(3001),
   API_HOST: z.string().default('0.0.0.0'),
 
@@ -17,14 +22,25 @@ const envSchema = z.object({
   POSTGRES_PORT: z.coerce.number().int().positive().default(5432),
   REDIS_HOST: z.string().default('localhost'),
   REDIS_PORT: z.coerce.number().int().positive().default(6379),
+  REDIS_URL: z.string().optional(),
   S3_ENDPOINT: z.string().url().default('http://localhost:9000'),
 
-  // Postgres. `DATABASE_URL` is the app connection (scoped queries drop to
-  // `flower_app`); `PLATFORM_DATABASE_URL` is the separate audited platform path
-  // (`flower_platform`, BYPASSRLS — ADR-0014). In dev they can be the same URL.
-  DATABASE_URL: z.string().optional(),
-  PLATFORM_DATABASE_URL: z.string().optional(),
-  REDIS_URL: z.string().optional(),
+  // Idempotency store (task 2.2 — an API request-path concern). TTL: how long a
+  // stored result stays replayable. STALE_LOCK: after this long a crashed PENDING
+  // key is reclaimable. MAX_SNAPSHOT_BYTES: a larger 2xx body is not cached.
+  // WAIT_MS: how long a concurrent identical request waits for the owner.
+  IDEMPOTENCY_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60 * 60 * 24),
+  IDEMPOTENCY_STALE_LOCK_SECONDS: z.coerce.number().int().positive().default(120),
+  IDEMPOTENCY_MAX_SNAPSHOT_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(64 * 1024),
+  IDEMPOTENCY_WAIT_MS: z.coerce.number().int().positive().default(5000),
 
   // Auth (task 1.4/1.5). A dev default keeps unit tests self-contained; a real
   // secret is required in production (checked at bootstrap).
@@ -43,26 +59,6 @@ const envSchema = z.object({
     .default(60 * 60 * 12),
   AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   AUTH_LOGIN_LOCKOUT_SECONDS: z.coerce.number().int().positive().default(900),
-
-  // Idempotency store (Phase 2-core task 2.2). Opt-in per route via `@Idempotent`.
-  // TTL: how long a stored result stays replayable. STALE_LOCK: after this long a
-  // crashed PENDING key is reclaimable. MAX_SNAPSHOT_BYTES: a larger 2xx body is
-  // not cached (the key still transitions to DONE; a replay says so).
-  // WAIT_MS: a concurrent identical request waits (bounded, small backoff poll)
-  // this long for the owner to finish, then replays its result; only if the wait
-  // is exhausted does it get `IDEMPOTENCY_IN_PROGRESS`.
-  IDEMPOTENCY_TTL_SECONDS: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(60 * 60 * 24),
-  IDEMPOTENCY_STALE_LOCK_SECONDS: z.coerce.number().int().positive().default(120),
-  IDEMPOTENCY_MAX_SNAPSHOT_BYTES: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(64 * 1024),
-  IDEMPOTENCY_WAIT_MS: z.coerce.number().int().positive().default(5000),
 
   // Browser origins allowed to call the API (the POS PWA — Bearer for protected
   // calls, plus the HttpOnly refresh cookie on `/v1/auth/*`). Comma separated,

@@ -454,50 +454,99 @@ services** (OD-P2-8). Business rules are implemented **once** and `worker` /
 `scheduler` carry **no dependency on HTTP controllers, Fastify request logic, or
 any transport-specific module** (FC-3).
 
+> **Scope reduction (owner, 2026-09-04):** task 2.3 stays a **pure
+> runtime/framework task**. The idempotency-store implementation and its TTL
+> sweep are **not** pulled into this task — they stay exactly where task 2.2 left
+> them, in `apps/api`. `@flower/backend` in 2.3 is only what is needed to _prove
+> the architecture_: `DbService` / `ScopedRepository` / `PlatformRepository`
+> (the sanctioned DB path), the request-context primitive they depend on, the
+> shared config token, and the root logger. `RedisService` and the idempotency
+> store are **not** extracted in 2.3 — `apps/api`'s copies are untouched. The
+> deferred TTL sweep is recorded in `PHASE-2-BACKLOG.md` **B14** (not
+> correctness-blocking — `acquire()` already drops an expired row for its own
+> identity inline). Both `worker` and `scheduler` prove their frameworks with a
+> **trivial `probe` job only** — no maintenance/domain job of any kind.
+
 **Extraction (minimum, no speculative redesign):**
 
-- Extract the reusable backend module layer that the core non-API processes
-  actually consume into a package — working name **`@flower/backend`**
-  (`packages/backend`). It contains the infrastructure + domain-service Nest
-  modules currently under `apps/api/src/common/*` and the domain
-  service/repository layer of `apps/api/src/modules/*` — **without** controllers,
-  HTTP guards/interceptors bound to Fastify, `main.ts`, CORS, Swagger.
-- **The exact cut is decided at task start** and kept minimal: only what 2.4
-  (outbox dispatcher: scoped/platform DB, `OutboxWriter` read side, context,
-  redis, config, logger, errors), 2.2's sweep (DB + `IdempotencyService`), and
-  2.5 (session/topic authorization: `common/auth` + the policy resolver) need.
-  Domain modules with no core-process consumer may stay in `apps/api` for now and
-  move only when a later phase's job needs them (tracked, not pre-done).
-- `apps/api` keeps its controllers + HTTP guard/interceptor wiring + `main.ts` and
-  imports `@flower/backend`. **Behaviour is unchanged** — the Phase 1 test/probe
-  suites must stay green through the move (this is the extraction's safety net).
-- `eslint-plugin-boundaries` config is extended: `@flower/backend` is a new
-  element type; `apps/worker` / `apps/scheduler` may depend on `@flower/backend`
-  and `@flower/*` libs **only** — a dependency on `apps/api` or on anything
-  `*controller*` / Fastify fails lint.
+- Extract only what `apps/worker` / `apps/scheduler` need to boot a Nest
+  application context that can resolve a real, RLS-safe DB path — package
+  **`@flower/backend`** (`packages/backend`): `config` (a small
+  `backendEnvSchema` — `NODE_ENV`/`LOG_LEVEL`/`DATABASE_URL`/
+  `PLATFORM_DATABASE_URL` — that `apps/api`'s env `.extend()`s so the fields
+  are defined once), `context` (the `RequestContext` + ALS primitive,
+  non-HTTP), `db` (`DbService`/`DbModule`), `data` (`ScopedRepository`/
+  `PlatformRepository`), `logger` (the root pino logger). **No** controllers,
+  HTTP guards/interceptors bound to Fastify, `main.ts`, CORS, Swagger — and, per
+  the reduction above, no `RedisService` and no idempotency store in this task.
+- `apps/api` keeps its controllers + HTTP guard/interceptor wiring + `main.ts`
+  and the idempotency store, and now also imports `@flower/backend` for the DB
+  path (via thin re-export barrels at its existing `common/{context,data,db,
+logger}` import paths — **zero import-path churn** across the ~50 files that
+  already used them). **Behaviour is unchanged** — the Phase 1 test/probe suites
+  stay green through the move (the extraction's safety net; the 2 unit tests
+  that belong to the moved primitives moved with them, verified as git renames).
+- Domain modules with no core-process consumer stay in `apps/api` for now and
+  move only when a later phase's job needs them (tracked, not pre-done — the
+  outbox writer/reader move in 2.4, session/topic authorization in 2.5).
+- **Boundary enforcement:** `eslint-plugin-boundaries` cannot see across package
+  directories the way this repo runs lint (`turbo run lint` = one `eslint .` per
+  package, each with its own `cwd` — a glob like `apps/api/**` never resolves
+  from inside `packages/backend/`; the existing isolated-fixture pattern in
+  `packages/config` is the proof this was already known). Task 2.3 instead adds
+  a dependency-free import scanner (`@flower/testing`'s `checkForbiddenImports`)
+  and a boundary test in each of `packages/backend`, `apps/worker`,
+  `apps/scheduler` that (a) proves the checker actually flags a forbidden
+  specifier (teeth) and (b) scans the **real** source tree and asserts zero
+  violations — of `apps/api` / `@flower/api`, `fastify` / `@fastify/*`,
+  `@nestjs/platform-fastify`, `@nestjs/swagger`, and (for worker/scheduler) any
+  `*controller*` specifier.
 
 **Runtimes:**
 
 - `apps/worker` + `apps/scheduler` boot a Nest **application context**
-  (`NestFactory.createApplicationContext`) over `@flower/backend` modules.
-- `apps/worker`: BullMQ workers over the existing `QUEUES` set — per-queue
-  concurrency + retry/backoff + **DLQ**; a processor registry binding each queue
-  to a `@flower/backend` handler. The **outbox dispatcher (2.4) runs here** as a
-  dedicated loop (not a BullMQ queue).
-- `apps/scheduler`: the `REPEATABLE_JOBS` registry — enqueue only. Core jobs:
-  idempotency-key TTL sweep + stale-lock metric, outbox-lag alarm, realtime
-  stream `XTRIM` (time-based retention). Domain jobs stay in the backlog / their
-  phases.
-- `packages/service-runtime`: extend the shared bootstrap (graceful shutdown that
-  drains in-flight jobs).
-- Docker Compose: `flower-worker`, `flower-scheduler`, `flower-realtime` as
-  distinct services alongside `flower-api`; `flower` / `flower-saas` namespacing.
+  (`NestFactory.createApplicationContext`) over `@flower/backend` (`BackendModule`
+  = `DbModule` in this task's cut).
+- `apps/worker`: a `ProcessorRegistry` — `register(queue, handler)` + `start()`
+  opens one BullMQ `Worker` per registered queue; every job carries the shared
+  retry/backoff policy (`@flower/service-runtime`'s `jobOptions` —
+  `DEFAULT_RETRY_POLICY = { attempts: 5, backoffMs: 1000 }`); a job that exhausts
+  its attempts is copied to the `dead-letter` queue with a failure summary.
+  `QUEUES` = the ARCHITECTURE §49 `DOMAIN_QUEUES` (declared, no processor yet) +
+  `INFRA_QUEUES` (`probe`, `dead-letter`). Only `probe` has a registered
+  processor in this task. The **outbox dispatcher (2.4) attaches here** later as
+  a dedicated loop (not a BullMQ queue).
+- `apps/scheduler`: the `REPEATABLE_JOBS` registry — enqueue only
+  (`Queue.upsertJobScheduler`, stamped with the same shared retry policy). Task
+  2.3 ships one entry: `probe` → the `probe` queue, every 60s. Domain / maintenance
+  schedules (the idempotency sweep — B14, outbox-lag alarm, realtime stream
+  `XTRIM`) stay in the backlog / their phases.
+- `packages/service-runtime`: extended with `createBullConnection` (BullMQ needs
+  `maxRetriesPerRequest: null`), `DEFAULT_RETRY_POLICY` + `jobOptions` (shared by
+  worker and scheduler — one retry policy, defined once), an optional `/metrics`
+  route on the health server, and a `graceMs` timeout + double-signal force-exit
+  on `installShutdown` so a stuck drain can never wedge a rollout.
+- **Redis-at-startup policy (constraint 8, documented + tested):** both
+  `apps/worker` and `apps/scheduler` **fail fast** if Redis is unreachable at
+  boot (`bootstrapWorker` / `bootstrapScheduler` throw) — their entire purpose is
+  consuming/registering on Redis-backed queues, so the orchestrator restarts the
+  process rather than leaving it idle and silent.
+- Docker Compose services (`flower-worker`, `flower-scheduler`) are **not** added
+  in this task — there is no `flower-api` compose service yet either (the apps
+  run via `pnpm dev` / `tsx watch` in this phase; `infra/docker/
+node-service.Dockerfile` already builds any of the four roles from one image via
+  the `APP` build-arg). Tracked for whichever task first needs a deploy-time
+  compose file.
 
 **Tests:** every Phase 1 suite + probe stays green after the extraction; the app
-context boots and resolves a `@flower/backend` service in `worker` and
-`scheduler`; a queued job round-trips through a real processor; repeated failure →
-DLQ; the scheduler enqueues on its interval; SIGTERM drains; the boundaries lint
-**fails** if `worker`/`scheduler` reach a controller/Fastify module.
+context boots and resolves a `@flower/backend` service (`DbService`) in `worker`
+and `scheduler`; a queued `probe` job round-trips through a real processor;
+repeated failure → `dead-letter`; graceful shutdown drains an in-flight job
+(verified by waiting for the job to be observably `active` before draining, not a
+fixed sleep); Redis-unreachable-at-boot fails fast for both; the scheduler
+registers a real repeatable job that produces real queue entries on its interval;
+the 3 boundary tests (teeth + real-tree scan) pass in `packages/backend`,
+`apps/worker`, `apps/scheduler`.
 
 **Gates:** HG-RUNTIME, HG-BOUNDARY.
 

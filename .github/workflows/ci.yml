@@ -53,13 +53,17 @@ jobs:
         # PHASE-1-PLAN §1.15. The pure invariants: the policy truth-table, the
         # auditable-action registry ↔ security_event sync, the probe harness,
         # and realm disjointness / secret-custody in @flower/permissions.
+        # The request-context + scoped/platform-repository primitives moved to
+        # @flower/backend in Phase 2-core task 2.3 (FC-3); their unit tests moved
+        # with them.
         run: |
           pnpm --filter @flower/api exec vitest run \
             src/modules/access/policy-engine.test.ts \
             src/modules/access/policy.service.test.ts \
-            src/common/audit/actions.test.ts \
-            src/common/context/request-context.test.ts \
-            src/common/data/scoped-repository.test.ts
+            src/common/audit/actions.test.ts
+          pnpm --filter @flower/backend exec vitest run \
+            src/context/request-context.test.ts \
+            src/data/scoped-repository.test.ts
           pnpm --filter @flower/permissions exec vitest run
           pnpm --filter @flower/testing exec vitest run src/probes.test.ts
 

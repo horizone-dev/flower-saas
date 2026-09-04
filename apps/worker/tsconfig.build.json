@@ -1,5 +1,5 @@
 {
-  "extends": "@flower/config/tsconfig/node",
+  "extends": "@flower/config/tsconfig/nest",
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",

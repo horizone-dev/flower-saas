@@ -1,6 +1,6 @@
 {
-  "extends": "@flower/config/tsconfig/node",
+  "extends": "@flower/config/tsconfig/nest",
   "compilerOptions": { "noEmit": true, "composite": false, "rootDir": ".", "types": ["node"] },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist"]
 }

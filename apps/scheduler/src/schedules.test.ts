@@ -9,11 +9,13 @@ describe('scheduler repeatable jobs', () => {
       ids.add(job.schedulerId);
       expect(job.everyMs).toBeGreaterThan(0);
       expect(job.queue).toBeTruthy();
-      expect(job.jobName).toMatch(/^scheduler\./);
+      expect(job.jobName).toBeTruthy();
     }
   });
 
-  it('Phase 0 ships the heartbeat', () => {
-    expect(REPEATABLE_JOBS.some((j) => j.schedulerId === 'heartbeat')).toBe(true);
+  it('Phase 2-core ships the trivial probe schedule (framework proof, no domain job)', () => {
+    expect(REPEATABLE_JOBS.some((j) => j.schedulerId === 'probe' && j.queue === 'probe')).toBe(
+      true,
+    );
   });
 });

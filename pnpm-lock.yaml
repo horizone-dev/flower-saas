@@ -45,6 +45,9 @@ importers:
       '@fastify/static':
         specifier: 10.1.3
         version: 10.1.3
+      '@flower/backend':
+        specifier: workspace:*
+        version: link:../../packages/backend
       '@flower/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -341,15 +344,27 @@ importers:
 
   apps/scheduler:
     dependencies:
+      '@flower/backend':
+        specifier: workspace:*
+        version: link:../../packages/backend
       '@flower/service-runtime':
         specifier: workspace:*
         version: link:../../packages/service-runtime
+      '@nestjs/common':
+        specifier: 12.0.1
+        version: 12.0.1(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/core':
+        specifier: 12.0.1
+        version: 12.0.1(@nestjs/common@12.0.1(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
       bullmq:
         specifier: 6.3.4
         version: 6.3.4(ioredis@6.0.0)(pg@8.23.0)
       ioredis:
         specifier: 6.0.0
         version: 6.0.0
+      reflect-metadata:
+        specifier: 0.2.2
+        version: 0.2.2
       zod:
         specifier: 4.5.4
         version: 4.5.4
@@ -357,6 +372,9 @@ importers:
       '@flower/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@flower/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
@@ -457,15 +475,27 @@ importers:
 
   apps/worker:
     dependencies:
+      '@flower/backend':
+        specifier: workspace:*
+        version: link:../../packages/backend
       '@flower/service-runtime':
         specifier: workspace:*
         version: link:../../packages/service-runtime
+      '@nestjs/common':
+        specifier: 12.0.1
+        version: 12.0.1(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/core':
+        specifier: 12.0.1
+        version: 12.0.1(@nestjs/common@12.0.1(reflect-metadata@0.2.2)(rxjs@7.8.2))(reflect-metadata@0.2.2)(rxjs@7.8.2)
       bullmq:
         specifier: 6.3.4
         version: 6.3.4(ioredis@6.0.0)(pg@8.23.0)
       ioredis:
         specifier: 6.0.0
         version: 6.0.0
+      reflect-metadata:
+        specifier: 0.2.2
+        version: 0.2.2
       zod:
         specifier: 4.5.4
         version: 4.5.4
@@ -473,6 +503,9 @@ importers:
       '@flower/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@flower/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
@@ -504,6 +537,46 @@ importers:
       '@flower/config':
         specifier: workspace:*
         version: link:../config
+      eslint:
+        specifier: 10.9.1
+        version: 10.9.1(jiti@2.7.0)
+      rimraf:
+        specifier: 6.1.3
+        version: 6.1.3
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.13.3)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
+
+  packages/backend:
+    dependencies:
+      '@flower/db':
+        specifier: workspace:*
+        version: link:../db
+      '@nestjs/common':
+        specifier: 12.0.1
+        version: 12.0.1(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      pino:
+        specifier: 10.3.1
+        version: 10.3.1
+      reflect-metadata:
+        specifier: 0.2.2
+        version: 0.2.2
+      zod:
+        specifier: 4.5.4
+        version: 4.5.4
+    devDependencies:
+      '@flower/config':
+        specifier: workspace:*
+        version: link:../config
+      '@flower/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
       eslint:
         specifier: 10.9.1
         version: 10.9.1(jiti@2.7.0)
@@ -698,6 +771,9 @@ importers:
 
   packages/service-runtime:
     dependencies:
+      bullmq:
+        specifier: 6.3.4
+        version: 6.3.4(ioredis@6.0.0)(pg@8.23.0)
       ioredis:
         specifier: 6.0.0
         version: 6.0.0

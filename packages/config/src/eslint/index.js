@@ -122,7 +122,23 @@ export function flowerConfig(options = {}) {
   const config = [
     { ignores: [...IGNORES, ...extraIgnores] },
     js.configs.recommended,
-    ...tseslint.configs.recommended,
+    // `tseslint.configs.recommended`'s base entry (the one that assigns the
+    // TypeScript parser) carries no `files` restriction of its own — every
+    // other entry in the preset, and the project's own TS block right below,
+    // scope themselves to `**/*.{ts,tsx,mts,cts}`. Left unscoped, the TS
+    // parser leaks onto plain `.js`/`.mjs` files too (e.g. a package's own
+    // `eslint.config.js`). That is invisible in a single-package `eslint .`
+    // run (only one `tsconfigRootDir` is ever in play), but breaks the moment
+    // two packages' configs load in the same process without an explicit
+    // `tsconfigRootDir` on that file — e.g. lefthook's pre-commit hook, which
+    // lints staged files across every touched package in one invocation:
+    // `@typescript-eslint/parser`'s auto-discovery then sees two candidate
+    // roots for the unscoped `.js` file and refuses to guess. Pin the same
+    // `files` restriction here so `.js`/`.mjs` never reach the TS parser.
+    ...tseslint.configs.recommended.map((c) => ({
+      ...c,
+      files: c.files ?? ['**/*.{ts,tsx,mts,cts}'],
+    })),
     {
       files: ['**/*.{ts,tsx,mts,cts}'],
       languageOptions: {

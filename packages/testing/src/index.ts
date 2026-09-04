@@ -17,3 +17,10 @@ export {
 } from './probes.js';
 export { inParallel, summarize, expectAtMostSucceed, type ParallelSummary } from './concurrency.js';
 export { migrateTestDb } from './migrate.js';
+export {
+  extractImportSpecifiers,
+  listSourceFiles,
+  checkForbiddenImports,
+  type ImportHit,
+  type ListSourceFilesOptions,
+} from './boundary.js';

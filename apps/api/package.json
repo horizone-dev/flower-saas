@@ -19,6 +19,7 @@
     "@fastify/cookie": "11.0.2",
     "@fastify/cors": "11.3.0",
     "@fastify/static": "10.1.3",
+    "@flower/backend": "workspace:*",
     "@flower/db": "workspace:*",
     "@flower/permissions": "workspace:*",
     "@flower/shared-types": "workspace:*",

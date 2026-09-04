@@ -1,0 +1,43 @@
+{
+  "name": "@flower/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reusable authoritative backend module layer (FC-3 / OD-P2-8): infra + domain-service Nest modules consumed by apps/api, apps/worker and apps/scheduler. NO HTTP controllers / Fastify / transport wiring — those stay in apps/api.",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run --no-file-parallelism",
+    "clean": "rimraf dist node_modules .turbo"
+  },
+  "dependencies": {
+    "@flower/db": "workspace:*",
+    "@nestjs/common": "12.0.1",
+    "pino": "10.3.1",
+    "reflect-metadata": "0.2.2",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@flower/config": "workspace:*",
+    "@flower/testing": "workspace:*",
+    "@types/node": "24.13.3",
+    "eslint": "10.9.1",
+    "rimraf": "6.1.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

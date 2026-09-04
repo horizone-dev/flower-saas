@@ -1,7 +1,9 @@
 /**
  * Repeatable-job definitions (ARCHITECTURE §49). The scheduler ONLY enqueues;
- * the worker runs the jobs. Real schedules (rollups, reconciliation, reservation
- * expiry, session reaping, plan/licence reminders) are added per phase.
+ * `apps/worker` runs them. Phase 2-core ships the framework only — a trivial
+ * probe schedule that proves the round-trip. Domain schedules (rollups,
+ * reconciliation, reservation expiry, session reaping, plan/licence reminders,
+ * the idempotency-key TTL sweep — PHASE-2-BACKLOG.md) are added per phase.
  */
 export interface RepeatableJob {
   readonly schedulerId: string;
@@ -13,9 +15,9 @@ export interface RepeatableJob {
 
 export const REPEATABLE_JOBS: readonly RepeatableJob[] = [
   {
-    schedulerId: 'heartbeat',
-    queue: 'reconciliation',
-    jobName: 'scheduler.heartbeat',
+    schedulerId: 'probe',
+    queue: 'probe',
+    jobName: 'probe.tick',
     everyMs: 60_000,
   },
 ];
