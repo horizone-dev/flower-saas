@@ -39,6 +39,20 @@ async function bootstrap(): Promise<void> {
   app.useGlobalFilters(new AllExceptionsFilter());
   app.enableShutdownHooks();
 
+  // CORS for browser Bearer clients (POS PWA — OD1). Tokens travel in the
+  // Authorization header, never a cookie, so credentials stay off.
+  const corsOrigins = config.CORS_ORIGINS.split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  if (corsOrigins.length > 0) {
+    app.enableCors({
+      origin: corsOrigins,
+      credentials: false,
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['authorization', 'content-type', 'idempotency-key', CORRELATION_HEADER],
+    });
+  }
+
   // hard gate G8 — refuse to start if any route lacks @RequirePermission / @Public
   assertEveryRouteDeclaresIntent(app);
 

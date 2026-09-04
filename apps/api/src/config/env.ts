@@ -44,6 +44,11 @@ const envSchema = z.object({
   AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   AUTH_LOGIN_LOCKOUT_SECONDS: z.coerce.number().int().positive().default(900),
 
+  // Browser origins allowed to call the API with a Bearer token (POS PWA; the
+  // owner / super-admin webs are server-side and never CORS-preflight). Comma
+  // separated. Empty → CORS disabled.
+  CORS_ORIGINS: z.string().default('http://localhost:3200,http://localhost:3300'),
+
   // Secrets vault (task 1.10). `dev` = AES-256-GCM with a per-tenant DEK wrapped
   // by an env master key — acceptable for local dev + CI ONLY (OD4). Production
   // onboarding is gated on a managed provider (`kms`) — the `dev` provider is

@@ -54,6 +54,25 @@ export interface LoginResponse {
   expiresIn?: number;
 }
 
+export interface MeSummary {
+  userId: string | null;
+  platformUserId: string | null;
+  accountType: string | null;
+  tenantId: string | null;
+  mfaLevel: string;
+  isImpersonating: boolean;
+}
+
+export interface MeAccess {
+  accountType: string | null;
+  planKey: string | null;
+  entitledModules: string[];
+  companyScope: 'ALL' | string[];
+  branchScope: 'ALL' | string[];
+  permissions: string[];
+  perBranchOverlay: Record<string, string[]>;
+}
+
 export interface TenantSummary {
   id: string;
   slug: string;
@@ -292,14 +311,27 @@ export class ApiClient {
   platformLogin(input: { email: string; password: string; code?: string }): Promise<LoginResponse> {
     return this.send('POST', '/v1/platform/auth/login', input);
   }
+  tenantLogin(input: {
+    workspaceSlug: string;
+    email: string;
+    password: string;
+  }): Promise<LoginResponse> {
+    return this.send('POST', '/v1/auth/login', input);
+  }
+  verifyMfa(input: { mfaChallenge: string; code: string }): Promise<LoginResponse> {
+    return this.send('POST', '/v1/auth/mfa/verify', input);
+  }
   refresh(refreshToken: string): Promise<LoginResponse> {
     return this.send('POST', '/v1/auth/refresh', { refreshToken });
   }
   logout(): Promise<{ status: string }> {
     return this.send('POST', '/v1/auth/logout', {});
   }
-  me(): Promise<Record<string, unknown>> {
+  me(): Promise<MeSummary> {
     return this.get('/v1/me');
+  }
+  meAccess(): Promise<MeAccess> {
+    return this.get('/v1/me/access');
   }
 
   // ── tenants + lifecycle ───────────────────────────────────────────────────
