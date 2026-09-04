@@ -193,6 +193,7 @@ describe('cross-tenant isolation probe suite', () => {
       permissions: string[];
       branchScope?: string[] | 'ALL';
       companyScope?: string[] | 'ALL';
+      posTerminalId?: string;
     },
   ): Promise<string> {
     const s: SessionData = {
@@ -203,7 +204,7 @@ describe('cross-tenant isolation probe suite', () => {
       userId: o.userId ?? null,
       platformUserId: o.platformUserId ?? null,
       accountType: o.accountType,
-      posTerminalId: null,
+      posTerminalId: o.posTerminalId ?? null,
       deviceId: null,
       mfaLevel: 'STEP_UP',
       stepUpUntil: Date.now() + 600_000,
@@ -460,6 +461,28 @@ describe('cross-tenant isolation probe suite', () => {
       },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
+  });
+
+  // ══════════════════ POS is NOT an isolation boundary (G4) ═══════════════════
+  it('a POS-bound session reads its branch exactly as the same-branch non-POS session', async () => {
+    const posTok = await mint('probe-pos-a1', {
+      realm: 'tenant',
+      tenantId: A.tenantId,
+      userId: '00000000-0000-7000-8000-0000000c00aa', // the same A1-scoped user
+      accountType: 'USER',
+      permissions: ['users:view', 'audit:view', 'settings:branch:manage'],
+      branchScope: [A.branchId],
+      companyScope: [A.companyId],
+      posTerminalId: '00000000-0000-7000-8000-0000000c0f01',
+    });
+    const plain = await send('GET', `/v1/org/branches/${A.branchId}/settings`, branchUserATok);
+    const pos = await send('GET', `/v1/org/branches/${A.branchId}/settings`, posTok);
+    expect(pos.statusCode).toBe(plain.statusCode);
+    expect(pos.json()).toEqual(plain.json());
+    // the POS terminal id confers no cross-branch reach either
+    expect((await send('GET', `/v1/org/branches/${A.branch2Id}/settings`, posTok)).statusCode).toBe(
+      404,
+    );
   });
 
   // ══════════════════════════ coverage ══════════════════════════════════════
