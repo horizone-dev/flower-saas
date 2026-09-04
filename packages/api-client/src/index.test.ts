@@ -51,4 +51,34 @@ describe('@flower/api-client', () => {
     ).not.toThrow(); // falls back to globalThis.fetch which exists on Node 24
     expect(ApiError).toBeTypeOf('function');
   });
+
+  it('builds a query string for the audit viewer and drops undefined params', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ rows: [], nextBefore: null }));
+    const client = createApiClient({ baseUrl: 'http://api.test', fetch: fetchMock });
+    await client.queryAudit({ tenantId: 't1', action: 'role', limit: 25 });
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://api.test/v1/platform/audit?tenantId=t1&action=role&limit=25',
+    );
+  });
+
+  it('sends a JSON body + Idempotency-Key on provisioning', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ tenantId: 'x' }));
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+    await client.provisionTenant(
+      { slug: 'acme', name: 'Acme', region: 'AE', planVersionId: 'pv1', ownerEmail: 'a@b.co' },
+      'idem-1',
+    );
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({
+      authorization: 'Bearer tok',
+      'content-type': 'application/json',
+      'idempotency-key': 'idem-1',
+    });
+    expect(JSON.parse(String(init.body)).slug).toBe('acme');
+  });
 });
