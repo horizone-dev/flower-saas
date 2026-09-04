@@ -44,9 +44,10 @@ const envSchema = z.object({
   AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   AUTH_LOGIN_LOCKOUT_SECONDS: z.coerce.number().int().positive().default(900),
 
-  // Browser origins allowed to call the API with a Bearer token (POS PWA; the
-  // owner / super-admin webs are server-side and never CORS-preflight). Comma
-  // separated. Empty → CORS disabled.
+  // Browser origins allowed to call the API (the POS PWA — Bearer for protected
+  // calls, plus the HttpOnly refresh cookie on `/v1/auth/*`). Comma separated,
+  // exact match, never `*`. Empty → CORS disabled. Production MUST set real
+  // origins (the localhost defaults are refused when NODE_ENV=production).
   CORS_ORIGINS: z.string().default('http://localhost:3200,http://localhost:3300'),
 
   // Secrets vault (task 1.10). `dev` = AES-256-GCM with a per-tenant DEK wrapped
@@ -101,6 +102,15 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     if (cfg.SECRETS_MASTER_KEY === DEV_SECRETS_MASTER_KEY) {
       throw new EnvValidationError(
         '  - SECRETS_MASTER_KEY: the dev default must not be used in production',
+      );
+    }
+    // credentialed CORS with a localhost / wildcard origin is a real risk — the
+    // browser refuses `*` with credentials, and a stray localhost entry would
+    // trust a dev machine on the network. Force explicit production origins.
+    const origins = cfg.CORS_ORIGINS.split(',').map((o) => o.trim());
+    if (origins.some((o) => o === '*' || /^https?:\/\/localhost(:\d+)?$/i.test(o))) {
+      throw new EnvValidationError(
+        '  - CORS_ORIGINS: set explicit production origins (no "*" or localhost)',
       );
     }
   }

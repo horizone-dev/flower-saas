@@ -117,19 +117,27 @@ is recorded here as a hardening item for the auth phase (OI2).
 
 ## 5. Deferred to Phase 2 (explicit)
 
-| Item                                                                                         | Where recorded                                          |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Realtime sequence / gap-fill semantics (F8 / F9 from the Phase 0 ultra-review)               | `docs/phase-2/REALTIME-PROTOCOL-INPUTS.md`              |
-| `audit_log` hash chain (tamper-evidence)                                                     | ADR-0016                                                |
-| Outbox dispatcher (SKIP LOCKED fan-out → bus / BullMQ / Redis Streams / reporting)           | ADR-0016                                                |
-| General-ledger postings (`journal_entry`)                                                    | ADR-0016 (begins Phase 5)                               |
-| WebAuthn / passkeys (second factor)                                                          | OD2 — architecture kept ready                           |
-| Self-service email password reset                                                            | OD3 — waits for the notifications phase                 |
-| Managed-KMS `CryptoProvider`                                                                 | OD4 / G16 — required before KSA / production onboarding |
-| Host / custom-domain login resolution                                                        | OD5 — Phase 7                                           |
-| Registered-device enforcement (pipeline step 4 is a documented no-op)                        | amendment 1 — Phase 2 devices module                    |
-| Explicit CSRF token for the cookie realms                                                    | OI2 — auth hardening                                    |
-| Per-tenant `LimitService` coverage test for all 10 limits (representative subset tested now) | Phase 1 follow-up / hardening                           |
+> **Post-`phase-1-complete` update (2026-09-04):** a focused auth-hardening
+> remediation landed on `main` after the tag —
+> [`POST-1-AUTH-HARDENING.md`](POST-1-AUTH-HARDENING.md). It removed the POS PWA's
+> JS-readable refresh-token storage (in-memory access token + `HttpOnly` refresh
+> cookie + `X-Auth-Transport` CSRF control) and added a production CORS-origin
+> guard. The `phase-1-complete` tag is unchanged. Rows marked ✎ below are updated
+> by that work.
+
+| Item                                                                                         | Where recorded                                                                                                                                                                                                        |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Realtime sequence / gap-fill semantics (F8 / F9 from the Phase 0 ultra-review)               | `docs/phase-2/REALTIME-PROTOCOL-INPUTS.md`                                                                                                                                                                            |
+| `audit_log` hash chain (tamper-evidence)                                                     | ADR-0016                                                                                                                                                                                                              |
+| Outbox dispatcher (SKIP LOCKED fan-out → bus / BullMQ / Redis Streams / reporting)           | ADR-0016                                                                                                                                                                                                              |
+| General-ledger postings (`journal_entry`)                                                    | ADR-0016 (begins Phase 5)                                                                                                                                                                                             |
+| WebAuthn / passkeys (second factor)                                                          | OD2 — architecture kept ready                                                                                                                                                                                         |
+| Self-service email password reset                                                            | OD3 — waits for the notifications phase                                                                                                                                                                               |
+| Managed-KMS `CryptoProvider`                                                                 | OD4 / G16 — required before KSA / production onboarding                                                                                                                                                               |
+| Host / custom-domain login resolution                                                        | OD5 — Phase 7                                                                                                                                                                                                         |
+| Registered-device enforcement (pipeline step 4 is a documented no-op)                        | amendment 1 — Phase 2 devices module                                                                                                                                                                                  |
+| Explicit CSRF token for the cookie realms (owner-web / super-admin-web)                      | OI2 — ✎ reviewed in `POST-1-AUTH-HARDENING.md` §E; still deferred (Server Action Origin check + `SameSite=Lax` is adequate). The POS PWA cookie-refresh path now carries an explicit `X-Auth-Transport` CSRF control. |
+| Per-tenant `LimitService` coverage test for all 10 limits (representative subset tested now) | Phase 1 follow-up / hardening                                                                                                                                                                                         |
 
 ---
 

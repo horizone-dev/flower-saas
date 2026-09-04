@@ -32,6 +32,7 @@ describe('loadConfig', () => {
       DATABASE_URL: 'postgres://x',
       AUTH_JWT_SECRET: 'a-real-production-jwt-secret-value-32+',
       SECRETS_MASTER_KEY: 'a-real-production-master-key-value-32+chars',
+      CORS_ORIGINS: 'https://pos.acme.com',
     };
     expect(() => loadConfig(prodBase)).toThrow(/SECRETS_PROVIDER/);
     expect(() => loadConfig({ ...prodBase, SECRETS_PROVIDER: 'kms' })).not.toThrow();
@@ -47,5 +48,27 @@ describe('loadConfig', () => {
   it('the dev secrets provider is the default outside production', () => {
     const cfg = loadConfig({});
     expect(cfg.SECRETS_PROVIDER).toBe('dev');
+  });
+
+  it('refuses a wildcard or localhost CORS origin in production (credentialed cookie flow)', () => {
+    const prodBase = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://x',
+      AUTH_JWT_SECRET: 'a-real-production-jwt-secret-value-32+',
+      SECRETS_PROVIDER: 'kms',
+      SECRETS_MASTER_KEY: 'a-real-production-master-key-value-32+chars',
+    };
+    expect(() => loadConfig({ ...prodBase, CORS_ORIGINS: '*' })).toThrow(/CORS_ORIGINS/);
+    expect(() =>
+      loadConfig({ ...prodBase, CORS_ORIGINS: 'https://pos.acme.com,http://localhost:3200' }),
+    ).toThrow(/CORS_ORIGINS/);
+    expect(() =>
+      loadConfig({ ...prodBase, CORS_ORIGINS: 'https://pos.acme.com,https://owner.acme.com' }),
+    ).not.toThrow();
+  });
+
+  it('leaves the localhost CORS defaults alone outside production', () => {
+    const cfg = loadConfig({});
+    expect(cfg.CORS_ORIGINS).toContain('localhost');
   });
 });

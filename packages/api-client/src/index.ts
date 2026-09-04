@@ -19,6 +19,10 @@ export interface ApiClientOptions {
   fetch?: typeof fetch;
   /** returns the current access token, or null when unauthenticated */
   getAccessToken?: () => string | null | Promise<string | null>;
+  /** `fetch` credentials mode — `'include'` for the browser refresh-cookie flow */
+  credentials?: 'omit' | 'same-origin' | 'include';
+  /** headers merged into every request (e.g. `x-auth-transport: cookie`) */
+  headers?: Record<string, string>;
 }
 
 export class ApiError extends Error {
@@ -231,6 +235,8 @@ export class ApiClient {
   private readonly baseUrl: string;
   private readonly doFetch: typeof fetch;
   private readonly getAccessToken: () => string | null | Promise<string | null>;
+  private readonly credentials: 'omit' | 'same-origin' | 'include' | undefined;
+  private readonly defaultHeaders: Record<string, string>;
 
   constructor(opts: ApiClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
@@ -238,6 +244,8 @@ export class ApiClient {
     if (!f) throw new Error('No fetch implementation available; pass one via options');
     this.doFetch = f;
     this.getAccessToken = opts.getAccessToken ?? (() => null);
+    this.credentials = opts.credentials;
+    this.defaultHeaders = { ...opts.headers };
   }
 
   private qs(query?: Query): string {
@@ -256,7 +264,7 @@ export class ApiClient {
     parse: (raw: unknown) => T,
   ): Promise<T> {
     const token = await this.getAccessToken();
-    const headers: Record<string, string> = { accept: 'application/json' };
+    const headers: Record<string, string> = { accept: 'application/json', ...this.defaultHeaders };
     if (token) headers['authorization'] = `Bearer ${token}`;
     if (init.body !== undefined) headers['content-type'] = 'application/json';
     if (init.idempotencyKey) headers['idempotency-key'] = init.idempotencyKey;
@@ -264,6 +272,7 @@ export class ApiClient {
     const res = await this.doFetch(`${this.baseUrl}${path}${this.qs(init.query)}`, {
       method: init.method ?? 'GET',
       headers,
+      ...(this.credentials ? { credentials: this.credentials } : {}),
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     });
     const body: unknown = await res.json().catch(() => undefined);
@@ -321,8 +330,9 @@ export class ApiClient {
   verifyMfa(input: { mfaChallenge: string; code: string }): Promise<LoginResponse> {
     return this.send('POST', '/v1/auth/mfa/verify', input);
   }
-  refresh(refreshToken: string): Promise<LoginResponse> {
-    return this.send('POST', '/v1/auth/refresh', { refreshToken });
+  /** Omit `refreshToken` to use the HttpOnly refresh cookie (browser clients). */
+  refresh(refreshToken?: string): Promise<LoginResponse> {
+    return this.send('POST', '/v1/auth/refresh', refreshToken ? { refreshToken } : {});
   }
   logout(): Promise<{ status: string }> {
     return this.send('POST', '/v1/auth/logout', {});

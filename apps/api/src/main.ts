@@ -39,17 +39,26 @@ async function bootstrap(): Promise<void> {
   app.useGlobalFilters(new AllExceptionsFilter());
   app.enableShutdownHooks();
 
-  // CORS for browser Bearer clients (POS PWA — OD1). Tokens travel in the
-  // Authorization header, never a cookie, so credentials stay off.
+  // CORS for browser clients (the POS PWA). Protected API calls are Bearer
+  // (Authorization header); `credentials: true` is needed only so the HttpOnly
+  // refresh cookie flows on `/v1/auth/*` — the origin list is an explicit
+  // allow-list (never `*`), so a credentialed cross-origin request from an
+  // unknown page is rejected before it reaches a handler.
   const corsOrigins = config.CORS_ORIGINS.split(',')
     .map((o) => o.trim())
     .filter(Boolean);
   if (corsOrigins.length > 0) {
     app.enableCors({
       origin: corsOrigins,
-      credentials: false,
+      credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['authorization', 'content-type', 'idempotency-key', CORRELATION_HEADER],
+      allowedHeaders: [
+        'authorization',
+        'content-type',
+        'idempotency-key',
+        'x-auth-transport',
+        CORRELATION_HEADER,
+      ],
     });
   }
 

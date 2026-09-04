@@ -3,7 +3,14 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { MeAccess } from '@flower/api-client';
-import { posApi, getToken, clearTokens, errorMessage, ApiError } from '@/lib/auth';
+import {
+  posApi,
+  getAccessToken,
+  bootstrapSession,
+  signOut as endSession,
+  errorMessage,
+  ApiError,
+} from '@/lib/auth';
 
 function scopeText(scope: 'ALL' | string[]): string {
   return scope === 'ALL' ? 'ALL' : scope.length ? scope.join(', ') : 'none';
@@ -15,31 +22,46 @@ export default function MyAccessPage() {
   const [error, setError] = useState<string | undefined>();
 
   useEffect(() => {
-    if (!getToken()) {
-      router.replace('/login');
-      return;
-    }
-    posApi()
-      .meAccess()
-      .then(setAccess)
-      .catch((err: unknown) => {
+    let cancelled = false;
+
+    async function load(): Promise<void> {
+      // a tab reload drops the in-memory access token — re-bootstrap it from
+      // the HttpOnly refresh cookie before giving up.
+      if (!getAccessToken() && !(await bootstrapSession())) {
+        if (!cancelled) router.replace('/login');
+        return;
+      }
+      try {
+        const data = await posApi().meAccess();
+        if (!cancelled) setAccess(data);
+      } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
-          clearTokens();
-          router.replace('/login');
+          // access token expired mid-session — one refresh + retry
+          if (await bootstrapSession()) {
+            try {
+              const data = await posApi().meAccess();
+              if (!cancelled) setAccess(data);
+              return;
+            } catch {
+              /* fall through to sign-out */
+            }
+          }
+          await endSession();
+          if (!cancelled) router.replace('/login');
           return;
         }
-        setError(errorMessage(err));
-      });
+        if (!cancelled) setError(errorMessage(err));
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
-  function signOut() {
-    posApi()
-      .logout()
-      .catch(() => undefined)
-      .finally(() => {
-        clearTokens();
-        router.replace('/login');
-      });
+  function signOut(): void {
+    void endSession().finally(() => router.replace('/login'));
   }
 
   return (

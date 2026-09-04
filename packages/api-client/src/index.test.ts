@@ -61,6 +61,36 @@ describe('@flower/api-client', () => {
     );
   });
 
+  it('applies the credentials mode and default headers to every request (browser cookie flow)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ status: 'ok' }));
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      credentials: 'include',
+      headers: { 'x-auth-transport': 'cookie' },
+    });
+
+    await client.refresh(); // no arg -> cookie transport, empty body
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe('http://api.test/v1/auth/refresh');
+    expect(init?.credentials).toBe('include');
+    expect(init?.headers).toMatchObject({
+      'x-auth-transport': 'cookie',
+      accept: 'application/json',
+    });
+    // the refresh token is never in the body on the cookie flow
+    expect(JSON.parse(String(init?.body ?? '{}'))).not.toHaveProperty('refreshToken');
+  });
+
+  it('omits credentials entirely when not configured (server-side clients)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ status: 'ok' }));
+    const client = createApiClient({ baseUrl: 'http://api.test', fetch: fetchMock });
+    await client.refresh('rt-abc');
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(init.credentials).toBeUndefined();
+    expect(JSON.parse(String(init.body)).refreshToken).toBe('rt-abc');
+  });
+
   it('sends a JSON body + Idempotency-Key on provisioning', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ tenantId: 'x' }));
     const client = createApiClient({
