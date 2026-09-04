@@ -9,12 +9,20 @@
  */
 export type IsolationAxis = 'tenant' | 'branch' | 'register' | 'customer' | 'storefront';
 
+/**
+ * What a probe attempt resolves to: either a bare HTTP status (leak iff the
+ * status is not in `expectDenied`), or an explicit verdict — for list / filter
+ * endpoints that legitimately answer `200` but must not contain the victim's
+ * rows, the case does its own body check and reports `leaked`.
+ */
+export type ProbeOutcome = number | { readonly status: number; readonly leaked: boolean };
+
 export interface IsolationProbeCase {
   /** e.g. "GET /v1/orders/:id  as tenant B" */
   readonly name: string;
   readonly axis: IsolationAxis;
-  /** perform the cross-boundary attempt; resolve with the HTTP status observed */
-  readonly attempt: () => Promise<number>;
+  /** perform the cross-boundary attempt; resolve with the observed status/verdict */
+  readonly attempt: () => Promise<ProbeOutcome>;
   /** statuses that count as "correctly denied" (default: 403, 404) */
   readonly expectDenied?: readonly number[];
 }
@@ -40,13 +48,11 @@ export async function runIsolationProbes(cases: readonly IsolationProbeCase[]): 
   for (const c of cases) {
     const denied = c.expectDenied ?? DEFAULT_DENIED;
     try {
-      const observedStatus = await c.attempt();
-      results.push({
-        name: c.name,
-        axis: c.axis,
-        observedStatus,
-        leaked: !denied.includes(observedStatus),
-      });
+      const outcome = await c.attempt();
+      const observedStatus = typeof outcome === 'number' ? outcome : outcome.status;
+      const leaked =
+        typeof outcome === 'number' ? !denied.includes(observedStatus) : outcome.leaked;
+      results.push({ name: c.name, axis: c.axis, observedStatus, leaked });
     } catch (err) {
       // an error during the attempt is treated as a leak candidate — it must be
       // explained, not swallowed.

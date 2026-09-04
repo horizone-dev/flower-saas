@@ -5,6 +5,15 @@ import { requireTenantContext } from '../../common/context/index.js';
 import { NotFoundError } from '../../common/errors/domain-error.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 
+/** RLS scopes reads to the tenant, but a foreign-key still resolves across
+ *  tenants — so a write keyed by a branch id must first confirm the branch is
+ *  visible in this tenant (else a caller could attach rows to another tenant's
+ *  branch). Cross-tenant probe suite, task 1.13. */
+async function assertBranchInTenant(tx: ScopedTx, branchId: string): Promise<void> {
+  const branch = await tx.branch.findUnique({ where: { id: branchId }, select: { id: true } });
+  if (!branch) throw new NotFoundError('branch');
+}
+
 /** Org data — companies, trade licenses, branches, branch settings, POS
  *  terminals. Tenant-scoped through RLS. */
 @Injectable()
@@ -128,14 +137,16 @@ export class OrgRepository {
 
   // ── branch settings (registered_device_required is NOT writable — amendment 1) ──
   branchSettings(branchId: string): Promise<{ key: string; value: unknown }[]> {
-    return this.run((tx) =>
-      tx.branchSetting.findMany({ where: { branchId }, select: { key: true, value: true } }),
-    );
+    return this.run(async (tx) => {
+      await assertBranchInTenant(tx, branchId);
+      return tx.branchSetting.findMany({ where: { branchId }, select: { key: true, value: true } });
+    });
   }
 
   async setBranchSetting(branchId: string, key: string, value: unknown): Promise<void> {
     await this.run(async (tx) => {
       const tenantId = requireTenantContext().tenantId;
+      await assertBranchInTenant(tx, branchId);
       await tx.branchSetting.upsert({
         where: { branchId_key: { branchId, key } },
         create: { tenantId, branchId, key, value: value as object },
@@ -201,6 +212,11 @@ export class OrgRepository {
   }): Promise<{ id: string }> {
     return this.run(async (tx) => {
       const tenantId = requireTenantContext().tenantId;
+      const company = await tx.company.findUnique({
+        where: { id: input.companyId },
+        select: { id: true },
+      });
+      if (!company) throw new NotFoundError('company');
       const l = await tx.tradeLicense.create({
         data: {
           tenantId,

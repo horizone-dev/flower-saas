@@ -23,4 +23,9 @@ export {
 } from './session.types.js';
 export { AuthGuard, contextPatchFromSession } from './auth.guard.js';
 export { PermissionGuard } from './permission.guard.js';
-export { assertEveryRouteDeclaresIntent, RouteCoverageError } from './route-coverage.js';
+export {
+  assertEveryRouteDeclaresIntent,
+  RouteCoverageError,
+  enumerateRoutes,
+  type MappedRoute,
+} from './route-coverage.js';

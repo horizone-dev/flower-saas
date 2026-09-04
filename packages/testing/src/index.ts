@@ -11,6 +11,7 @@ export {
   crossBoundaryCases,
   type IsolationAxis,
   type IsolationProbeCase,
+  type ProbeOutcome,
   type ProbeResult,
   type ProbeRun,
 } from './probes.js';

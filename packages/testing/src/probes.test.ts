@@ -46,6 +46,25 @@ describe('probe harness (pure)', () => {
     expect(run.ok).toBe(true);
   });
 
+  it('accepts an explicit {status, leaked} verdict for list/filter endpoints', async () => {
+    const run = await runIsolationProbes([
+      // a scoped list legitimately answers 200 but returned none of the victim's rows
+      {
+        name: 'cross-tenant list (empty)',
+        axis: 'tenant',
+        attempt: async () => ({ status: 200, leaked: false }),
+      },
+      // ...this one returned a victim row
+      {
+        name: 'cross-tenant list (leaked row)',
+        axis: 'tenant',
+        attempt: async () => ({ status: 200, leaked: true }),
+      },
+    ]);
+    expect(run.ok).toBe(false);
+    expect(run.leaks.map((l) => l.name)).toEqual(['cross-tenant list (leaked row)']);
+  });
+
   it('crossBoundaryCases builds id / param / nested-URL attempts', async () => {
     const calls: string[] = [];
     const cases = crossBoundaryCases({
