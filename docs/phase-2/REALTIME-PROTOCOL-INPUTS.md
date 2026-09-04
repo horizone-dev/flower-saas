@@ -81,24 +81,39 @@ per-topic mark. A subsequent in-order event can then satisfy
   (position = "how far down the stream I've consumed"), so it never feeds a false
   gap. This interacts with whichever F8 option is chosen.
 
-## Resolution — ADR-0017 (2026-09-04, Phase 2-core Task 2.0)
+## Resolution — ADR-0017 (2026-09-04, Phase 2-core Task 2.0; clarified 2026-09-04)
 
-The owner's Phase 2-core decisions (OD-P2-3, OD-P2-4, constraint FC-1) resolve
-F8 and F9. Full detail in [`../decisions/ADR-0017.md`](../decisions/ADR-0017.md);
-the F8/F9 analysis above is retained as the record of the problem.
+The owner's Phase 2-core decisions (OD-P2-3, OD-P2-4, constraint FC-1) and the
+2026-09-04 clarification resolve F8 and F9. Full detail in
+[`../decisions/ADR-0017.md`](../decisions/ADR-0017.md); the F8/F9 analysis above is
+retained as the record of the problem.
 
-**F8 — `seq` granularity.** Option 1 is adopted: `seq` stays **per-tenant-global**
-and is **not** used in any arithmetic "am I behind?" test. The durable resume
-cursor is the **Redis Stream entry ID**; the resync trigger is **retention-based**
-(the client's stored stream ID is below the stream's retained floor) plus the
-heartbeat high-water mark. `DEFAULT_MAX_SEQ_GAP` is **retired as the primary
-trigger** (kept only as a defensive sanity ceiling). The per-topic `lastSeqByTopic`
-mark survives for UI ordering only.
+**F8 — `seq` is never an "am I behind?" input, at any granularity.** `seq` stays
+**per-tenant-global** and is used for logical ordering / diagnostics only. The
+**Redis Stream entry ID / retained-stream position is the single correctness basis
+for resume and retention-gap detection.** Resync is triggered **only** when the
+client's **scanned Stream cursor** falls below the stream's first retained entry.
+There is **no** resync from `tenantHighWaterSeq − clientLastSeq`, no per-topic
+`seq` delta, no `DEFAULT_MAX_SEQ_GAP` — a tenant-global `seq` is advanced by
+unrelated branch/topic activity, so any arithmetic distance check would re-create
+F8. The heartbeat may carry the current Stream tail ID **and** an informational
+tenant high-water `seq`, but resync eligibility is `scannedCursor` vs
+`XINFO STREAM` first-id, never arithmetic distance.
 
-**F9 — stale path.** Stream position and resource state are separated: the
-**position marker advances for every event consumed from the stream**, including
-`duplicate` and `stale` results; `versionByResource` advances only on a genuinely
-newer `resourceVersion`. A `stale` event can therefore never feed a false gap.
+**Scanned vs applied cursor.** A client subscribed to a subset of topics still
+advances a **scanned Stream cursor** across **every** stream entry the gateway
+reads on its behalf — including entries for topics it is not subscribed to and
+entries whose payload is filtered out. So unrelated tenant activity (a burst on
+another branch) never leaves the client permanently behind: its scanned cursor
+tracks the stream tail even while it receives zero payloads. The gateway filters
+_payload delivery_, not _cursor advancement_, and reports the scanned cursor in
+each frame + the heartbeat.
+
+**F9 — stale path.** Scanned cursor and resource state are separated: the
+**scanned cursor advances for every event read from the stream**, including
+`duplicate` / `stale` / not-for-me results; `versionByResource` advances only on a
+genuinely newer `resourceVersion`. A `stale` event can therefore never feed a
+false gap.
 
 **`seq` immutability (FC-1).** `seq` (and `event_id`) are assigned once by the
 dispatcher, persisted to the `outbox` row before `XADD`, and reused verbatim on any
@@ -118,24 +133,32 @@ the `RealtimeEvent`/`EventReducer` **doc comments** in Task 2.0 (this task), the
    deltas of hundreds) → **zero** false `gap-needs-resync`.
 2. **F9** — a reordered delivery where a higher-`seq` message carries a lower
    `resourceVersion` (result `stale`), followed by an in-order event → **no**
-   false resync; the position advanced past the stale event.
-3. **Retention gap** — a client reconnecting with a stored stream ID below the
-   stream's retained floor → resync **is** triggered; afterwards its position is
-   the current stream tail.
-4. **Within-retention reconnect** — a client disconnects, N events land, it
-   reconnects with its stored stream ID → it receives exactly those N authorized
-   events, in order, none applied twice.
-5. **FC-1** — kill the dispatcher between `XADD` and the `dispatched_at` update →
+   false resync; the scanned cursor advanced past the stale event.
+3. **Unrelated-tenant-activity, no false resync (owner clarification).** Client
+   subscribed **only** to branch A; thousands of events for **branch B**; branch A
+   receives **none**; heartbeat tenant high-water advances greatly →
+   - **no** full resync;
+   - the client's **scanned Stream cursor advances** to ≈ the stream tail despite
+     zero delivered payloads;
+   - a reconnect **within retention** resumes correctly from the scanned cursor;
+   - **no `tenantHighWaterSeq − clientLastSeq` comparison exists in any path.**
+4. **Retention gap** — a client reconnecting with a scanned cursor below the
+   stream's retained floor (genuinely offline > retention) → resync **is**
+   triggered; afterwards its scanned cursor is the current stream tail.
+5. **Within-retention reconnect** — a client disconnects, N events land, it
+   reconnects with its stored scanned cursor → it receives exactly those N
+   authorized events, in order, none applied twice.
+6. **FC-1** — kill the dispatcher between `XADD` and the `dispatched_at` update →
    on restart the row republishes → both stream entries carry the **identical
    `event_id` and `seq`**; the reducer applies it once.
-6. **Multi-gateway fanout (≥ 2 instances)** — a client on each gateway instance,
+7. **Multi-gateway fanout (≥ 2 instances)** — a client on each gateway instance,
    both authorized for the same branch, both receive the same event.
-7. **Isolation** — a branch-X client never receives a branch-Y event; a tenant-B
+8. **Isolation** — a branch-X client never receives a branch-Y event; a tenant-B
    client never receives a tenant-A event; a client cannot subscribe to an
    arbitrary topic string; a scope-narrowing token refresh stops the
    now-unauthorized topic.
-8. **Revocation** — session revoke closes the socket on **every** gateway
+9. **Revocation** — session revoke closes the socket on **every** gateway
    instance in < 5s.
-9. **Fault injection** — kill the gateway / dispatcher / relay / Redis connection
-   mid-stream → the client reconnects and converges to the REST-authoritative
-   state.
+10. **Fault injection** — kill the gateway / dispatcher / relay / Redis connection
+    mid-stream → the client reconnects and converges to the REST-authoritative
+    state.

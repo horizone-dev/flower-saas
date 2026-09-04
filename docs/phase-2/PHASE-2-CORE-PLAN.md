@@ -36,11 +36,21 @@
   `PHASE-2-BACKLOG.md` with the first-consumer gate for each item. Do **not**
   execute a Class-B/C task now unless a core task proves it is genuinely required
   (recorded as a plan amendment if so).
-- **OD-P2-3 — realtime `seq`.** A **per-tenant-global monotonic logical `seq`**,
-  allocated by the dispatcher at publish. But: the **Redis Stream entry ID is the
-  resume / durable cursor**, not `seq`; `seq` is **not** the primary resume cursor;
-  `resource_version` controls whether payload state is applied; the client's stream
-  **position advances even for `duplicate` / `stale` events**.
+- **OD-P2-3 — realtime `seq`** (+ **2026-09-04 clarification**). A
+  **per-tenant-global monotonic logical `seq`**, assigned once and immutable
+  (FC-1). The **Redis Stream entry ID / retained-stream position is the _single_
+  correctness basis** for resume and retention-gap detection; `seq` is **logical
+  ordering / diagnostics only**. **No arithmetic `seq`-distance resync trigger at
+  any granularity** — not per-topic, and **not** `tenantHighWaterSeq −
+clientLastSeq` (a tenant-global `seq` is advanced by unrelated branch activity →
+  that check would re-create F8). The client persists a **scanned Stream cursor**
+  that the gateway advances across **every** stream entry it reads on the client's
+  behalf (incl. filtered-out / other-branch entries), so unrelated tenant activity
+  never strands a subset-subscribed client. `resource_version` gates payload
+  application; the scanned cursor advances for `duplicate` / `stale` / not-for-me.
+  Heartbeat: current Stream tail ID + scanned cursor + an **informational** tenant
+  high-water `seq`. Full detail: [ADR-0017](../decisions/ADR-0017.md) §3, §6a–c,
+  §7.
 - **OD-P2-4 — one durable Redis Stream per tenant; relay + Pub/Sub for live
   fanout.** A gateway **consumer group is NOT the socket-broadcast mechanism**
   (consumer groups distribute entries between members → sockets on other gateway
@@ -460,13 +470,15 @@ advisory lock so per-tenant `seq` is strictly increasing):
 1. `SELECT … FROM outbox WHERE dispatched_at IS NULL AND available_at <= now()
 ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT n` (platform path — outbox is
    cross-tenant infra).
-2. **Assign `seq` once, durably, before publishing (FC-1).** For each claimed row
-   **where `seq IS NULL`**: allocate the next per-tenant monotonic value
-   (mechanism — a `pg` sequence per tenant, or a `tenant_outbox_seq` counter row
-   with `SELECT … FOR UPDATE`; decided in OI-P2-1) and `UPDATE outbox SET seq =
-$seq WHERE id = $id AND seq IS NULL` — **committed before step 3**. A row that
-   already has a non-null `seq` (a re-selected, previously-published row) **keeps
-   it** — `seq` is never re-assigned.
+2. **Assign `seq` once, durably, before publishing (FC-1 + ADR-0017 §1).** Only
+   the **single active dispatcher leader for that tenant** (Postgres advisory lock
+   on a tenant bucket) allocates `seq`. For each claimed row **where `seq IS NULL`**,
+   in `(created_at, id)` order: allocate the next per-tenant monotonic value
+   (mechanism decided in OI-P2-1 — must be crash-safe, gap-tolerant, no reuse/
+   reorder) and `UPDATE outbox SET seq = $seq WHERE id = $id AND seq IS NULL`,
+   **committed before step 3**. A row with a non-null `seq` (re-selected after a
+   crash) **keeps it**. A non-leader dispatcher that `SKIP LOCKED`-claims a row for
+   a tenant it is not leader for **defers** the row (no stamp, no publish).
 3. `XADD rt:stream:{tenantId} * …envelope…` — the ADR-0009 envelope
    `{event_id, seq, tenant_id, branch_id, type, resource_type, resource_id,
 resource_version, occurred_at, actor_summary}`. `event_id` is **deterministic
@@ -498,6 +510,10 @@ stream length.
   `event_id` AND the identical `seq`**; a downstream idempotent consumer applies it
   once (no duplicate effect).
 - a re-selected row with a non-null `seq` is never given a new `seq`.
+- **OI-P2-1 concurrency** — two dispatcher processes running: only the tenant's
+  leader allocates `seq`; per-tenant `seq` is strictly increasing and matches
+  `(created_at, id)` order; a non-leader defers rather than stamping; a leader
+  handover (advisory-lock release) does not produce a `seq` reorder or reuse.
 - persistent `XADD` failure → `attempts` climbs, `available_at` backs off, other
   rows still flow; dead-letter after N.
 - `XTRIM` is time-based — an entry older than the window is trimmed, a newer one
@@ -555,32 +571,32 @@ instance. On a WS connection:
 
 `packages/realtime-client`: the real WS transport (connect / auth / `subscribe` /
 reconnect with jittered backoff — the existing `reconnectDelayMs`) + resume from
-the stored **stream position** + the **F8/F9-resolved** `EventReducer`:
+the persisted **scanned Stream cursor** + the **F8/F9-resolved** `EventReducer`
+(ADR-0017 §3, §6a–c, §7):
 
-- stream position advances for **every** consumed event, incl. `stale` /
-  `duplicate` (F9).
-- `resource_version` gates payload application only.
-- resync is triggered by **retention position** (stored stream ID < stream
-  first-id) + the heartbeat high-water, **not** `maxSeqGap` (F8).
+- the **scanned Stream cursor** advances for **every** stream entry the gateway
+  reads on the client's behalf — incl. `stale` / `duplicate` / not-for-me /
+  other-branch entries (F9 + the owner clarification); the gateway reports it in
+  every frame + the heartbeat and the client persists it.
+- `resource_version` gates payload application only (a separate per-resource mark).
+- resync is triggered **only** when the scanned cursor is below the stream's
+  retained floor (`XINFO STREAM` first-id > scannedCursor). **No** `maxSeqGap`,
+  **no** `tenantHighWaterSeq − clientLastSeq` (F8). `DEFAULT_MAX_SEQ_GAP` is
+  deleted.
 
-Gateway `resume` handler: given the client's last stream ID, replay via `XRANGE`
-`rt:stream:{tenantId}` (id, +] filtered to the client's authorized topics; if the
-id is below the retained floor → respond `resync-required` with the current tail id.
+Gateway `resume` handler: given the client's scanned cursor, replay via
+`XRANGE rt:stream:{tenantId} (<cursor> +`, payload-filtered to authorized topics,
+advancing + returning the scanned cursor across all entries; if the cursor is
+below the retained floor → respond `resync-required` with the current tail id.
 
-**Tests — the frozen `REALTIME-PROTOCOL-INPUTS.md` acceptance suite (build-blocking,
-its own CI `realtime` job):**
-
-- long cross-topic interleave over a long run → **zero** false `gap-needs-resync`
-  (F8).
-- a reordered delivery where a higher-`seq` message carries a lower
-  `resource_version`, then an in-order event → **no** false resync (F9).
-- a genuine retention-gap reconnect → resync **is** triggered; after resync the
-  position is the current tail.
-- reconnect **within** retention → replays exactly the missed events, in order, no
-  duplicates applied.
-- **fault injection:** kill the gateway mid-stream; kill the dispatcher; kill the
-  relay; drop the Redis connection — the client reconnects and converges to the
-  REST-authoritative state.
+**Tests — the frozen `REALTIME-PROTOCOL-INPUTS.md` acceptance suite (10 cases;
+build-blocking, its own CI `realtime` job):** F8 no-false-resync · F9 reorder ·
+**unrelated-tenant-activity (branch-A-only client, thousands of branch-B events,
+zero branch-A events, high-water advances → no resync, scanned cursor advances to
+≈ tail, within-retention reconnect resumes) · no `tenantHighWaterSeq −
+clientLastSeq` comparison anywhere** · retention-gap → resync · within-retention
+exact replay · FC-1 crash-republish identity · multi-gateway fanout · isolation ·
+revocation · fault injection (gateway / dispatcher / relay / Redis).
 
 **Gate:** HG-RT-RESUME.
 
@@ -642,30 +658,37 @@ Annotated tag **`phase-2-core-complete`**; push; verify the tag via the GitHub A
 
 ## 4. Hard gates — Phase 2-core is not complete until all are genuinely green
 
-| Gate                   | Assertion                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **HG-RLS**             | RLS `ENABLE + FORCE` + policy on every new tenant-owned table (`idempotency_key`, `translation`); `flower_app` still `NOSUPERUSER NOBYPASSRLS`; a no-GUC scoped query returns 0 rows.                                                                                                                                                                                                                                                                                |
-| **HG-SCHEMA**          | The expand migration is forward-only; the baseline assertion passes; `idempotency_key` is **non-partitioned** with a working unique `(tenant_id, scope, principal_id, key)`; `audit_log` hash-chain columns exist and are **nullable / unwritten**.                                                                                                                                                                                                                  |
-| **HG-IDEM**            | Same (principal,key)+hash → stored response, handler runs once; different hash → 409; concurrent same key → single execution; **per-principal isolation — principal B never receives principal A's stored response** (FC-2); **stale `PENDING` is recoverable — a killed-mid-flight request is safely re-executed by a retry, no dead key** (FC-2); per-tenant isolation; **no auth/secret route is idempotency-decorated and no snapshot contains a token/secret**. |
-| **HG-RUNTIME**         | `worker` + `scheduler` run as **separate processes**, boot an app context over `@flower/backend`, never duplicate a rule; a job round-trips; DLQ works; SIGTERM drains.                                                                                                                                                                                                                                                                                              |
-| **HG-BOUNDARY** (FC-3) | The reusable backend layer is extracted to `@flower/backend`; `apps/api` keeps controllers + HTTP wiring only; **`worker` / `scheduler` have zero dependency on any HTTP controller, Fastify request module or transport module** — the `eslint-plugin-boundaries` config enforces it and **fails** on violation; every Phase 1 test + probe stays green through the extraction.                                                                                     |
-| **HG-OUTBOX**          | Atomic mutation + outbox row in one txn; **at-least-once** publication; **`event_id` and `seq` assigned once and immutable** (FC-1); **crash after `XADD` before `dispatched_at`** → duplicate publish carrying the **identical `event_id` + `seq`**, downstream effect applied once, **no event lost**; poison row → dead-letter without blocking others.                                                                                                           |
-| **HG-RT-AUTHZ**        | Topics are server-derived; a client cannot subscribe to another tenant/branch topic by any manipulation; the guard pipeline re-runs on every subscribe + token refresh; probe suite extended, build-blocking.                                                                                                                                                                                                                                                        |
-| **HG-RT-FANOUT**       | With **≥ 2 gateway instances**, a client on each receives the same authorized branch event (live path = Pub/Sub, **not** a consumer group); duplicate live deliveries are suppressed by `event_id`.                                                                                                                                                                                                                                                                  |
-| **HG-RT-REVOKE**       | Session revoke closes the socket on **every** gateway instance in < 5s.                                                                                                                                                                                                                                                                                                                                                                                              |
-| **HG-RT-RESUME**       | The F8/F9 acceptance suite green: zero false resync on cross-topic interleave; no false resync on reorder; genuine retention gap → resync; within-retention reconnect replays exactly; fault injection (gateway / dispatcher / relay / Redis) → client converges to REST-authoritative state.                                                                                                                                                                        |
-| **HG-LOCALE**          | Company-level GCC country/currency/fiscal seed correct (exponents, VAT regimes, QA/KW = NONE); **fiscal config resolves from `company.country_code`, never `tenant.region`**; effective-dated rates; a multi-country-company tenant resolves per company; RLS on `translation`.                                                                                                                                                                                      |
-| **HG-NO-DOMAIN**       | No catalog/order/payment/inventory/accounting/workforce/storefront module or table exists; the **tax-calculation engine is not built**; boundary lint + review confirm.                                                                                                                                                                                                                                                                                              |
-| **HG-OFFLINE**         | No offline Class-B sale path; `pos.offline_cash_sale` inert; MVP online-authoritative.                                                                                                                                                                                                                                                                                                                                                                               |
-| **HG-PROBE**           | The Phase 1 cross-tenant probe suite stays green and is extended to every new Phase 2-core endpoint; still mutation-tested.                                                                                                                                                                                                                                                                                                                                          |
-| **HG-CI**              | GitHub CI `verify` + `security` + `e2e` + **`realtime`** green on the branch; `security-review` no open Critical/High.                                                                                                                                                                                                                                                                                                                                               |
-| **HG-AUDIT**           | All Phase 1 audit guarantees intact (append-only, RLS, registry, atomic writes); hash-chain columns present but unwritten (OD-P2-1).                                                                                                                                                                                                                                                                                                                                 |
+| Gate                   | Assertion                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **HG-RLS**             | RLS `ENABLE + FORCE` + policy on every new tenant-owned table (`idempotency_key`, `translation`); `flower_app` still `NOSUPERUSER NOBYPASSRLS`; a no-GUC scoped query returns 0 rows.                                                                                                                                                                                                                                                                                                                                          |
+| **HG-SCHEMA**          | The expand migration is forward-only; the baseline assertion passes; `idempotency_key` is **non-partitioned** with a working unique `(tenant_id, scope, principal_id, key)`; `audit_log` hash-chain columns exist and are **nullable / unwritten**.                                                                                                                                                                                                                                                                            |
+| **HG-IDEM**            | Same (principal,key)+hash → stored response, handler runs once; different hash → 409; concurrent same key → single execution; **per-principal isolation — principal B never receives principal A's stored response** (FC-2); **stale `PENDING` is recoverable — a killed-mid-flight request is safely re-executed by a retry, no dead key** (FC-2); per-tenant isolation; **no auth/secret route is idempotency-decorated and no snapshot contains a token/secret**.                                                           |
+| **HG-RUNTIME**         | `worker` + `scheduler` run as **separate processes**, boot an app context over `@flower/backend`, never duplicate a rule; a job round-trips; DLQ works; SIGTERM drains.                                                                                                                                                                                                                                                                                                                                                        |
+| **HG-BOUNDARY** (FC-3) | The reusable backend layer is extracted to `@flower/backend`; `apps/api` keeps controllers + HTTP wiring only; **`worker` / `scheduler` have zero dependency on any HTTP controller, Fastify request module or transport module** — the `eslint-plugin-boundaries` config enforces it and **fails** on violation; every Phase 1 test + probe stays green through the extraction.                                                                                                                                               |
+| **HG-OUTBOX**          | Atomic mutation + outbox row in one txn; **at-least-once** publication; **`event_id` and `seq` assigned once and immutable** (FC-1); **crash after `XADD` before `dispatched_at`** → duplicate publish carrying the **identical `event_id` + `seq`**, downstream effect applied once, **no event lost**; poison row → dead-letter without blocking others.                                                                                                                                                                     |
+| **HG-RT-AUTHZ**        | Topics are server-derived; a client cannot subscribe to another tenant/branch topic by any manipulation; the guard pipeline re-runs on every subscribe + token refresh; probe suite extended, build-blocking.                                                                                                                                                                                                                                                                                                                  |
+| **HG-RT-FANOUT**       | With **≥ 2 gateway instances**, a client on each receives the same authorized branch event (live path = Pub/Sub, **not** a consumer group); duplicate live deliveries are suppressed by `event_id`.                                                                                                                                                                                                                                                                                                                            |
+| **HG-RT-REVOKE**       | Session revoke closes the socket on **every** gateway instance in < 5s.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **HG-RT-RESUME**       | The 10-case acceptance suite green: zero false resync on cross-topic interleave (F8); no false resync on reorder (F9); **a branch-A-only client survives thousands of branch-B events with no resync, its scanned cursor advancing to ≈ the stream tail, and NO `tenantHighWaterSeq − clientLastSeq` check in any path**; genuine retention gap → resync; within-retention exact replay; FC-1 crash-republish identity; fault injection (gateway / dispatcher / relay / Redis) → client converges to REST-authoritative state. |
+| **HG-LOCALE**          | Company-level GCC country/currency/fiscal seed correct (exponents, VAT regimes, QA/KW = NONE); **fiscal config resolves from `company.country_code`, never `tenant.region`**; effective-dated rates; a multi-country-company tenant resolves per company; RLS on `translation`.                                                                                                                                                                                                                                                |
+| **HG-NO-DOMAIN**       | No catalog/order/payment/inventory/accounting/workforce/storefront module or table exists; the **tax-calculation engine is not built**; boundary lint + review confirm.                                                                                                                                                                                                                                                                                                                                                        |
+| **HG-OFFLINE**         | No offline Class-B sale path; `pos.offline_cash_sale` inert; MVP online-authoritative.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **HG-PROBE**           | The Phase 1 cross-tenant probe suite stays green and is extended to every new Phase 2-core endpoint; still mutation-tested.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **HG-CI**              | GitHub CI `verify` + `security` + `e2e` + **`realtime`** green on the branch; `security-review` no open Critical/High.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **HG-AUDIT**           | All Phase 1 audit guarantees intact (append-only, RLS, registry, atomic writes); hash-chain columns present but unwritten (OD-P2-1).                                                                                                                                                                                                                                                                                                                                                                                           |
 
 ### Open items to settle during Phase 2-core (not blocking the start)
 
-- **OI-P2-1** — `seq` allocation mechanism (per-tenant `pg` sequence vs a
-  `tenant_outbox_seq` counter row + `FOR UPDATE`) — decide in 2.4, record in
-  ADR-0017. Both satisfy FC-1 (allocate once, persist before `XADD`).
+- **OI-P2-1** — `seq` allocation mechanism (per-tenant `pg` SEQUENCE vs a
+  `tenant_outbox_seq` counter row + `FOR UPDATE`) — decide in 2.4, record the
+  chosen mechanism in ADR-0017. **It must satisfy the ADR-0017 §1 requirements**
+  (owner clarification 2026-09-04): a single active dispatcher leader per tenant
+  (advisory lock) is the only allocator; a durable monotonic source (gaps
+  harmless, reuse/reorder forbidden); the `seq`-stamp UPDATE commits **before** any
+  `XADD`; rows stamped in `(created_at, id)` order; retry identity (`event_id` +
+  `seq`) read back from the row, never recomputed; a non-leader dispatcher that
+  `SKIP LOCKED`-claims a row for a tenant it is not leader for defers it. "Prefer
+  correctness + stable retry identity over unnecessary complexity."
 - **OI-P2-2** — relay placement (`apps/realtime` process vs an `apps/worker` loop)
   — decide in 2.5.
 - **OI-P2-3** — ~~domain-module reuse mechanism~~ **RESOLVED by FC-3: extract the
@@ -680,24 +703,24 @@ Annotated tag **`phase-2-core-complete`**; push; verify the tag via the GitHub A
 
 ## 5. Phase 2-core verification matrix (task 2.8)
 
-| Area                            | Test kind                                         | Asserts                                                                                                                                                                                         | Gate         |
-| ------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| New-table RLS                   | integration                                       | `ENABLE + FORCE` + policy; no-GUC → 0 rows                                                                                                                                                      | HG-RLS       |
-| Migration                       | integration                                       | forward-only; baseline; `idempotency_key` non-partitioned + unique `(tenant,scope,principal,key)` works                                                                                         | HG-SCHEMA    |
-| Idempotency                     | integration + concurrency                         | replay / hash-mismatch / concurrent / **cross-principal isolation (FC-2)** / **stale-`PENDING` recovery (FC-2)** / tenant isolation / snapshot-scrub / auth-route exclusion                     | HG-IDEM      |
-| Backend-layer extraction (FC-3) | boundary lint + full Phase 1 re-run               | `worker`/`scheduler` have no controller/Fastify/transport dependency (lint fails on violation); every Phase 1 suite + probe green post-extraction                                               | HG-BOUNDARY  |
-| Worker + scheduler              | integration                                       | separate processes; app context over `@flower/backend`; job round-trip; DLQ; drain; no rule duplication                                                                                         | HG-RUNTIME   |
-| Outbox dispatch                 | integration (pg+redis) + fault injection          | at-least-once; **`event_id` + `seq` assigned once, immutable (FC-1)**; **crash after publish before ack** → dup publish with identical `event_id` + `seq`, single effect; ordering; dead-letter | HG-OUTBOX    |
-| Realtime authz                  | integration + probe                               | server-derived topics; cross-tenant / cross-branch subscribe denied; re-check on refresh                                                                                                        | HG-RT-AUTHZ  |
-| Realtime fanout                 | integration (**2 gateways**)                      | both instances' clients get the same authorized event; live dup suppressed                                                                                                                      | HG-RT-FANOUT |
-| Realtime revoke                 | integration (timed, 2 gateways)                   | revoke → sockets close < 5s on both                                                                                                                                                             | HG-RT-REVOKE |
-| Realtime resume                 | integration + fault injection (CI `realtime` job) | F8 zero-false-resync; F9 reorder; retention-gap → resync; within-retention replay; gateway/dispatcher/relay/Redis kill → converge                                                               | HG-RT-RESUME |
-| Localization                    | integration                                       | seed correctness; effective dating; **company-country resolution** not region; multi-country tenant; `translation` RLS                                                                          | HG-LOCALE    |
-| No-domain                       | boundary lint + review                            | no MVP-domain module/table; no tax engine                                                                                                                                                       | HG-NO-DOMAIN |
-| Offline                         | review + config                                   | no Class-B path; flag inert                                                                                                                                                                     | HG-OFFLINE   |
-| Cross-tenant probe              | e2e suite (BUILD-BLOCKING)                        | Phase 1 probes green + extended to new endpoints; mutation-tested                                                                                                                               | HG-PROBE     |
-| Security review                 | skill                                             | no open Critical/High on the core diff                                                                                                                                                          | HG-CI        |
-| CI                              | pipeline                                          | `verify` + `security` + `e2e` + `realtime` green                                                                                                                                                | HG-CI        |
+| Area                            | Test kind                                         | Asserts                                                                                                                                                                                                                            | Gate         |
+| ------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| New-table RLS                   | integration                                       | `ENABLE + FORCE` + policy; no-GUC → 0 rows                                                                                                                                                                                         | HG-RLS       |
+| Migration                       | integration                                       | forward-only; baseline; `idempotency_key` non-partitioned + unique `(tenant,scope,principal,key)` works                                                                                                                            | HG-SCHEMA    |
+| Idempotency                     | integration + concurrency                         | replay / hash-mismatch / concurrent / **cross-principal isolation (FC-2)** / **stale-`PENDING` recovery (FC-2)** / tenant isolation / snapshot-scrub / auth-route exclusion                                                        | HG-IDEM      |
+| Backend-layer extraction (FC-3) | boundary lint + full Phase 1 re-run               | `worker`/`scheduler` have no controller/Fastify/transport dependency (lint fails on violation); every Phase 1 suite + probe green post-extraction                                                                                  | HG-BOUNDARY  |
+| Worker + scheduler              | integration                                       | separate processes; app context over `@flower/backend`; job round-trip; DLQ; drain; no rule duplication                                                                                                                            | HG-RUNTIME   |
+| Outbox dispatch                 | integration (pg+redis) + fault injection          | at-least-once; **`event_id` + `seq` assigned once, immutable (FC-1)**; **crash after publish before ack** → dup publish with identical `event_id` + `seq`, single effect; ordering; dead-letter                                    | HG-OUTBOX    |
+| Realtime authz                  | integration + probe                               | server-derived topics; cross-tenant / cross-branch subscribe denied; re-check on refresh                                                                                                                                           | HG-RT-AUTHZ  |
+| Realtime fanout                 | integration (**2 gateways**)                      | both instances' clients get the same authorized event; live dup suppressed                                                                                                                                                         | HG-RT-FANOUT |
+| Realtime revoke                 | integration (timed, 2 gateways)                   | revoke → sockets close < 5s on both                                                                                                                                                                                                | HG-RT-REVOKE |
+| Realtime resume                 | integration + fault injection (CI `realtime` job) | 10-case suite: F8; F9; **unrelated-branch burst → no resync + scanned cursor advances + no high-water arithmetic**; retention-gap → resync; within-retention replay; FC-1 identity; gateway/dispatcher/relay/Redis kill → converge | HG-RT-RESUME |
+| Localization                    | integration                                       | seed correctness; effective dating; **company-country resolution** not region; multi-country tenant; `translation` RLS                                                                                                             | HG-LOCALE    |
+| No-domain                       | boundary lint + review                            | no MVP-domain module/table; no tax engine                                                                                                                                                                                          | HG-NO-DOMAIN |
+| Offline                         | review + config                                   | no Class-B path; flag inert                                                                                                                                                                                                        | HG-OFFLINE   |
+| Cross-tenant probe              | e2e suite (BUILD-BLOCKING)                        | Phase 1 probes green + extended to new endpoints; mutation-tested                                                                                                                                                                  | HG-PROBE     |
+| Security review                 | skill                                             | no open Critical/High on the core diff                                                                                                                                                                                             | HG-CI        |
+| CI                              | pipeline                                          | `verify` + `security` + `e2e` + `realtime` green                                                                                                                                                                                   | HG-CI        |
 
 ---
 

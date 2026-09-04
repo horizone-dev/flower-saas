@@ -8,13 +8,19 @@
  *
  * The F8/F9 open questions are now RESOLVED — `docs/decisions/ADR-0017.md`
  * (2026-09-04). Summary of what task 2.6 must implement here:
- *   - the resume cursor is the Redis Stream entry id, NOT `seq`;
- *   - `seq` is per-tenant-global, a logical ordering / diagnostic value only —
- *     there is NO per-topic arithmetic gap test (that was F8);
- *   - the stream position advances for EVERY consumed event, including
- *     `duplicate` / `stale` (that was F9);
- *   - resync is triggered by retention position (stored id below the stream's
- *     retained floor) + the heartbeat high-water mark, not `DEFAULT_MAX_SEQ_GAP`.
+ *   - the resume cursor is the Redis Stream entry id, NOT `seq`. Two cursors:
+ *     the SCANNED stream cursor (persisted; advances across EVERY stream entry
+ *     the gateway reads, incl. entries for topics this client is not subscribed
+ *     to) and the per-resource APPLIED mark (UI ordering only);
+ *   - `seq` is a logical ordering / diagnostic value ONLY. There is NO arithmetic
+ *     `seq`-distance resync trigger at any granularity — not per-topic, and NOT
+ *     `tenantHighWaterSeq - clientLastSeq` (tenant-global `seq` means unrelated
+ *     branch activity advances the high-water; comparing it would re-create F8);
+ *   - the scanned cursor advances for EVERY consumed event, including
+ *     `duplicate` / `stale` / not-for-me (that was F9);
+ *   - resync is triggered ONLY when the scanned cursor falls below the stream's
+ *     retained floor (`XINFO STREAM` first-id > scannedCursor). `DEFAULT_MAX_SEQ_GAP`
+ *     and any high-water arithmetic are removed.
  * The code below is unchanged in task 2.0 (docs-only); it still carries the
  * Phase-0 gap logic and MUST NOT be relied on until task 2.6.
  */
@@ -24,9 +30,10 @@ export interface RealtimeEvent {
   /**
    * per-tenant-global monotonic sequence number (ARCHITECTURE §13-14, ADR-0017).
    * Assigned ONCE by the outbox dispatcher and immutable — a crash-induced
-   * re-publish carries the identical `seq`. It is a logical ordering / diagnostic
-   * value and the heartbeat high-water source; it is NOT the resume cursor (that
-   * is the Redis Stream entry id) and NOT an arithmetic gap-test input.
+   * re-publish carries the identical `seq`. Logical ordering / diagnostics ONLY:
+   * it is NOT the resume cursor (that is the Redis Stream entry id) and it is
+   * NEVER an input to a resync decision — no per-topic delta, no
+   * `tenantHighWaterSeq - clientLastSeq` check (ADR-0017 §3, §7).
    */
   seq: number;
   tenantId: string;
@@ -42,9 +49,10 @@ export interface RealtimeEvent {
 export type ApplyDecision = 'applied' | 'duplicate' | 'stale' | 'gap-needs-resync';
 
 /**
- * Phase-0 seed value only. Per ADR-0017 this is RETIRED as the primary resync
- * trigger (task 2.6): resync is retention-based, not a per-topic `seq` delta.
- * May survive only as a defensive sanity ceiling.
+ * Phase-0 seed value only. Per ADR-0017 (§3, §7) every arithmetic `seq`-distance
+ * resync trigger is REMOVED in task 2.6 — per-topic delta and tenant-high-water
+ * delta alike. Resync is decided solely by the scanned Redis Stream cursor vs the
+ * stream's retained range. This constant does not survive task 2.6.
  */
 export const DEFAULT_MAX_SEQ_GAP = 500;
 
@@ -76,11 +84,14 @@ export class EventReducer {
 
   offer(e: RealtimeEvent): ApplyDecision {
     // TASK 2.6 (ADR-0017): rewrite this method —
-    //   * drop the per-topic `prevSeq + maxSeqGap` gap test entirely (F8);
-    //   * advance the stream position for the `stale` and `duplicate` paths too
-    //     (F9 — "seeing an event != applying its payload");
-    //   * the position marker becomes the Redis Stream entry id, tracked by the
-    //     transport layer; `versionByResource` still gates payload application.
+    //   * drop the `prevSeq + maxSeqGap` gap test entirely — there is no
+    //     arithmetic `seq`-distance resync trigger at any granularity (F8);
+    //   * the position marker is the SCANNED Redis Stream entry id, tracked by
+    //     the transport layer and advanced across EVERY scanned entry (incl.
+    //     `stale` / `duplicate` / not-for-me — F9);
+    //   * `versionByResource` still gates payload application;
+    //   * resync is decided by the transport (scanned cursor < retained floor),
+    //     never here.
     // Until then this still carries the Phase-0 logic and is not wired live.
     if (this.seenEventIds.has(e.eventId)) return 'duplicate';
 
