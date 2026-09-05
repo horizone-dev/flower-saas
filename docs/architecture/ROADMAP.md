@@ -94,6 +94,33 @@ Full breakdown: [`../phase-0/PHASE-0-PLAN.md`](../phase-0/PHASE-0-PLAN.md).
 - **Modules**: catalog, identifiers, pricing (basic), tax, orders, payments,
   **accounting** (CoA + posting engine + periods), **receivables** (AR / credit /
   advances / gift cards), crm (core), files, reporting (first rollups).
+- **ADR-0018 (additive, 2026-09-05)**: `catalog` also designs the
+  `business_type_template` reference table + tenant catalog capability
+  configuration (extends §48; Super-Admin write, Owner operate-within) and must
+  resolve the per-selling-UOM pricing gap (`variant_uom_price` or equivalent)
+  before the `pricing` module's schema is frozen — see
+  [`../decisions/ADR-0018.md`](../decisions/ADR-0018.md). No change to this
+  phase's dependency order or exit criteria; this is scope detail within the
+  already-planned `catalog`/`pricing` modules, not new modules.
+- **ADR-0019 (additive, 2026-09-05, amended twice same day)**: `receivables`/
+  `payments`/`accounting` also design, as **core Phase 3 scope, not deferred**:
+  the invoice payment-status state machine (incl. PAID vs SETTLED), customer
+  settlement with deterministic AUTO-FIFO default allocation, the
+  manual-allocation and settlement-discount toggles (incl. their approval/audit
+  paths and the AUTO+discount server recalculation), the settlement-screen UI
+  contract, the extended customer-ledger entry-kind taxonomy, and — Part B —
+  the full cancellation/refund/customer-account-credit/cancellation-charge
+  architecture: six independent lifecycle states, cancellation monetary
+  resolution (refund/account-credit/split) validated against actual money
+  received, line-level partial cancellation, a configurable cancellation-charge
+  policy engine with audited override, settled-invoice cancellation, and the
+  cancellation-screen UX contract — see
+  [`../decisions/ADR-0019.md`](../decisions/ADR-0019.md). Only the _statutory_
+  reporting depth this feeds (financial statements, VAT-return export,
+  multi-currency consolidation) stays in Phase 10, unchanged. No change to this
+  phase's dependency order or exit criteria; a credit-capable receivables system
+  cannot ship without its own cancellation/collection/settlement workflow, so
+  this is not new scope creep, only concrete detail on already-planned modules.
 - **Backend**: price + tax resolution; order state machine (walk-in) + gapless
   numbering; the atomic POS sale (order + payment allocation + **synchronous journal
   posting** + audit via outbox); the posting engine + core posting templates;
@@ -168,6 +195,15 @@ Full breakdown: [`../phase-0/PHASE-0-PLAN.md`](../phase-0/PHASE-0-PLAN.md).
   balances; purchase vs payment not double-counted. **Concurrency suite** hardened.
 - **Exit**: no oversell path exists; balances reconcile to the ledger and the GL;
   gross profit (Net Revenue − COGS) is now a supported figure.
+- **ADR-0018 (additive)**: batch/expiry tracking (already Z-11 for raw flowers)
+  generalizes to any `inventory_item.kind` — same fields, same mechanism, no new
+  schema beyond confirming it is not flower-specific.
+- **ADR-0019 Part B (additive, 2026-09-05)**: cancellation-driven inventory
+  disposition (reservation release, `CUSTOMER_RETURN` restocking) reuses this
+  phase's existing movement engine and categories unchanged — no new inventory
+  mechanism; disposition is decided from physical state, never from a
+  cancellation-charge amount — see
+  [`../decisions/ADR-0019.md`](../decisions/ADR-0019.md) §29/§30.
 
 ## Phase 6 — Recipes/BOM, custom bouquet builder, production / work orders _(florist core)_
 
@@ -186,6 +222,19 @@ Full breakdown: [`../phase-0/PHASE-0-PLAN.md`](../phase-0/PHASE-0-PLAN.md).
   posting matches consumption value.
 - **Exit**: a BOM sale and a custom bouquet both consume the right materials
   transactionally with florist attribution, correct cost, and a correct COGS posting.
+- **ADR-0018 (additive)**: this phase's `custom_bouquet` mechanism is confirmed
+  generic (a hamper, gift box, or bundle uses the identical mechanism); new schema
+  here uses the vertical-neutral name `custom_composition` /
+  `composition_component`. Custom composition/bundle gains its own §48-style
+  capability toggle alongside the existing `Production / BOM` module — see
+  [`../decisions/ADR-0018.md`](../decisions/ADR-0018.md).
+- **ADR-0019 Part B (additive, 2026-09-05)**: cancelling a BOM/custom-composition
+  order after production does not automatically un-consume raw materials — this
+  phase's `MATERIAL_CONSUMPTION`/`PRODUCTION_OUTPUT` movements stay as recorded;
+  cancellation disposition of the finished item/reusable components
+  (`RETURN_TO_STOCK` / `WASTAGE` / `SPOILAGE` / `SCRAP` / etc.) is a new
+  decision layered on this phase's existing consumption model, not a change to
+  it — see [`../decisions/ADR-0019.md`](../decisions/ADR-0019.md) §29.
 
 ## Phase 7 — Customer Web storefront, online orders queue, delivery, realtime fan-out _(second channel)_
 

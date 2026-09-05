@@ -103,6 +103,156 @@ entry) → `journal_entry` (balanced) 1─* `journal_line` (Dr/Cr + dimensions) 
 Reports (trial balance / P&L), subledger reconciliation and the Z-Report snapshot
 read the GL + cash-movement ledger; the Z snapshot is frozen at close.
 
+## Business Type templates & tenant catalog capability configuration (ADR-0018, additive)
+
+> Added 2026-09-05. Architecture/documentation only — no schema exists yet; this is
+> the conceptual model for Phase 3 to design against. See
+> [ADR-0018](../decisions/ADR-0018.md).
+
+- **BusinessTypeTemplate** (platform-global, RLS-exempt reference data, like
+  `Country`/`Currency`): `key` (Flower Shop / Perfume Shop / Bakery / Gift-Hamper
+  Shop / Chocolate Shop / Balloon-Party Shop / Plant-Nursery / General Retail /
+  Custom), suggested categories, attribute templates, variant templates, UOM
+  templates, recommended capability preset. Written only by Super Admin.
+- **Tenant** gains a nullable `business_type_key` → `BusinessTypeTemplate` — applied
+  **once** at provisioning or explicit re-application; never read at runtime to
+  branch behaviour (ADR-0018 §1).
+- **TenantCatalogCapability** (tenant-scoped, RLS-protected, Super-Admin write /
+  Owner-Admin read+operate-within — same entitlement-axis pattern as §48's feature
+  modules, not a new axis): which `fulfilment_strategy` values are enabled, which
+  default categories/attribute templates/variant templates/UOM templates are
+  active, inventory behaviour toggles (lot/batch, expiry), BOM/recipe capability,
+  custom composition/bundle capability, and independent POS-visible /
+  Customer-Web-visible flags per capability.
+- **Generalized naming going forward:** `CustomBouquet`/`CustomBouquetComponent`
+  above remain the correct, unrewritten names for the v0.4 design as documented;
+  new Phase 3/6 schema and code use **`CustomComposition`** /
+  **`CompositionComponent`** for the same `CUSTOM`-strategy mechanism, generalized
+  to bouquets, hampers, gift boxes and bundles alike.
+- **Identified schema gap, not resolved here:** `Variant` prices once (base price ±
+  per-branch price); the requirement needs price **per selling UOM tier** (a Box of
+  12 priced independently from a loose Piece of the same item, distinct from mere
+  quantity × unit price). Provisional shape for Phase 3 design:
+  `VariantUomPrice(variant_id, uom_id, sell_price, purchase_price?, branch_id?)`,
+  with the base-UOM price remaining the always-present default. `ItemIdentifier`
+  already supports a distinct barcode/QR/SKU per pack level
+  (`pack_uom`/`pack_qty`) — only price-per-UOM is the new gap, not
+  identifier-per-UOM.
+
+## Customer receivables, settlement & invoice payment-state (ADR-0019, additive)
+
+> Added 2026-09-05. Architecture/documentation only — no schema exists yet; this is
+> the conceptual model for Phase 3 to design against. See
+> [ADR-0019](../decisions/ADR-0019.md). A separate decision area from the
+> Business-Type/catalog model above (ADR-0018) — deliberately not merged.
+
+- **Customer** gains derived (never hand-edited) fields: `credit_enabled`,
+  `credit_limit`, `current_outstanding`, `available_credit` (=
+  `credit_limit − current_outstanding`), `advance_balance` — all computed from the
+  event streams below via the reconciliation invariant, never a directly-writable
+  balance column.
+- **Invoice payment status** — a third state machine on the order/invoice,
+  independent of the `Order` fulfilment state machine (above) and the `Payment`
+  state machine (`REQUIRES_ACTION → … → CAPTURED → REFUNDED`): `UNPAID → PARTIAL →
+{PAID | SETTLED} · PARTIALLY_REFUNDED → REFUNDED · CANCELLED/VOID`. UNPAID = no
+  obligation satisfied; PARTIAL = outstanding > 0 after valid allocations/
+  adjustments; **PAID** = outstanding = 0, satisfied entirely by actual monetary
+  value (payment allocation and/or eligible advance applied), zero non-payment
+  adjustment involved; **SETTLED** = outstanding = 0, with at least part
+  extinguished by an approved settlement discount/write-down. Always computed from
+  the ledger entries below, never set directly; every invoice view exposes total /
+  actual paid / settlement discount / outstanding / status as separate fields.
+- **Payment** (a receipt of actual money) 1─* **PaymentAllocation** (applying some
+  or all of that receipt to one specific invoice). A `Payment` increases an
+  unapplied/available customer amount; a `PaymentAllocation` reduces one invoice's
+  outstanding and consumes that amount from the pool — the two are never summed as
+  independent reductions. Full immediate allocation may be written atomically in
+  one transaction, but remains two separately-reconcilable rows.
+- **Settlement** — a grouping/workflow **header only** (id, customer, initiated-by,
+  timestamp, toggle states in effect, references to the `Payment`/
+  `PaymentAllocation`/`SettlementDiscount`/`AdvanceApplied` rows it orchestrated).
+  Carries **no value field that participates in balance arithmetic** — the
+  component entries carry all monetary effect; summing them equals exactly what
+  moved. Default allocation: AUTO FIFO, ordered deterministically by each
+  invoice's authoritative posting/issue sequence (never DB row-return order), with
+  an id-based tie-breaker. Two independent, default-OFF flags: manual payment
+  allocation (server-validated per ADR-0019 §4) and settlement discount
+  (per-invoice, requires reason/applied-by/approval/approved-by/timestamp/audit,
+  never mutates the invoice total). When AUTO allocation + discount are both
+  active, the server recalculates the FIFO allocation against each invoice's
+  post-discount remaining outstanding and surfaces it for confirmation before the
+  client can finalize — the client never computes this itself.
+- **Unallocated payment** (received beyond what was allocated) stays explicit and
+  unapplied; it becomes a `Advance` only through the approved advance flow, with a
+  preserved reference back to the originating `Payment`. `AdvanceApplied` counts
+  as actual monetary value for the PAID determination.
+- **Customer subledger** (`ar_transaction` / `advance_transaction`, already named
+  above) gains an explicit entry-kind taxonomy: `INVOICE · PAYMENT ·
+PAYMENT_ALLOCATION · SETTLEMENT_DISCOUNT · CREDIT_NOTE · ADVANCE ·
+ADVANCE_APPLIED · REFUND · WRITE_OFF · ADJUSTMENT · REVERSAL` — `SETTLEMENT` is
+  deliberately not an entry kind (it is the header concept above, per ADR-0019
+  §9). Append-only; `current_outstanding`/`advance_balance` are projections over
+  this stream, exactly like `branch_inventory_balance` is a projection over
+  `inventory_movement`. Corrections are `REVERSAL` + a new corrected entry, never
+  an edit.
+- **Reconciliation invariant**: `outstanding = original obligation − Σ payment
+allocations − Σ advance applied − Σ settlement discounts − Σ credit
+notes/write-downs + Σ reversals/valid adjustments` — always provable from the
+  event stream, never a manually edited balance.
+- **Discount types stay separate**: line-item sale discount / invoice-order
+  discount / promotion-coupon (existing, sale-time, contra-revenue) vs. settlement
+  discount (new — post-sale, against an existing receivable, its own account and
+  approval path).
+
+## Cancellation, refund & customer account credit (ADR-0019 Part B, additive)
+
+> Added 2026-09-05. Architecture/documentation only. See
+> [ADR-0019 Part B](../decisions/ADR-0019.md) (§17–§37).
+
+- **Six independent lifecycle fields**, never collapsed: Order status
+  (existing, unchanged — its own `REFUNDED`/`PAYMENT_FAILED` values are a
+  permitted coarse projection only, never the refund source of truth), Invoice
+  payment status (above), Payment status (existing), a **derived** Receivable
+  status (`CLEAR` / `OUTSTANDING` / `ADVANCE_HELD` / `MIXED`, computed from the
+  reconciliation invariant, not stored), a new Refund status
+  (`NONE → PENDING → {COMPLETED | PARTIAL | FAILED} · REVERSED`), and a new
+  per-line Inventory-disposition status (`PENDING_DISPOSITION → …`).
+- **Cancellation** references specific order line(s) (supports partial/
+  line-level cancellation) and drives a monetary-resolution computation over
+  only the actually-received value on the cancelled portion — never the
+  nominal total.
+- **Refund** / **AccountCredit resolution**: a cancellation's eligible
+  refundable/creditable amount may be split across one or more `Refund`
+  entries (money leaving the business) and/or an `Advance` entry (§ above —
+  Account Credit is the same `Advance` mechanism, distinguished only by a
+  `source_kind` reference to the cancellation, never a second balance-bearing
+  concept). Validated so the sum of every component never exceeds the
+  eligible amount.
+- **CancellationCharge** 0..1─1 **CancellationChargeReversal** — a first-class
+  entry kind, separate from every discount type, with a stored policy
+  version + calculation base so the charge is reproducible from stored data
+  alone; may itself become a standalone fee-document/receivable when it
+  exceeds the amount actually paid (never a mutation of the original
+  invoice). Overridable (audited: original calculated value, policy used,
+  final value, reason, applied-by, approved-by, timestamp).
+- **Settled-invoice cancellation** reverses both the original receivable and
+  the `SettlementDiscount` effect (via a `Reversal` entry against it) —
+  the refundable base is the actual payment, never the waived discount.
+- **Inventory disposition on cancellation** is decided from physical state,
+  never derived from the cancellation charge: reservation release,
+  `CUSTOMER_RETURN` restocking, or (for already-produced BOM/custom items)
+  `RETURN_TO_STOCK` / `FINISHED_GOOD_STOCK_IN` / `REUSABLE_COMPONENT_RETURN` /
+  `WASTAGE` / `SPOILAGE` / `SCRAP` — through the single existing inventory
+  movement engine, unchanged.
+- **Extended subledger taxonomy**: adds `CANCELLATION_CHARGE` /
+  `CANCELLATION_CHARGE_REVERSAL` to the entry-kind list above; `SETTLEMENT`
+  remains excluded (still a header concept, §9).
+- **Reconciliation invariant, extended**: `outstanding / refundable / advance
+state` is provable by additionally subtracting valid cancellation reversals
+  and applying cancellation charges, refunds, and account-credit
+  creation/application, signed per their direction — still never a manually
+  edited balance.
+
 ## Partitioning (from migration #1)
 
 `order`, `order_line`, `payment_event`, `inventory_movement`, `stock_reservation`,
