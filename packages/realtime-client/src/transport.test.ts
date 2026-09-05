@@ -142,6 +142,58 @@ describe('RealtimeClient', () => {
     await client.stop();
   });
 
+  it('a heartbeat never invokes onEvent or touches reducer state, even if it carried a spoofed event field', async () => {
+    const { client, events, cursorStore } = build();
+    client.start();
+    await flush();
+    const ws = sockets[0]!;
+
+    // a real server heartbeat is exactly {type, cursor} — no `event` field
+    // exists to read. This spoofed shape proves the client-side switch
+    // statement itself never reads `msg.event` for the heartbeat case,
+    // regardless of what a frame might (maliciously or by a server bug)
+    // contain — the safety property holds by construction on the client
+    // side too, not only because the server never sends it.
+    ws.emitMessage({
+      type: 'heartbeat',
+      cursor: '300-0',
+      event: envelope({ event_id: 'spoofed-should-be-ignored', resource_version: '999' }),
+    });
+    await flush();
+
+    // 1. no onEvent call at all
+    expect(events).toHaveLength(0);
+    // 2. only the cursor was persisted
+    expect(await cursorStore.get()).toBe('300-0');
+
+    // 3. reducer state was NOT touched by the spoofed embedded event: a
+    //    genuine LATER event for the same resource, but with a LOWER
+    //    resource_version than the spoofed one, is still "applied" — if the
+    //    heartbeat had fed 'spoofed-should-be-ignored' / version 999 into the
+    //    reducer, this version-1 event would be rejected as stale instead.
+    ws.emitMessage({
+      type: 'event',
+      cursor: '301-0',
+      event: envelope({ event_id: 'real-event-1', resource_version: '1' }),
+    });
+    await flush();
+    expect(events).toHaveLength(1);
+
+    // 4. and the spoofed event_id was never marked "seen" either: a REAL
+    //    event later reusing that same event_id is applied, not deduped —
+    //    proving the heartbeat's embedded event_id never reached
+    //    `seenEventIds`.
+    ws.emitMessage({
+      type: 'event',
+      cursor: '302-0',
+      event: envelope({ event_id: 'spoofed-should-be-ignored', resource_version: '2' }),
+    });
+    await flush();
+    expect(events).toHaveLength(2);
+
+    await client.stop();
+  });
+
   it('resync-required resets the reducer, runs the REST bootstrap, then persists the given tail', async () => {
     const { client, events, resyncs, cursorStore } = build();
     client.start();

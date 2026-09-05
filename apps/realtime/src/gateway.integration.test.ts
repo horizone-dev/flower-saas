@@ -274,6 +274,18 @@ describe('realtime gateway (integration — Redis, 2 real instances)', () => {
     pub.disconnect();
   }
 
+  /** Poll a condition until true or a timeout — used where the message we're
+   *  waiting for is deliberately NOT captured via `Client.waitFor` (that
+   *  helper stores every message; the heartbeat-leakage test below needs the
+   *  exact raw bytes of one specific frame, captured by its own listener). */
+  async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('waitUntil timed out');
+      await sleep(20);
+    }
+  }
+
   // ── 1. two gateway instances, both authorized, both receive the event ──
   it('two gateway instances both receive an authorized same-branch event', async () => {
     const tenantId = randomUUID();
@@ -339,6 +351,76 @@ describe('realtime gateway (integration — Redis, 2 real instances)', () => {
     await publishLive(tenantId, envX);
     const received = await client.waitFor((m) => m['type'] === 'event');
     expect(eventOf(received)).toMatchObject({ branch_id: branchX });
+  });
+
+  // ── 3b. a filtered event's heartbeat carries ONLY the cursor — no leakage ─
+  it('a branch-Y event filtered for a branch-X-only session surfaces ONLY a {type, cursor} heartbeat — no business field leaks', async () => {
+    const tenantId = randomUUID();
+    const companyId = randomUUID();
+    const branchX = randomUUID();
+    const branchY = randomUUID();
+    const s = session({ tenantId, access: { ...session().access!, branchScope: [branchX] } });
+    const token = await login(s);
+
+    const gw = await bootGateway();
+    const client = await connect(gw.port, token);
+
+    // deliberately rich — every field the user's verification names, plus a
+    // free-text payload, all with distinctive, greppable values — so a leak
+    // of ANY of them, anywhere in the raw wire bytes, is unmissable.
+    const secretEventId = `leak-check-event-id-${randomUUID()}`;
+    const envY = envelope({
+      event_id: secretEventId,
+      tenant_id: tenantId,
+      company_id: companyId,
+      branch_id: branchY,
+      type: 'leak-check-domain-type',
+      resource_type: 'leak-check-resource-type',
+      resource_id: `leak-check-resource-id-${randomUUID()}`,
+      resource_version: 'leak-check-resource-version-marker',
+      payload: { secret: 'leak-check-payload-should-never-be-sent' },
+      actor_summary: { name: 'leak-check-actor' },
+    });
+
+    let raw: string | null = null;
+    client.ws.addEventListener('message', function capture(event) {
+      const parsed = JSON.parse(String(event.data)) as Record<string, unknown>;
+      if (parsed['type'] === 'heartbeat') {
+        raw = String(event.data);
+        client.ws.removeEventListener('message', capture);
+      }
+    });
+
+    await publishLive(tenantId, envY);
+    await waitUntil(() => raw !== null, 5000);
+
+    // 1. the client's normal event callback path never saw this event at all
+    expect(client.messages.some((m) => m['type'] === 'event')).toBe(false);
+
+    // 2. the heartbeat frame's parsed shape is EXACTLY {type, cursor} —
+    //    structurally incapable of carrying anything else (proves the server
+    //    build path, not just this one payload).
+    const parsed = JSON.parse(raw as unknown as string) as Record<string, unknown>;
+    expect(Object.keys(parsed).sort()).toEqual(['cursor', 'type']);
+    expect(parsed['type']).toBe('heartbeat');
+    expect(typeof parsed['cursor']).toBe('string');
+
+    // 3. belt-and-suspenders: none of the filtered event's business values
+    //    appear ANYWHERE in the raw bytes actually sent over the wire.
+    const wire = raw as unknown as string;
+    for (const secret of [
+      secretEventId,
+      companyId,
+      branchY,
+      'leak-check-domain-type',
+      'leak-check-resource-type',
+      envY['resource_id'] as string,
+      'leak-check-payload-should-never-be-sent',
+      'leak-check-actor',
+      'leak-check-resource-version-marker',
+    ]) {
+      expect(wire.includes(secret)).toBe(false);
+    }
   });
 
   // ── 4. a client cannot expand its own scope by any message ─────────────
