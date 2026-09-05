@@ -118,6 +118,7 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
         slug: 'acme-corp',
         name: 'Acme Corp',
         region: 'AE',
+        companyCountryCode: 'AE',
         planVersionId: PLAN_V,
         ownerEmail: 'boss@acme.test',
       },
@@ -169,6 +170,50 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
       ]);
       expect(outbox[0].eventType).toBe('tenant.provisioned');
       expect(outbox[0].dispatchedAt).toBeNull(); // no dispatcher in Phase 1
+
+      // task 2.7: country_code / default_currency / fiscal_config are set
+      // atomically, from the SAME authoritative country reference row, never
+      // derived from tenant.region (correction 4) and never left mismatched.
+      const company = (
+        await q(
+          `SELECT "countryCode", "defaultCurrency", "fiscalConfig" FROM company WHERE "tenantId"=$1`,
+          [tenantId],
+        )
+      )[0];
+      expect(company.countryCode).toBe('AE');
+      expect(company.defaultCurrency).toBe('AED');
+      expect(company.fiscalConfig).toEqual({});
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('an unknown company country code is rejected and creates nothing (task 2.7 — atomic, no partial tenant)', async () => {
+    const token = await platformToken();
+    const res = await post(
+      '/platform/tenants',
+      {
+        slug: 'unknown-country-co',
+        name: 'Unknown Country Co',
+        region: 'AE',
+        companyCountryCode: 'ZZ', // not seeded
+        planVersionId: PLAN_V,
+        ownerEmail: 'boss@unknown-country.test',
+      },
+      token,
+      { 'idempotency-key': 'prov-unknown-country' },
+    );
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe('UNKNOWN_COUNTRY');
+
+    const c = new pg.Client({ connectionString: stack.postgres.url });
+    await c.connect();
+    try {
+      const rows = (await c.query(`SELECT id FROM tenant WHERE slug=$1`, ['unknown-country-co']))
+        .rows;
+      // the whole provisioning transaction rolled back — no tenant, no
+      // orphaned roles/company/branch either (same transaction, same rollback).
+      expect(rows).toHaveLength(0);
     } finally {
       await c.end();
     }
@@ -182,6 +227,7 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
         slug: 'acme-corp',
         name: 'Acme Corp',
         region: 'AE',
+        companyCountryCode: 'AE',
         planVersionId: PLAN_V,
         ownerEmail: 'boss@acme.test',
       },
@@ -316,6 +362,8 @@ async function seed(url: string): Promise<void> {
              ('${PLAN_V}', 'max_users', 10);
       INSERT INTO platform_user (id, email, name, "updatedAt")
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
+      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
+      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
     `);
   } finally {
     await c.end();

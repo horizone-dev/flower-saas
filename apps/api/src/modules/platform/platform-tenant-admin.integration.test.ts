@@ -54,6 +54,7 @@ describe('platform: tenant administration surface for Super Admin Web (integrati
         slug: 'padmin',
         name: 'PAdmin FZE',
         region: 'AE',
+        companyCountryCode: 'AE',
         planVersionId: PLAN_V,
         ownerEmail: 'owner@padmin.test',
       },
@@ -279,6 +280,8 @@ async function seed(url: string): Promise<void> {
       VALUES ('${PLAN_V}', 'max_branches', 5), ('${PLAN_V}', 'max_sessions_per_user', 20);
       INSERT INTO platform_user (id, email, name, "updatedAt")
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
+      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
+      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
     `);
   } finally {
     await c.end();

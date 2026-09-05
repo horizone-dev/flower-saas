@@ -45,6 +45,7 @@
   },
   "devDependencies": {
     "@flower/config": "workspace:*",
+    "@flower/money": "workspace:*",
     "@flower/permissions": "workspace:*",
     "@flower/shared-types": "workspace:*",
     "@testcontainers/postgresql": "12.1.0",

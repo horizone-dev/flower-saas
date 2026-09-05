@@ -10,6 +10,14 @@ export interface ProvisionTenantCommand {
   slug: string;
   name: string;
   region: string;
+  /** The company's legal-entity country — THE fiscal source (currency / VAT),
+   *  resolved atomically from the `country` reference table inside the same
+   *  provisioning transaction (task 2.7, architecture correction 4).
+   *  Deliberately **not** derived from `region` — the two are independent
+   *  concepts (hosting/infra region vs. legal/fiscal jurisdiction) and must
+   *  never be silently conflated, even though today's only supported region
+   *  happens to share a code with its country. */
+  companyCountryCode: string;
   planVersionId: string;
   ownerEmail: string;
   companyLegalNameEn?: string | undefined;
@@ -65,6 +73,7 @@ export class ProvisioningService {
       slug: cmd.slug,
       name: cmd.name,
       region: cmd.region,
+      companyCountryCode: cmd.companyCountryCode,
       planVersionId: cmd.planVersionId,
       companyLegalNameEn: cmd.companyLegalNameEn ?? cmd.name,
       branchName: cmd.branchName ?? 'Main Branch',

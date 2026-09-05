@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { runScoped, type ScopedTx } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
 import { requireTenantContext } from '../../common/context/index.js';
-import { NotFoundError } from '../../common/errors/domain-error.js';
+import { NotFoundError, DomainError } from '../../common/errors/domain-error.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 
 /** RLS scopes reads to the tenant, but a foreign-key still resolves across
@@ -51,8 +51,26 @@ export class OrgRepository {
     crNumber?: string | null | undefined;
     trn?: string | null | undefined;
     registeredAddress?: string | null | undefined;
+    /** ISO 3166-1 alpha-2 — the fiscal source of truth (correction 4).
+     *  `defaultCurrency`/`fiscalConfig` are resolved atomically from this in
+     *  the SAME transaction, never accepted as independent client-supplied
+     *  fields (task 2.7 — closes the "second company left with a null/
+     *  inconsistent profile" gap; a tenant with companies in different GCC
+     *  countries resolves each independently, per its own resolved row). */
+    countryCode: string;
   }): Promise<{ id: string }> {
     return this.run(async (tx) => {
+      const country = await tx.country.findUnique({
+        where: { code: input.countryCode },
+        select: { code: true, defaultCurrencyCode: true, active: true },
+      });
+      if (!country || !country.active) {
+        throw new DomainError(
+          'UNKNOWN_COUNTRY',
+          `"${input.countryCode}" is not a known, active country`,
+          422,
+        );
+      }
       const c = await tx.company.create({
         data: {
           tenantId: requireTenantContext().tenantId,
@@ -61,6 +79,9 @@ export class OrgRepository {
           crNumber: input.crNumber ?? null,
           trn: input.trn ?? null,
           registeredAddress: input.registeredAddress ?? null,
+          countryCode: country.code,
+          defaultCurrency: country.defaultCurrencyCode,
+          fiscalConfig: {},
         },
         select: { id: true },
       });

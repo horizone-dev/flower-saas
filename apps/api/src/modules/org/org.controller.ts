@@ -12,6 +12,9 @@ const companySchema = z.object({
   crNumber: z.string().max(60).optional(),
   trn: z.string().max(60).optional(),
   registeredAddress: z.string().max(500).optional(),
+  // The fiscal source of truth (correction 4) — required so no company is ever
+  // created without a resolvable currency/tax profile (task 2.7).
+  countryCode: z.string().length(2),
 });
 const branchSchema = z.object({
   companyId: z.string().uuid(),

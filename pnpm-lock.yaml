@@ -681,6 +681,9 @@ importers:
       '@flower/config':
         specifier: workspace:*
         version: link:../config
+      '@flower/money':
+        specifier: workspace:*
+        version: link:../money
       '@flower/permissions':
         specifier: workspace:*
         version: link:../permissions

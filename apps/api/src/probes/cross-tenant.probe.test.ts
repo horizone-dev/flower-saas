@@ -233,6 +233,7 @@ describe('cross-tenant isolation probe suite', () => {
       slug,
       name: slug,
       region: 'AE',
+      companyCountryCode: 'AE',
       planVersionId: PLAN_V,
       ownerEmail,
     });
@@ -326,6 +327,30 @@ describe('cross-tenant isolation probe suite', () => {
           };
         },
       },
+      // ── task 2.7: localization routes (Task 2.8 formally extends the probe
+      // suite to every new endpoint, but these two isolation properties are
+      // required verification for task 2.7 itself, so they are proven here
+      // now rather than left unproved until 2.8). ──────────────────────────
+      {
+        name: "GET localization company profile for A's company as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus('GET', `/v1/localization/companies/${A.companyId}`, ownerBTok),
+      },
+      {
+        name: 'global reference-data read carries no tenant/company identifier of either tenant',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send('GET', '/v1/localization/reference', ownerBTok);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode,
+            leaked: [A.tenantId, A.companyId, B.tenantId, B.companyId].some((id) =>
+              blob.includes(id),
+            ),
+          };
+        },
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
   });
@@ -334,6 +359,7 @@ describe('cross-tenant isolation probe suite', () => {
   it('RLS injection: a tenantId in the request body is ignored', async () => {
     const res = await send('POST', '/v1/org/companies', ownerBTok, {
       legalNameEn: 'injected',
+      countryCode: 'AE',
       tenantId: A.tenantId,
     });
     expect(res.statusCode).toBe(201);
@@ -514,6 +540,7 @@ describe('cross-tenant isolation probe suite', () => {
     const PROBED_PREFIXES = [
       '/v1/org',
       '/v1/access',
+      '/v1/localization',
       '/v1/platform/tenants/:tenantId',
       '/v1/platform/tenants/:id',
     ];
@@ -559,6 +586,10 @@ async function seed(url: string): Promise<void> {
       VALUES ('users:view','TENANT','admin','v',1),('users:manage','TENANT','admin','v',1),
              ('roles:manage','TENANT','admin','v',1),('audit:view','TENANT','admin','v',1),
              ('settings:branch:manage','TENANT','admin','v',1),('settings:tenant:manage','TENANT','admin','v',1);
+      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
+      VALUES ('AED', 2, 'AED', 'UAE Dirham', 'درهم إماراتي');
+      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
+      VALUES ('AE', 'United Arab Emirates', 'الإمارات العربية المتحدة', 'gcc', 'AED', 'SAT_SUN', true, now());
     `);
   } finally {
     await c.end();

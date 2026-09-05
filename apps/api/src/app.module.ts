@@ -10,12 +10,13 @@ import { PlatformModule } from './modules/platform/platform.module.js';
 import { IdentityModule } from './modules/identity/identity.module.js';
 import { OrgModule } from './modules/org/org.module.js';
 import { SecretsModule } from './modules/secrets/secrets.module.js';
+import { LocalizationModule } from './modules/localization/localization.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
  * Root module. Domain modules are registered here per phase (`src/modules/*`).
  * Phase 1: config + DB + Redis + the request enforcement pipeline + access +
- * identity (auth) + health.
+ * identity (auth) + health. Phase 2-core task 2.7 adds `localization`.
  */
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { HealthModule } from './health/health.module.js';
     IdentityModule,
     OrgModule,
     SecretsModule,
+    LocalizationModule,
     HealthModule,
   ],
 })

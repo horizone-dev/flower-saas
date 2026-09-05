@@ -69,6 +69,7 @@ describe('access: role / grant / scope admin (integration)', () => {
         slug: 'acctest',
         name: 'AccTest FZE',
         region: 'AE',
+        companyCountryCode: 'AE',
         planVersionId: PLAN_V,
         ownerEmail: 'owner@acctest.test',
       },
@@ -386,6 +387,8 @@ async function seed(url: string): Promise<void> {
              ('${PLAN_V}', 'max_sessions_per_user', 20);
       INSERT INTO platform_user (id, email, name, "updatedAt")
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
+      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
+      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
       INSERT INTO permission_registry (key, realm, "groupKey", description, "addedInPhase")
       VALUES ('users:view','TENANT','admin','users view',1),
              ('users:manage','TENANT','admin','users manage',1),

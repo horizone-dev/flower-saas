@@ -21,6 +21,11 @@ const provisionSchema = z.object({
   slug: z.string().min(2).max(63),
   name: z.string().min(1).max(200),
   region: z.string().length(2),
+  // The company's legal-entity country (ISO 3166-1 alpha-2) — the fiscal
+  // source of truth (architecture correction 4). Deliberately a separate
+  // field from `region`: never derived from it, even though the values may
+  // coincide today (task 2.7).
+  companyCountryCode: z.string().length(2),
   planVersionId: z.string().uuid(),
   ownerEmail: z.string().email(),
   companyLegalNameEn: z.string().min(1).optional(),

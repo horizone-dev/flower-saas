@@ -3,12 +3,14 @@ import { Injectable } from '@nestjs/common';
 import { runPlatform, type PrismaClient } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
 import { OutboxWriter } from '../../common/audit/outbox.writer.js';
+import { DomainError } from '../../common/errors/domain-error.js';
 import { SYSTEM_ROLE_TEMPLATES } from './system-roles.js';
 
 export interface ProvisionInput {
   slug: string;
   name: string;
   region: string;
+  companyCountryCode: string;
   planVersionId: string;
   companyLegalNameEn: string;
   branchName: string;
@@ -103,11 +105,35 @@ export class ProvisioningRepository {
           select: { id: true },
         });
 
+        // Resolve country -> default currency inside THIS transaction, from
+        // the same authoritative reference row the company will be stamped
+        // with — never two separate reads that could observe different
+        // reference data (task 2.7, owner rule 6: "provisioning must set
+        // country_code + default currency + stable fiscal defaults atomically
+        // from the same authoritative country reference"). `fiscalConfig`
+        // starts as an empty, non-secret profile stub — task 2.7 builds no
+        // e-invoicing adapter (Z-8 gate, untouched); real profile fields land
+        // when a provider is actually onboarded.
+        const country = await tx.country.findUnique({
+          where: { code: input.companyCountryCode },
+          select: { code: true, defaultCurrencyCode: true, active: true },
+        });
+        if (!country || !country.active) {
+          throw new DomainError(
+            'UNKNOWN_COUNTRY',
+            `"${input.companyCountryCode}" is not a known, active country`,
+            422,
+          );
+        }
+
         await tx.company.create({
           data: {
             id: companyId,
             tenantId,
             legalNameEn: input.companyLegalNameEn,
+            countryCode: country.code,
+            defaultCurrency: country.defaultCurrencyCode,
+            fiscalConfig: {},
             status: 'ACTIVE',
           },
         });

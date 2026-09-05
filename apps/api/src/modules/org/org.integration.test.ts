@@ -67,6 +67,7 @@ describe('org: companies / branches / POS terminals (integration)', () => {
         slug: 'orgtest',
         name: 'OrgTest FZE',
         region: 'AE',
+        companyCountryCode: 'AE',
         planVersionId: PLAN_V,
         ownerEmail: 'owner@orgtest.test',
       },
@@ -196,7 +197,11 @@ describe('org: companies / branches / POS terminals (integration)', () => {
   });
 
   it('the Owner adds a 2nd company (provisioning created the 1st)', async () => {
-    const res = await post('/org/companies', { legalNameEn: 'OrgTest Trading LLC' }, ownerToken);
+    const res = await post(
+      '/org/companies',
+      { legalNameEn: 'OrgTest Trading LLC', countryCode: 'AE' },
+      ownerToken,
+    );
     expect(res.statusCode).toBe(201);
     expect((await get('/org/companies', ownerToken)).json()).toHaveLength(2);
   });
@@ -341,6 +346,8 @@ async function seed(url: string): Promise<void> {
              ('${PLAN_V}', 'max_users', 20);
       INSERT INTO platform_user (id, email, name, "updatedAt")
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
+      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
+      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
     `);
   } finally {
     await c.end();
