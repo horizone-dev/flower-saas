@@ -23,6 +23,9 @@
     "test": "vitest run",
     "clean": "rimraf dist node_modules .turbo"
   },
+  "dependencies": {
+    "zod": "4.5.4"
+  },
   "devDependencies": {
     "@flower/config": "workspace:*",
     "eslint": "10.9.1",

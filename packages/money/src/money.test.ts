@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { Money, sumMoney } from './money.js';
+import { Money, sumMoney, MoneyOverflowError, MONEY_MAX_MINOR, MONEY_MIN_MINOR } from './money.js';
+import { moneyDtoSchema, parseMoney } from './schema.js';
 import { divRound } from './rounding.js';
 
 describe('divRound', () => {
@@ -160,5 +161,155 @@ describe('Money — comparison', () => {
     expect(b.compare(a)).toBe(1);
     expect(a.compare(Money.ofMajor('1.00', 'AED'))).toBe(0);
     expect(a.equals(Money.ofMinor(100n, 'AED'))).toBe(true);
+  });
+});
+
+describe('Money — storable BIGINT range', () => {
+  it('accepts the exact BIGINT bounds', () => {
+    expect(Money.ofMinor(MONEY_MAX_MINOR, 'AED').amountMinor).toBe(MONEY_MAX_MINOR);
+    expect(Money.ofMinor(MONEY_MIN_MINOR, 'AED').amountMinor).toBe(MONEY_MIN_MINOR);
+  });
+  it('rejects a value past the bounds (construction and arithmetic overflow)', () => {
+    expect(() => Money.ofMinor(MONEY_MAX_MINOR + 1n, 'AED')).toThrow(MoneyOverflowError);
+    expect(() => Money.ofMinor(MONEY_MIN_MINOR - 1n, 'AED')).toThrow(MoneyOverflowError);
+    expect(() => Money.ofMinor(MONEY_MAX_MINOR, 'AED').add(Money.ofMinor(1n, 'AED'))).toThrow(
+      MoneyOverflowError,
+    );
+    expect(() => Money.ofMajor('92233720368547758.08', 'AED')).toThrow(MoneyOverflowError);
+  });
+  it('a huge but in-range minor-unit string is fine (string path, no precision loss)', () => {
+    const big = '9007199254740993'; // 2^53 + 1 — unrepresentable as a JS number
+    expect(Money.ofMinor(big, 'AED').amountMinor).toBe(9007199254740993n);
+  });
+  it('a number factor that has already lost precision is rejected', () => {
+    expect(() => Money.ofMinor(1n, 'AED').mulInt(2 ** 53 + 1)).toThrow(/safe integer/);
+  });
+});
+
+describe('Money — abs / min / max / isPositive', () => {
+  it('abs / isPositive', () => {
+    expect(Money.ofMajor('-3.50', 'AED').abs().toString()).toBe('3.50 AED');
+    expect(Money.ofMajor('3.50', 'AED').abs().toString()).toBe('3.50 AED');
+    expect(Money.ofMajor('3.50', 'AED').isPositive).toBe(true);
+    expect(Money.zero('AED').isPositive).toBe(false);
+    expect(Money.ofMajor('-1.00', 'AED').isPositive).toBe(false);
+  });
+  it('min / max return one of the operands and enforce currency', () => {
+    const a = Money.ofMajor('5.00', 'AED');
+    const b = Money.ofMajor('9.00', 'AED');
+    expect(a.min(b)).toBe(a);
+    expect(a.max(b)).toBe(b);
+    expect(() => a.min(Money.ofMajor('1.000', 'KWD'))).toThrow(/Currency mismatch/);
+  });
+});
+
+describe('Money — divmod (pure integer division, no costing behaviour)', () => {
+  it('quotient × divisor + remainder === the amount', () => {
+    const { quotient, remainder } = Money.ofMinor(1000n, 'AED').divmod(12);
+    expect(quotient.amountMinor).toBe(83n);
+    expect(remainder.amountMinor).toBe(4n);
+    expect(quotient.mulInt(12).add(remainder).amountMinor).toBe(1000n);
+  });
+  it('negative amount: remainder carries the sign of the dividend', () => {
+    const { quotient, remainder } = Money.ofMinor(-7n, 'AED').divmod(2);
+    expect([quotient.amountMinor, remainder.amountMinor]).toEqual([-3n, -1n]);
+    expect(quotient.mulInt(2).add(remainder).amountMinor).toBe(-7n);
+  });
+  it('rejects a non-positive divisor', () => {
+    expect(() => Money.ofMinor(10n, 'AED').divmod(0)).toThrow(/positive integer/);
+    expect(() => Money.ofMinor(10n, 'AED').divmod(-2)).toThrow(/positive integer/);
+  });
+});
+
+describe('Money — capAllocate (pure FIFO primitive)', () => {
+  it('ADR-0019 worked example: 650 across [300, 200, 500] -> [300, 200, 150], remainder 0', () => {
+    const { allocations, remainder } = Money.ofMinor(650n, 'AED').capAllocate([
+      Money.ofMinor(300n, 'AED'),
+      Money.ofMinor(200n, 'AED'),
+      Money.ofMinor(500n, 'AED'),
+    ]);
+    expect(allocations.map((m) => m.amountMinor)).toEqual([300n, 200n, 150n]);
+    expect(remainder.amountMinor).toBe(0n);
+  });
+  it('an over-payment leaves an explicit non-zero remainder (never silently absorbed)', () => {
+    const { allocations, remainder } = Money.ofMinor(1200n, 'AED').capAllocate([
+      Money.ofMinor(300n, 'AED'),
+      Money.ofMinor(200n, 'AED'),
+      Money.ofMinor(500n, 'AED'),
+    ]);
+    expect(allocations.map((m) => m.amountMinor)).toEqual([300n, 200n, 500n]);
+    expect(remainder.amountMinor).toBe(200n);
+  });
+  it('invariant: sum(allocations) + remainder === the amount, and each <= its cap', () => {
+    const amount = Money.ofMinor(1234n, 'AED');
+    const caps = [500n, 0n, 800n, 100n].map((v) => Money.ofMinor(v, 'AED'));
+    const { allocations, remainder } = amount.capAllocate(caps);
+    allocations.forEach((a, i) => expect(a.amountMinor).toBeLessThanOrEqual(caps[i]!.amountMinor));
+    expect(sumMoney([...allocations, remainder], 'AED').amountMinor).toBe(1234n);
+  });
+  it('empty caps -> the whole amount is the remainder', () => {
+    const { allocations, remainder } = Money.ofMinor(500n, 'AED').capAllocate([]);
+    expect(allocations).toEqual([]);
+    expect(remainder.amountMinor).toBe(500n);
+  });
+  it('rejects a negative amount, a negative cap, or a currency mismatch', () => {
+    expect(() => Money.ofMinor(-1n, 'AED').capAllocate([])).toThrow(/non-negative/);
+    expect(() => Money.ofMinor(10n, 'AED').capAllocate([Money.ofMinor(-1n, 'AED')])).toThrow(
+      /non-negative/,
+    );
+    expect(() => Money.ofMinor(10n, 'AED').capAllocate([Money.ofMinor(1n, 'KWD')])).toThrow(
+      /Currency mismatch/,
+    );
+  });
+});
+
+describe('Money — allocate: zero-weight behaviour', () => {
+  it('a zero weight always yields a zero part; the residual lands elsewhere', () => {
+    const parts = Money.ofMajor('10.01', 'AED')
+      .allocate([1, 0, 1])
+      .map((p) => p.toString());
+    expect(parts).toEqual(['5.01 AED', '0.00 AED', '5.00 AED']);
+  });
+  it('a single non-zero weight collects everything', () => {
+    const parts = Money.ofMajor('10.00', 'AED')
+      .allocate([0, 1, 0])
+      .map((p) => p.toString());
+    expect(parts).toEqual(['0.00 AED', '10.00 AED', '0.00 AED']);
+  });
+  it('an all-zero weight set is rejected', () => {
+    expect(() => Money.ofMajor('1.00', 'AED').allocate([0, 0])).toThrow(/weight total/);
+  });
+});
+
+describe('moneyDtoSchema / parseMoney', () => {
+  it('accepts a well-formed DTO and round-trips through parseMoney', () => {
+    const dto = { amountMinor: '12345', currency: 'KWD', exponent: 3 };
+    expect(moneyDtoSchema.safeParse(dto).success).toBe(true);
+    expect(parseMoney(dto).equals(Money.ofMinor(12345n, 'KWD'))).toBe(true);
+  });
+  it('rejects a JSON-number amount, a non-integer string, an unknown currency', () => {
+    expect(
+      moneyDtoSchema.safeParse({ amountMinor: 12345, currency: 'KWD', exponent: 3 }).success,
+    ).toBe(false);
+    expect(
+      moneyDtoSchema.safeParse({ amountMinor: '10.5', currency: 'AED', exponent: 2 }).success,
+    ).toBe(false);
+    expect(
+      moneyDtoSchema.safeParse({ amountMinor: '1', currency: 'ZZZ', exponent: 2 }).success,
+    ).toBe(false);
+  });
+  it('rejects an exponent that disagrees with the currency', () => {
+    expect(
+      moneyDtoSchema.safeParse({ amountMinor: '1', currency: 'AED', exponent: 3 }).success,
+    ).toBe(false);
+    expect(
+      moneyDtoSchema.safeParse({ amountMinor: '1', currency: 'KWD', exponent: 2 }).success,
+    ).toBe(false);
+  });
+  it('rejects an amountMinor string outside the BIGINT range', () => {
+    expect(
+      moneyDtoSchema.safeParse({ amountMinor: '9223372036854775808', currency: 'AED', exponent: 2 })
+        .success,
+    ).toBe(false);
   });
 });

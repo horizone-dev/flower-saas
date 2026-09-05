@@ -24,6 +24,8 @@
     "clean": "rimraf dist node_modules .turbo"
   },
   "dependencies": {
+    "@flower/money": "workspace:*",
+    "@flower/uom": "workspace:*",
     "zod": "4.5.4"
   },
   "devDependencies": {

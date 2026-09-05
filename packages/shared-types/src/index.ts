@@ -12,13 +12,15 @@ export type CompanyId = string & { readonly __brand: 'CompanyId' };
 
 export const uuidSchema = z.uuid();
 
-// --- Money DTO (mirrors @flower/money's MoneyDTO — ADR-0006) ---
-export const moneyDtoSchema = z.object({
-  amountMinor: z.string().regex(/^-?\d+$/, 'integer minor units as a string'),
-  currency: z.string().length(3),
-  exponent: z.number().int().min(0).max(3),
-});
-export type MoneyDto = z.infer<typeof moneyDtoSchema>;
+// --- Money / Quantity DTOs — the authoritative, currency/range-aware validators
+//     live with the value objects (they need the currency table / the
+//     NUMERIC(18,4) bounds); re-exported here as the shared FE/BE import surface. ---
+export { moneyDtoSchema, type MoneyDtoShape as MoneyDto, type MoneyDTO } from '@flower/money';
+export {
+  quantityDtoSchema,
+  type QuantityDtoShape as QuantityDto,
+  type QuantityDTO,
+} from '@flower/uom';
 
 // --- API error envelope (API-CONVENTIONS) ---
 export const apiErrorSchema = z.object({

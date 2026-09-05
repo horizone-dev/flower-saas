@@ -68,7 +68,15 @@ expires_at)`; a repeat with the same key + hash returns the stored response; a
 
 ## Conventions for money, quantities, dates
 
-- Money on the wire: `{ "amountMinor": 100500, "currency": "KWD", "exponent": 3 }`.
-- Quantities: string-encoded decimals in the item's base UOM (avoid float in JSON).
+- Money on the wire: `{ "amountMinor": "100500", "currency": "KWD", "exponent": 3 }`.
+  `amountMinor` is an **integer string**, never a JSON number — a `number`
+  cannot safely carry the full minor-unit range and "no binary floating point
+  for money" (ADR-0006) rules it out on the wire too. `exponent` must equal the
+  currency's canonical exponent. The `moneyDtoSchema` in `@flower/money`
+  (re-exported from `@flower/shared-types`) is the authoritative validator.
+- Quantities on the wire: `{ "amount": "1.5000" }` — a decimal string with at
+  most 4 fractional places, in the item's base UOM (avoid float in JSON). The
+  UOM code travels alongside in the payload, not inside the value.
+  `quantityDtoSchema` in `@flower/uom` is the validator.
 - Timestamps: RFC 3339 UTC (`2026-09-03T08:25:05Z`). Scheduled/local times also
   carry an IANA timezone.

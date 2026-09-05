@@ -1,18 +1,65 @@
+import { divRound, type RoundingMode } from './rounding.js';
+
 /**
  * A fractional-safe quantity. The DB stores quantities as NUMERIC(18,4) in the
  * item's base UOM (ARCHITECTURE §17, §52), so a Quantity is an integer number of
  * ten-thousandths (scale 4). No binary floating point.
+ *
+ * A `Quantity` is deliberately **unit-neutral** — it is a magnitude in *some*
+ * base UOM; the UOM code travels alongside it in the domain (on the movement
+ * ledger row, the order line, etc.), never inside the value object.
  */
 
 export const QUANTITY_SCALE = 4;
 const SCALE_FACTOR = 10_000n; // 10 ** QUANTITY_SCALE
 
+/**
+ * The storable range for a scaled quantity: `NUMERIC(18,4)` holds 18 significant
+ * digits, so with 4 fractional places the integer part is at most 14 digits.
+ * The scaled (×10^4) value therefore fits in ±(10^18 − 1). Every `Quantity`,
+ * including a conversion or `scaleBy` result, is checked against this so a value
+ * that could not round-trip through the database can never be constructed.
+ */
+export const QUANTITY_MAX_SCALED = 10n ** 18n - 1n;
+export const QUANTITY_MIN_SCALED = -(10n ** 18n - 1n);
+
+export class QuantityOverflowError extends RangeError {
+  constructor(scaled: bigint) {
+    super(
+      `Quantity ${scaled} (scaled) is outside the storable NUMERIC(18,4) range ` +
+        `[${QUANTITY_MIN_SCALED}, ${QUANTITY_MAX_SCALED}]`,
+    );
+    this.name = 'QuantityOverflowError';
+  }
+}
+
+function toExactBigInt(value: bigint | number, label: string): bigint {
+  if (typeof value === 'bigint') return value;
+  if (!Number.isSafeInteger(value)) {
+    throw new RangeError(`${label} must be a safe integer (got ${value})`);
+  }
+  return BigInt(value);
+}
+
+/** Wire representation — a decimal string, never a JSON number (avoid float in
+ *  JSON; API-CONVENTIONS). Unit-neutral, like `Quantity` itself. */
+export interface QuantityDTO {
+  /** the magnitude as a decimal string with at most 4 fractional places */
+  readonly amount: string;
+}
+
 export class Quantity {
   /** value in ten-thousandths (scale 4). */
-  private constructor(readonly scaled: bigint) {}
+  private constructor(readonly scaled: bigint) {
+    if (scaled < QUANTITY_MIN_SCALED || scaled > QUANTITY_MAX_SCALED) {
+      throw new QuantityOverflowError(scaled);
+    }
+  }
 
-  static ofScaled(scaled: bigint | number): Quantity {
-    return new Quantity(BigInt(scaled));
+  /** Scale-4 integer value, as an exact `bigint`. A `number` is not accepted —
+   *  it cannot safely represent the range. */
+  static ofScaled(scaled: bigint): Quantity {
+    return new Quantity(scaled);
   }
 
   /** Parse a decimal string ("1.5", "0.25", "12") with at most 4 decimal places. */
@@ -33,6 +80,10 @@ export class Quantity {
 
   static zero(): Quantity {
     return new Quantity(0n);
+  }
+
+  static fromDTO(dto: QuantityDTO): Quantity {
+    return Quantity.parse(dto.amount);
   }
 
   get isZero(): boolean {
@@ -64,7 +115,24 @@ export class Quantity {
   }
 
   mulInt(factor: bigint | number): Quantity {
-    return new Quantity(this.scaled * BigInt(factor));
+    return new Quantity(this.scaled * toExactBigInt(factor, 'factor'));
+  }
+
+  /**
+   * Multiply by the rational `num / den` (den > 0), rounding the scale-4 result
+   * with `mode` (default `HALF_UP`). A generic exact primitive — the ratio is
+   * whatever the caller supplies (a recipe batch multiplier, a wastage factor…);
+   * this method attaches no domain meaning to it and does no availability or
+   * reservation logic.
+   */
+  scaleBy(
+    num: bigint | number,
+    den: bigint | number = 1n,
+    mode: RoundingMode = 'HALF_UP',
+  ): Quantity {
+    const d = toExactBigInt(den, 'den');
+    if (d <= 0n) throw new RangeError('scaleBy: denominator must be > 0');
+    return new Quantity(divRound(this.scaled * toExactBigInt(num, 'num'), d, mode));
   }
 
   compare(other: Quantity): -1 | 0 | 1 {
@@ -92,5 +160,9 @@ export class Quantity {
     const whole = digits.slice(0, digits.length - QUANTITY_SCALE);
     const frac = digits.slice(digits.length - QUANTITY_SCALE);
     return `${neg ? '-' : ''}${whole}.${frac}`;
+  }
+
+  toDTO(): QuantityDTO {
+    return { amount: this.toFixed4() };
   }
 }
