@@ -327,10 +327,12 @@ describe('cross-tenant isolation probe suite', () => {
           };
         },
       },
-      // ── task 2.7: localization routes (Task 2.8 formally extends the probe
-      // suite to every new endpoint, but these two isolation properties are
-      // required verification for task 2.7 itself, so they are proven here
-      // now rather than left unproved until 2.8). ──────────────────────────
+      // ── Phase 2-core localization routes (task 2.7). Task 2.8's probe review
+      // (HG-PROBE) confirmed these are the ONLY two HTTP endpoints Phase 2-core
+      // adds — the realtime protocol is WebSocket and is covered by its own
+      // frozen acceptance suite, not a REST probe. Both isolation properties
+      // below (company read is tenant+company scoped; the global reference read
+      // leaks no tenant/company identifier) are asserted here. ──────────────
       {
         name: "GET localization company profile for A's company as ownerB",
         axis: 'tenant',
@@ -353,6 +355,13 @@ describe('cross-tenant isolation probe suite', () => {
       },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
+
+    // positive control — the cross-tenant 403/404 above is real scoping, not a
+    // route that denies everyone: ownerA resolves A's own company profile
+    // through the full guard pipeline + RLS, end to end.
+    const own = await send('GET', `/v1/localization/companies/${A.companyId}`, ownerATok);
+    expect(own.statusCode).toBe(200);
+    expect(own.json()).toMatchObject({ countryCode: 'AE' });
   });
 
   // ═════════════════════ RLS-injection — body cannot re-scope ═════════════════
@@ -410,6 +419,18 @@ describe('cross-tenant isolation probe suite', () => {
         axis: 'tenant',
         expectDenied: [401, 403],
         attempt: asStatus('GET', '/v1/org/companies', platformTok),
+      },
+      {
+        name: 'GET /v1/localization/reference as platform token',
+        axis: 'tenant',
+        expectDenied: [401, 403],
+        attempt: asStatus('GET', '/v1/localization/reference', platformTok),
+      },
+      {
+        name: 'GET /v1/localization/companies/{A} as platform token',
+        axis: 'tenant',
+        expectDenied: [401, 403, 404],
+        attempt: asStatus('GET', `/v1/localization/companies/${A.companyId}`, platformTok),
       },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
@@ -590,6 +611,15 @@ async function seed(url: string): Promise<void> {
       VALUES ('AED', 2, 'AED', 'UAE Dirham', 'درهم إماراتي');
       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
       VALUES ('AE', 'United Arab Emirates', 'الإمارات العربية المتحدة', 'gcc', 'AED', 'SAT_SUN', true, now());
+      -- minimal AE fiscal reference so the localization company read resolves a
+      -- regime (task 2.7 / 2.8 probe positive control). Full GCC data lives in
+      -- packages/db/prisma/gcc-reference-data.ts and its own test.
+      INSERT INTO tax_category (key, "nameEn", "nameAr")
+      VALUES ('STANDARD', 'Standard', 'x'), ('ZERO_RATED', 'Zero-rated', 'x'), ('EXEMPT', 'Exempt', 'x');
+      INSERT INTO country_tax_config ("countryCode", "effectiveFrom", "effectiveTo", regime)
+      VALUES ('AE', '2018-01-01', NULL, 'VAT');
+      INSERT INTO tax_rate ("countryCode", "taxCategoryKey", "rateBps", "effectiveFrom", "effectiveTo")
+      VALUES ('AE', 'STANDARD', 500, '2018-01-01', NULL), ('AE', 'ZERO_RATED', 0, '2018-01-01', NULL);
     `);
   } finally {
     await c.end();

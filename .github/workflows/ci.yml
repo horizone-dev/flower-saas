@@ -125,6 +125,58 @@ jobs:
           path: apps/super-admin-web/test-results/
           if-no-files-found: ignore
 
+  # ── Gate 1c: realtime acceptance suite (ADR-0017, build-blocking) ──────────
+  # The frozen realtime acceptance surface (HG-RT-AUTHZ / HG-RT-FANOUT /
+  # HG-RT-REVOKE / HG-RT-RESUME, ADR-0017 "Acceptance tests"). These also run
+  # inside `verify` via `turbo run test`; this job exists so the realtime gate
+  # is an independently visible, independently green required check — and so a
+  # realtime regression is not buried in the middle of the full matrix.
+  #
+  # Coverage (apps/realtime full suite + apps/worker realtime-relay + retention):
+  #   - server-derived subscription authz, tenant + branch isolation
+  #   - two-gateway fanout, duplicate event_id suppression
+  #   - multi-gateway session revocation, token-refresh scope narrowing
+  #   - relay restart / XAUTOCLAIM reclaim (worker realtime-relay)
+  #   - resume / replay, race-free replay→live handoff
+  #   - F8 + F9 resolution (reducer has no seq-gap arithmetic)
+  #   - retention-gap → resync-required, within-retention replay
+  #   - heartbeat / filtered-event leakage protection
+  #   - fault injection (mid-replay Redis loss) + recovery
+  #   - Stream retention: XTRIM MINID floor, tenant isolation, idempotency (2.8)
+  realtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable corepack (pins pnpm from package.json)
+        run: corepack enable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (realtime + worker + their workspace deps)
+        run: pnpm turbo run build --filter=@flower/realtime --filter=@flower/worker
+
+      - name: Realtime gateway acceptance suite (apps/realtime)
+        run: pnpm --filter @flower/realtime exec vitest run
+
+      - name: Worker realtime-relay + Stream-retention suites (apps/worker)
+        run: pnpm --filter @flower/worker exec vitest run src/realtime-relay src/stream-retention
+
   # ── Gate 2: supply-chain & secret scanning ─────────────────────────────────
   security:
     runs-on: ubuntu-latest
