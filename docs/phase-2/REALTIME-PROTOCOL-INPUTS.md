@@ -1,5 +1,16 @@
 # Phase 2 — realtime protocol design inputs
 
+> **AUTHORITY (Task 2.8, 2026-09-05).** This document is a **historical design
+> input**, not a specification. [`../decisions/ADR-0017.md`](../decisions/ADR-0017.md)
+> is the **authoritative, frozen** realtime protocol; where this file and
+> ADR-0017 differ, **ADR-0017 governs**. The F8 / F9 problem analysis and the
+> options-to-evaluate below are kept verbatim as the record of _why_ the protocol
+> is shaped the way it is — they are deliberately **not** rewritten to match the
+> outcome. The resolution is recorded in "Resolution — ADR-0017" below and is
+> implemented (Task 2.0 doc alignment, Task 2.6 `EventReducer` rewrite, Task 2.8
+> Stream retention); F8 and F9 are **structurally resolved** — the reducer type
+> no longer has a seq-gap / resync variant at all.
+
 > Recorded 2026-09-03 from the post-Phase-0 ultra-review (findings **F8**, **F9**).
 > These are **not bugs to hot-fix in Phase 0** — `packages/realtime-client` is a
 > Phase 0 seed whose transport and wire protocol are specified and built in
