@@ -10,6 +10,8 @@ describe('worker queue set', () => {
     expect(QUEUES).toContain('reservation-expiry');
     expect(QUEUES).toContain('payments-webhooks');
     expect(QUEUES).toContain('probe');
+    expect(QUEUES).toContain('stream-retention'); // task 2.8 retention sweep
+    expect(INFRA_QUEUES).toEqual(['probe', 'stream-retention', 'dead-letter']);
     expect(QUEUES).toContain(DEAD_LETTER_QUEUE);
   });
 

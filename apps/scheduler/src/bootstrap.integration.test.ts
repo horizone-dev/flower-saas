@@ -84,6 +84,29 @@ describe('scheduler runtime (integration — Redis)', () => {
     await probeQueue.close();
   });
 
+  it('the default registry registers both infra schedules incl. stream-retention (task 2.8)', async () => {
+    const runtime = await bootstrapScheduler({
+      redisHost,
+      redisPort,
+      metricsPort: 0,
+      logger: log,
+      // no `jobs` override — exercise buildRepeatableJobs() with a fast sweep
+      retentionSweepMs: 200,
+    });
+    runtimes.push(runtime);
+    expect([...runtime.registeredSchedules].sort()).toEqual(['probe', 'stream-retention'].sort());
+
+    const retentionQueue = new Queue('stream-retention', {
+      connection: { host: redisHost, port: redisPort },
+    });
+    const fired = await waitFor(async () => {
+      const jobs = await retentionQueue.getJobs(['waiting', 'completed', 'active'], 0, 20);
+      return jobs.some((j) => j.name === 'stream-retention.tick') ? true : undefined;
+    });
+    expect(fired).toBe(true);
+    await retentionQueue.close();
+  });
+
   it('Redis unreachable at startup fails fast (documented policy)', async () => {
     await expect(
       bootstrapScheduler({

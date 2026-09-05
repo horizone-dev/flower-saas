@@ -10,8 +10,9 @@ import type { Redis } from 'ioredis';
  * own phases — the worker never re-implements a domain rule (CLAUDE.md rule 1).
  *
  * `INFRA_QUEUES` are the cross-cutting queues Phase 2-core owns:
- *   - `probe`        — a trivial round-trip that proves the framework.
- *   - `dead-letter`  — the landing zone for a job that exhausted its retries.
+ *   - `probe`             — a trivial round-trip that proves the framework.
+ *   - `stream-retention`  — the realtime-Stream `XTRIM … MINID` sweep (task 2.8).
+ *   - `dead-letter`       — the landing zone for a job that exhausted its retries.
  */
 export const DOMAIN_QUEUES = [
   'notifications',
@@ -29,7 +30,7 @@ export const DOMAIN_QUEUES = [
   'cache-invalidation',
 ] as const;
 
-export const INFRA_QUEUES = ['probe', 'dead-letter'] as const;
+export const INFRA_QUEUES = ['probe', 'stream-retention', 'dead-letter'] as const;
 
 export const QUEUES = [...DOMAIN_QUEUES, ...INFRA_QUEUES] as const;
 

@@ -14,7 +14,16 @@ import { bootstrapWorker } from './bootstrap.js';
  */
 async function main(): Promise<void> {
   const env = parseEnv(
-    z.object({ WORKER_METRICS_PORT: z.coerce.number().int().positive().default(3011) }),
+    z.object({
+      WORKER_METRICS_PORT: z.coerce.number().int().positive().default(3011),
+      /** realtime-Stream time-based retention target, ms. Configurable, never a
+       *  hard-coded business constant (task 2.8). Default ≈ 24h. */
+      STREAM_RETENTION_MS: z.coerce
+        .number()
+        .int()
+        .positive()
+        .default(24 * 60 * 60 * 1000),
+    }),
   );
   const log = createLogger('worker', env.LOG_LEVEL, env.NODE_ENV === 'development');
 
@@ -23,6 +32,7 @@ async function main(): Promise<void> {
     redisPort: env.REDIS_PORT,
     metricsPort: env.WORKER_METRICS_PORT,
     logger: log,
+    retention: { retentionMs: env.STREAM_RETENTION_MS },
   });
 
   installShutdown(log, () => runtime.stop());

@@ -14,7 +14,7 @@ import {
   jobOptions,
 } from '@flower/service-runtime';
 import { SchedulerModule } from './scheduler.module.js';
-import { REPEATABLE_JOBS } from './schedules.js';
+import { buildRepeatableJobs, type RepeatableJob } from './schedules.js';
 
 export interface SchedulerRuntimeOptions {
   readonly redisHost: string;
@@ -25,7 +25,10 @@ export interface SchedulerRuntimeOptions {
   /** fail fast if Redis is not reachable within this window (documented policy) */
   readonly redisConnectTimeoutMs?: number;
   /** override the registry — tests substitute a short interval for `probe` */
-  readonly jobs?: readonly (typeof REPEATABLE_JOBS)[number][];
+  readonly jobs?: readonly RepeatableJob[];
+  /** sweep cadence for the `stream-retention` schedule, ms (task 2.8). Ignored
+   *  when `jobs` is supplied. Default `DEFAULT_RETENTION_SWEEP_MS` (1h). */
+  readonly retentionSweepMs?: number;
 }
 
 export interface SchedulerRuntime {
@@ -50,7 +53,7 @@ export interface SchedulerRuntime {
 export async function bootstrapScheduler(opts: SchedulerRuntimeOptions): Promise<SchedulerRuntime> {
   const { logger } = opts;
   const retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY;
-  const jobs = opts.jobs ?? REPEATABLE_JOBS;
+  const jobs = opts.jobs ?? buildRepeatableJobs(opts.retentionSweepMs);
 
   const context = await NestFactory.createApplicationContext(SchedulerModule, {
     logger: ['error', 'warn'],

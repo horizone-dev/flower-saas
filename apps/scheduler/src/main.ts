@@ -10,11 +10,23 @@ import { bootstrapScheduler } from './bootstrap.js';
  * `apps/worker` runs them. A **separate process** from `apps/api` — its own
  * startup, shutdown, health and restart boundary.
  *
- * Phase 2-core task 2.3: the framework only — a trivial probe schedule.
+ * Phase 2-core task 2.3: the framework only — a trivial probe schedule. Task
+ * 2.8 adds the `stream-retention` sweep schedule (realtime-Stream `XTRIM`).
  */
 async function main(): Promise<void> {
   const env = parseEnv(
-    z.object({ SCHEDULER_METRICS_PORT: z.coerce.number().int().positive().default(3012) }),
+    z.object({
+      SCHEDULER_METRICS_PORT: z.coerce.number().int().positive().default(3012),
+      /** how often to enqueue the realtime-Stream retention sweep, ms (task
+       *  2.8). A missed sweep is harmless — the next one still trims everything
+       *  past the time floor — so this is a low-frequency maintenance cadence.
+       *  Default 1h. */
+      STREAM_RETENTION_SWEEP_INTERVAL_MS: z.coerce
+        .number()
+        .int()
+        .positive()
+        .default(60 * 60 * 1000),
+    }),
   );
   const log = createLogger('scheduler', env.LOG_LEVEL, env.NODE_ENV === 'development');
 
@@ -23,6 +35,7 @@ async function main(): Promise<void> {
     redisPort: env.REDIS_PORT,
     metricsPort: env.SCHEDULER_METRICS_PORT,
     logger: log,
+    retentionSweepMs: env.STREAM_RETENTION_SWEEP_INTERVAL_MS,
   });
 
   installShutdown(log, () => runtime.stop());

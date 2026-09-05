@@ -17,9 +17,12 @@ import type { Server } from 'node:http';
 import { WorkerModule } from './worker.module.js';
 import { ProcessorRegistry } from './processor-registry.js';
 import { probeProcessor } from './processors/probe.processor.js';
+import { makeStreamRetentionProcessor } from './processors/stream-retention.processor.js';
 import { QUEUES, type QueueName } from './queues.js';
 import { OutboxDispatcher, type OutboxDispatcherOptions } from './outbox/dispatcher.js';
 import { RealtimeRelay, type RealtimeRelayOptions } from './realtime-relay/relay-loop.js';
+import { type RetentionOptions, type RetentionTickResult } from './stream-retention/retention.js';
+import { outboxLagSnapshot, outboxLagWarnings } from './outbox/metrics.js';
 
 export interface WorkerRuntimeOptions {
   readonly redisHost: string;
@@ -33,6 +36,10 @@ export interface WorkerRuntimeOptions {
   readonly outbox?: Partial<Omit<OutboxDispatcherOptions, 'db' | 'redis' | 'logger'>>;
   /** realtime relay tuning (task 2.5) — all optional, sane defaults apply */
   readonly relay?: Partial<Omit<RealtimeRelayOptions, 'redis' | 'logger'>>;
+  /** realtime-Stream retention tuning (task 2.8) — `retentionMs` defaults to
+   *  ≈ 24h (`DEFAULT_RETENTION_MS`). The sweep *schedule* lives in
+   *  `apps/scheduler`; this only tunes how far back each sweep keeps. */
+  readonly retention?: RetentionOptions;
 }
 
 export interface WorkerRuntime {
@@ -75,8 +82,26 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
     );
   }
 
+  // A dedicated Redis connection for the retention sweep's `SCAN` + `XTRIM` +
+  // `XLEN` — non-blocking commands, on `rt:stream:*` (never `rt:live:*`).
+  // Explicitly connected before the processor can run, same reasoning as the
+  // outbox/relay connections below.
+  const retentionRedis = createRedis(opts.redisHost, opts.redisPort);
+  await connectRedis(retentionRedis, opts.redisConnectTimeoutMs ?? 5_000);
+  let lastRetention: RetentionTickResult | null = null;
+
   const registry = new ProcessorRegistry(retryPolicy);
   registry.register({ queue: 'probe', handler: probeProcessor });
+  registry.register({
+    queue: 'stream-retention',
+    handler: makeStreamRetentionProcessor({
+      redis: retentionRedis,
+      ...(opts.retention && { retention: opts.retention }),
+      onResult: (r) => {
+        lastRetention = r;
+      },
+    }),
+  });
   registry.start(connection, logger);
 
   const metricsQueues = new Map<QueueName, Queue>(
@@ -105,8 +130,9 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
   const outboxRedis = createRedis(opts.redisHost, opts.redisPort);
   await connectRedis(outboxRedis, opts.redisConnectTimeoutMs ?? 5_000);
 
+  const db = context.get(DbService);
   const dispatcher = new OutboxDispatcher({
-    db: context.get(DbService),
+    db,
     redis: outboxRedis,
     logger,
     ...opts.outbox,
@@ -135,12 +161,43 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
       redis: (await redisHealthy(connection)) ? 'ok' : 'down',
       outboxRedis: (await redisHealthy(outboxRedis)) ? 'ok' : 'down',
       relayRedis: (await redisHealthy(relayRedis)) ? 'ok' : 'down',
+      retentionRedis: (await redisHealthy(retentionRedis)) ? 'ok' : 'down',
     }),
     {
       metrics: async () => {
         const counts: Record<string, unknown> = {};
         for (const [name, q] of metricsQueues) counts[name] = await q.getJobCounts();
-        return { registeredQueues: registry.registeredQueues, queues: counts };
+
+        // Bounded aggregates only — never a per-tenant key (task 2.8 scalability
+        // rule). A threshold breach names the tenant in a one-off structured
+        // log line here, not in the payload.
+        let outbox: Record<string, unknown> = { error: 'unavailable' };
+        try {
+          const snap = await outboxLagSnapshot(db);
+          outbox = {
+            undispatched: snap.undispatched,
+            oldestUndispatchedAgeMs: snap.oldestUndispatchedAgeMs,
+            withFailures: snap.withFailures,
+          };
+          for (const w of outboxLagWarnings(snap)) {
+            logger.warn(
+              { code: w.code, tenantId: w.tenantId, value: w.value },
+              'outbox lag threshold breached',
+            );
+          }
+        } catch (err) {
+          logger.error({ err }, 'outbox lag snapshot failed');
+        }
+
+        const lr = lastRetention;
+        return {
+          registeredQueues: registry.registeredQueues,
+          queues: counts,
+          outbox,
+          streamRetention: lr
+            ? { lastTenantsSeen: lr.tenantsSeen, lastTrimmed: lr.trimmed, lastFloorId: lr.floorId }
+            : { lastRun: null },
+        };
       },
     },
   );
@@ -162,6 +219,7 @@ export async function bootstrapWorker(opts: WorkerRuntimeOptions): Promise<Worke
       connection.disconnect();
       outboxRedis.disconnect();
       relayRedis.disconnect();
+      retentionRedis.disconnect();
     },
   };
 }

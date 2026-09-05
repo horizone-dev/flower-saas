@@ -70,7 +70,32 @@ describe('worker runtime (integration — Redis)', () => {
   it('boots independently and resolves a @flower/backend service via the Nest context', async () => {
     const runtime = await boot();
     expect(runtime.context).toBeDefined();
-    expect(runtime.registry.registeredQueues).toEqual(['probe']);
+    expect(runtime.registry.registeredQueues).toEqual(['probe', 'stream-retention']);
+  });
+
+  it('the stream-retention processor (task 2.8) is wired in and runs a real XTRIM sweep', async () => {
+    const tenantId = randomUUID();
+    const probe = new Redis(stack.redis.url);
+    // an entry with an explicit, very old id + one that is brand new
+    await probe.xadd(streamKey(tenantId), '1000-1', 'event', JSON.stringify({ event_id: 'a' }));
+    const fresh = await probe.xadd(
+      streamKey(tenantId),
+      '*',
+      'event',
+      JSON.stringify({ event_id: 'b' }),
+    );
+
+    // a 1-minute window: the epoch-anchored 1000-1 entry is far below the floor,
+    // the just-added `fresh` entry (a few ms old) is comfortably inside it.
+    const runtime = await boot({ retention: { retentionMs: 60_000, approximate: false } });
+    await runtime.registry.enqueue('stream-retention', 'stream-retention.tick', {});
+
+    const remaining = await waitFor(async () => {
+      const entries = await probe.xrange(streamKey(tenantId), '-', '+');
+      return entries.length === 1 ? entries.map(([id]) => id) : undefined;
+    });
+    expect(remaining).toEqual([fresh]);
+    await probe.quit();
   });
 
   it('a trivial job round-trips through the real processor', async () => {
