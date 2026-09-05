@@ -214,6 +214,10 @@ export interface ProvisionTenantInput {
   slug: string;
   name: string;
   region: string;
+  /** the company's legal-entity country (ISO 3166-1 alpha-2) — the fiscal
+   *  source of truth (task 2.7, architecture correction 4). Deliberately
+   *  independent of `region`, never derived from it. */
+  companyCountryCode: string;
   planVersionId: string;
   ownerEmail: string;
   companyLegalNameEn?: string;

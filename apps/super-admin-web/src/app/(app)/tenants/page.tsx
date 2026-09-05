@@ -47,6 +47,18 @@ export default async function TenantsPage() {
                 { value: 'OM', label: 'Oman' },
               ]}
             />
+            <Select
+              label="Company country"
+              name="companyCountryCode"
+              options={[
+                { value: 'AE', label: 'UAE' },
+                { value: 'SA', label: 'KSA' },
+                { value: 'QA', label: 'Qatar' },
+                { value: 'KW', label: 'Kuwait' },
+                { value: 'BH', label: 'Bahrain' },
+                { value: 'OM', label: 'Oman' },
+              ]}
+            />
             <Select label="Plan version" name="planVersionId" options={versionOptions} />
           </ProvisionForm>
         )}

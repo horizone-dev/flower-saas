@@ -54,6 +54,18 @@ export async function seedForSmoke(databaseUrl) {
       );
     }
 
+    // task 2.7 — provisioning resolves the company's country/currency inside
+    // its own transaction; the smoke's "Provision a tenant" form defaults to
+    // AE for both region and companyCountryCode.
+    await c.query(
+      `INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
+       VALUES ('AED', 2, 'AED', 'UAE Dirham', 'x')`,
+    );
+    await c.query(
+      `INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
+       VALUES ('AE', 'United Arab Emirates', 'x', 'gcc', 'AED', 'SAT_SUN', true, now())`,
+    );
+
     const planId = randomUUID();
     const planVersionId = randomUUID();
     await c.query(

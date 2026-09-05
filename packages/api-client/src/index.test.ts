@@ -99,7 +99,14 @@ describe('@flower/api-client', () => {
       getAccessToken: () => 'tok',
     });
     await client.provisionTenant(
-      { slug: 'acme', name: 'Acme', region: 'AE', planVersionId: 'pv1', ownerEmail: 'a@b.co' },
+      {
+        slug: 'acme',
+        name: 'Acme',
+        region: 'AE',
+        companyCountryCode: 'AE',
+        planVersionId: 'pv1',
+        ownerEmail: 'a@b.co',
+      },
       'idem-1',
     );
     const init = fetchMock.mock.calls[0]![1]!;

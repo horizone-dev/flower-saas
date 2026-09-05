@@ -13,6 +13,11 @@ export async function provisionTenant(
     slug: String(formData.get('slug') ?? ''),
     name: String(formData.get('name') ?? ''),
     region: String(formData.get('region') ?? 'AE'),
+    // task 2.7 — the company's fiscal-source-of-truth country, deliberately a
+    // separate form field/value from region (architecture correction 4): the
+    // two happen to share the same option list today, but are never derived
+    // from one another.
+    companyCountryCode: String(formData.get('companyCountryCode') ?? 'AE'),
     planVersionId: String(formData.get('planVersionId') ?? ''),
     ownerEmail: String(formData.get('ownerEmail') ?? ''),
   };
