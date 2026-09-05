@@ -143,7 +143,7 @@ describe('worker runtime (integration — Redis)', () => {
       tenant_id: tenantId,
       type: 'x',
     });
-    await probe.xadd(streamKey(tenantId), '*', 'event', env);
+    const id = await probe.xadd(streamKey(tenantId), '*', 'event', env);
 
     const sub = new Redis(stack.redis.url);
     await sub.subscribe(liveChannel(tenantId));
@@ -154,7 +154,9 @@ describe('worker runtime (integration — Redis)', () => {
         resolve(msg);
       });
     });
-    expect(received).toBe(env);
+    // task 2.6: the relay now publishes a {cursor, event} transport wrapper —
+    // the Redis Stream entry id alongside the untouched envelope.
+    expect(received).toBe(JSON.stringify({ cursor: id, event: JSON.parse(env) }));
     await sub.unsubscribe(liveChannel(tenantId));
     await sub.quit();
     await probe.quit();

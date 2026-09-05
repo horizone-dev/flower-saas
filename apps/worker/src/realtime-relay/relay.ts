@@ -68,13 +68,16 @@ async function publishEntries(
   for (const [id, fields] of entries) {
     const json = extractEnvelopeJson(fields);
     if (json !== null) {
-      // Forward the envelope VERBATIM — the relay never re-derives or
-      // re-parses routing metadata (branch_id/tenant_id/etc.) from anything;
-      // it republishes exactly the trusted bytes the task 2.4 dispatcher
-      // `XADD`ed (the same discipline the 2.4 remediation proved for the
-      // dispatcher itself, carried forward here by construction — this
-      // function never even looks at the field values beyond copying them).
-      await redis.publish(channel, json);
+      // Task 2.6: publish a transport WRAPPER, `{cursor, event}` — the Redis
+      // Stream entry id alongside the envelope — never mutating the task 2.4
+      // envelope itself. `apps/realtime`'s gateway needs this cursor so a
+      // client can advance its persisted scanned position during ordinary
+      // live delivery, not only during a resume replay (ADR-0017 §6a: the
+      // scanned cursor is reported "in every frame"). The envelope's own
+      // bytes are parsed back only to nest them under `event` — every field
+      // value is forwarded unchanged; nothing is re-derived from it.
+      const envelope: unknown = JSON.parse(json);
+      await redis.publish(channel, JSON.stringify({ cursor: id, event: envelope }));
       n++;
     }
     await redis.xack(key, GROUP, id);

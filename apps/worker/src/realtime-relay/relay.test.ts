@@ -86,18 +86,24 @@ describe('realtime relay (integration — Redis)', () => {
     expect(found.sort()).toEqual([t1, t2].sort());
   });
 
+  /** The relay publishes a `{cursor, event}` transport wrapper (task 2.6) —
+   *  the Redis Stream entry id alongside the untouched envelope. */
+  function wrapper(id: string, env: string): string {
+    return JSON.stringify({ cursor: id, event: JSON.parse(env) });
+  }
+
   // ── single event relay ────────────────────────────────────────────────
-  it('a single stream entry is published to rt:live:{tenantId} verbatim', async () => {
+  it('a single stream entry is published to rt:live:{tenantId} as {cursor, event} — event verbatim', async () => {
     const tenantId = randomUUID();
     const env = envelope({ tenant_id: tenantId, type: 'single.event' });
-    await redis.xadd(streamKey(tenantId), '*', 'event', env);
+    const id = await redis.xadd(streamKey(tenantId), '*', 'event', env);
 
     const sub = await subscribeOnce(liveChannel(tenantId));
     const published = await relayTenant(redis, tenantId, { consumerName: 'c1' });
     expect(published).toBe(1);
 
     const messages = await sub.messages;
-    expect(messages).toEqual([env]); // forwarded byte-for-byte, never re-derived
+    expect(messages).toEqual([wrapper(id!, env)]);
   });
 
   // ── multiple tenants relayed independently ───────────────────────────
@@ -106,8 +112,8 @@ describe('realtime relay (integration — Redis)', () => {
     const tB = randomUUID();
     const envA = envelope({ tenant_id: tA, type: 'a.event' });
     const envB = envelope({ tenant_id: tB, type: 'b.event' });
-    await redis.xadd(streamKey(tA), '*', 'event', envA);
-    await redis.xadd(streamKey(tB), '*', 'event', envB);
+    const idA = await redis.xadd(streamKey(tA), '*', 'event', envA);
+    const idB = await redis.xadd(streamKey(tB), '*', 'event', envB);
 
     const subA = await subscribeOnce(liveChannel(tA));
     const subB = await subscribeOnce(liveChannel(tB));
@@ -115,15 +121,15 @@ describe('realtime relay (integration — Redis)', () => {
     expect(result.tenantsSeen).toBe(2);
     expect(result.published).toBe(2);
 
-    expect(await subA.messages).toEqual([envA]);
-    expect(await subB.messages).toEqual([envB]);
+    expect(await subA.messages).toEqual([wrapper(idA!, envA)]);
+    expect(await subB.messages).toEqual([wrapper(idB!, envB)]);
   });
 
   // ── relay restart loses no event (task 2.5 demonstration 7) ──────────
   it('a crashed relay (delivered but never XACKed) is reclaimed by the next tick — no event lost', async () => {
     const tenantId = randomUUID();
     const env = envelope({ tenant_id: tenantId, type: 'crash-before-ack' });
-    await redis.xadd(streamKey(tenantId), '*', 'event', env);
+    const id = await redis.xadd(streamKey(tenantId), '*', 'event', env);
 
     // Simulate the crash directly: create the group, XREADGROUP (delivers +
     // marks pending) as consumer "dead-consumer", then never XACK — exactly
@@ -153,7 +159,7 @@ describe('realtime relay (integration — Redis)', () => {
       minIdleMs: 0,
     });
     expect(published).toBe(1);
-    expect(await sub.messages).toEqual([env]);
+    expect(await sub.messages).toEqual([wrapper(id!, env)]);
 
     // and it is now genuinely acked — a further tick finds nothing left.
     const again = await relayTenant(redis, tenantId, {

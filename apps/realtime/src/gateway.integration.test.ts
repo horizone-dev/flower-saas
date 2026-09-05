@@ -100,9 +100,12 @@ describe('realtime gateway (integration — Redis, 2 real instances)', () => {
     const subscriberClient = createRedis(host, port);
     await subscriberClient.connect();
     rawRedisConns.push(subscriberClient);
+    const commandsClient = createRedis(host, port);
+    await commandsClient.connect();
+    rawRedisConns.push(commandsClient);
 
     const authenticator = new SessionAuthenticator(jwt, new RedisSessionStore(sessionClient));
-    const hub = new GatewayHub(subscriberClient);
+    const hub = new GatewayHub(subscriberClient, commandsClient);
 
     const app = await buildRealtimeApp({
       redisHealthy: async () => true,
@@ -246,13 +249,28 @@ describe('realtime gateway (integration — Redis, 2 real instances)', () => {
     };
   }
 
-  /** Publish exactly what `apps/worker`'s relay would — the raw envelope JSON
-   *  on `rt:live:{tenantId}` — without importing the relay itself. */
-  async function publishLive(tenantId: string, env: Record<string, unknown>): Promise<void> {
+  let fakeCursorCounter = 0;
+  /** A synthetic but syntactically-plausible Stream id — these tests publish
+   *  directly to `rt:live:{tenantId}` (exactly what the task 2.6 relay does),
+   *  bypassing a real Stream entirely, so the exact value never matters here
+   *  (resume/replay against a real Stream has its own dedicated suite). */
+  function nextFakeCursor(): string {
+    return `${Date.now()}-${fakeCursorCounter++}`;
+  }
+
+  /** Publish exactly what the task 2.6 relay would — the `{cursor, event}`
+   *  transport wrapper — on `rt:live:{tenantId}`, without importing the relay
+   *  itself (that cross-app import is exactly what `@flower/backend` exists
+   *  to avoid). */
+  async function publishLive(
+    tenantId: string,
+    env: Record<string, unknown>,
+    cursor: string = nextFakeCursor(),
+  ): Promise<void> {
     const url = new URL(stack.redis.url);
     const pub = createRedis(url.hostname, Number(url.port));
     await pub.connect();
-    await pub.publish(liveChannel(tenantId), JSON.stringify(env));
+    await pub.publish(liveChannel(tenantId), JSON.stringify({ cursor, event: env }));
     pub.disconnect();
   }
 

@@ -90,7 +90,7 @@ describe('realtime gateway', () => {
     app = await buildRealtimeApp({
       redisHealthy: async () => true,
       authenticator: new SessionAuthenticator(jwt, store),
-      hub: new GatewayHub(fakeSubscriberRedis()),
+      hub: new GatewayHub(fakeSubscriberRedis(), fakeSubscriberRedis()),
     });
     const res = await app.inject({ method: 'GET', url: '/healthz' });
     expect(res.statusCode).toBe(200);
@@ -103,14 +103,14 @@ describe('realtime gateway', () => {
     app = await buildRealtimeApp({
       redisHealthy: async () => false,
       authenticator: new SessionAuthenticator(jwt, store),
-      hub: new GatewayHub(fakeSubscriberRedis()),
+      hub: new GatewayHub(fakeSubscriberRedis(), fakeSubscriberRedis()),
     });
     expect((await app.inject({ method: 'GET', url: '/readyz' })).statusCode).toBe(503);
     await app.close();
     app = await buildRealtimeApp({
       redisHealthy: async () => true,
       authenticator: new SessionAuthenticator(jwt, store),
-      hub: new GatewayHub(fakeSubscriberRedis()),
+      hub: new GatewayHub(fakeSubscriberRedis(), fakeSubscriberRedis()),
     });
     expect((await app.inject({ method: 'GET', url: '/readyz' })).statusCode).toBe(200);
   });
@@ -128,7 +128,7 @@ describe('realtime gateway', () => {
     app = await buildRealtimeApp({
       redisHealthy: async () => true,
       authenticator: new SessionAuthenticator(jwt, store),
-      hub: new GatewayHub(fakeSubscriberRedis()),
+      hub: new GatewayHub(fakeSubscriberRedis(), fakeSubscriberRedis()),
       onConnect: () => (connects += 1),
       onClose: () => (closes += 1),
     });
@@ -168,7 +168,7 @@ describe('realtime gateway', () => {
     app = await buildRealtimeApp({
       redisHealthy: async () => true,
       authenticator: new SessionAuthenticator(jwt, store),
-      hub: new GatewayHub(fakeSubscriberRedis()),
+      hub: new GatewayHub(fakeSubscriberRedis(), fakeSubscriberRedis()),
       onAuthFailed: (reason) => (authFailed = reason),
     });
     await app.listen({ port: 0, host: '127.0.0.1' });
@@ -202,7 +202,7 @@ describe('realtime gateway', () => {
     app = await buildRealtimeApp({
       redisHealthy: async () => true,
       authenticator: new SessionAuthenticator(jwt, store),
-      hub: new GatewayHub(fakeSubscriberRedis()),
+      hub: new GatewayHub(fakeSubscriberRedis(), fakeSubscriberRedis()),
     });
     await app.listen({ port: 0, host: '127.0.0.1' });
     const addr = app.server.address();

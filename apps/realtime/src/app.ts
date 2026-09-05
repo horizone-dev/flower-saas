@@ -12,6 +12,11 @@ export interface RealtimeDeps {
   onConnect?: (conn: Connection) => void;
   onClose?: (conn: Connection | null) => void;
   onAuthFailed?: (reason: string) => void;
+  /** a message-handler failure that reached the top-level catch-all —
+   *  should not normally fire (each handler has its own specific recovery),
+   *  a last-resort safety net so no failure ever becomes an unhandled
+   *  rejection (task 2.6 fault-injection requirement). */
+  onMessageError?: (err: unknown) => void;
 }
 
 const CLOSE_POLICY_VIOLATION = 4000;
@@ -33,6 +38,12 @@ const CLOSE_POLICY_VIOLATION = 4000;
  * A narrower `branchScope` on the new session takes effect immediately: every
  * live delivery re-checks authorization against the connection's *current*
  * session, never a cached topic list.
+ *
+ * `resume` (task 2.6) hands the client's persisted scanned Stream cursor to
+ * `GatewayHub.resume` — replay-then-live-handoff, or `resync-required` /
+ * `error`, per ADR-0017 §3/§6a-c/§7. See `gateway/hub.ts`'s doc comment for
+ * the full cursor-rule and race-freedom detail; this handler only extracts
+ * the client-supplied `cursor` field and forwards the outcome.
  */
 export async function buildRealtimeApp(deps: RealtimeDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
@@ -76,9 +87,17 @@ export async function buildRealtimeApp(deps: RealtimeDeps): Promise<FastifyInsta
       );
 
       socket.on('message', (raw: Buffer) => {
-        void handleMessage(raw, socket, deps, conn).then((updated) => {
-          if (updated) conn = updated;
-        });
+        // Defense in depth, on top of `handleResume`'s own specific
+        // recovery: no future failure in any message handler may become an
+        // unhandled rejection — that risks taking down the whole process
+        // over one connection's bad luck (e.g. a lost Redis connection).
+        void handleMessage(raw, socket, deps, conn)
+          .then((updated) => {
+            if (updated) conn = updated;
+          })
+          .catch((err: unknown) => {
+            deps.onMessageError?.(err);
+          });
       });
 
       socket.on('close', () => {
@@ -91,9 +110,11 @@ export async function buildRealtimeApp(deps: RealtimeDeps): Promise<FastifyInsta
   return app;
 }
 
+type WsSocket = { send(data: string): void; close(code?: number, reason?: string): void };
+
 async function handleMessage(
   raw: Buffer,
-  socket: { send(data: string): void; close(code?: number, reason?: string): void },
+  socket: WsSocket,
   deps: RealtimeDeps,
   conn: Connection | null,
 ): Promise<Connection | null> {
@@ -104,13 +125,24 @@ async function handleMessage(
   } catch {
     return null; // malformed client message — ignore, never crash the socket over it
   }
-  if (
-    typeof msg !== 'object' ||
-    msg === null ||
-    (msg as { type?: unknown }).type !== 'refresh_token'
-  ) {
-    return null;
-  }
+  if (typeof msg !== 'object' || msg === null) return null;
+  const type = (msg as { type?: unknown }).type;
+
+  if (type === 'refresh_token') return handleRefreshToken(msg, socket, deps, conn);
+  if (type === 'resume') return handleResume(msg, socket, deps, conn);
+
+  // Any other (or absent) message type is silently ignored — never
+  // interpreted as a scope-widening "subscribe" request (task 2.5 rule,
+  // unchanged): there is no such message in this protocol.
+  return null;
+}
+
+async function handleRefreshToken(
+  msg: object,
+  socket: WsSocket,
+  deps: RealtimeDeps,
+  conn: Connection,
+): Promise<Connection | null> {
   const token = (msg as { token?: unknown }).token;
   if (typeof token !== 'string' || token.length === 0) {
     socket.send(JSON.stringify({ type: 'error', code: 'MISSING_TOKEN', message: 'missing token' }));
@@ -138,11 +170,52 @@ async function handleMessage(
   return conn;
 }
 
-function closeUnauthorized(
-  socket: { send(data: string): void; close(code?: number, reason?: string): void },
+async function handleResume(
+  msg: object,
+  socket: WsSocket,
   deps: RealtimeDeps,
-  reason: string,
-): void {
+  conn: Connection,
+): Promise<Connection | null> {
+  const rawCursor = (msg as { cursor?: unknown }).cursor;
+  const cursor = typeof rawCursor === 'string' ? rawCursor : null;
+
+  // A genuine infrastructure failure mid-replay (Redis connection lost —
+  // fault injection) must fail THIS resume attempt safely, never crash the
+  // gateway process or leave the client hanging with no response at all: it
+  // surfaces as a normal `error` frame, exactly like a client-caused one. The
+  // client is expected to retry `resume` (with the same cursor — nothing was
+  // marked delivered on a thrown attempt beyond what already reached the
+  // socket) once the connection recovers, the same way a REST client would
+  // retry after a transient 5xx.
+  let outcome;
+  try {
+    outcome = await deps.hub.resume(conn, cursor);
+  } catch (err) {
+    socket.send(
+      JSON.stringify({
+        type: 'error',
+        code: 'RESUME_FAILED',
+        message: err instanceof Error ? err.message : 'resume failed',
+      }),
+    );
+    return conn;
+  }
+
+  switch (outcome.type) {
+    case 'error':
+      socket.send(JSON.stringify({ type: 'error', code: outcome.code, message: outcome.message }));
+      break;
+    case 'resync-required':
+      socket.send(JSON.stringify({ type: 'resync-required', cursor: outcome.cursor }));
+      break;
+    case 'resumed':
+      socket.send(JSON.stringify({ type: 'resumed', cursor: outcome.cursor }));
+      break;
+  }
+  return conn;
+}
+
+function closeUnauthorized(socket: WsSocket, deps: RealtimeDeps, reason: string): void {
   deps.onAuthFailed?.(reason);
   socket.send(JSON.stringify({ type: 'error', code: 'UNAUTHORIZED', message: reason }));
   socket.close(CLOSE_POLICY_VIOLATION, reason);

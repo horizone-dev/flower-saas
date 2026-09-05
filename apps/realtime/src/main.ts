@@ -40,8 +40,13 @@ async function main(): Promise<void> {
   // realtime/channels.ts is the single shared source of the channel names).
   const healthRedis = createRedis(env.REDIS_HOST, env.REDIS_PORT);
   const subscriberRedis = createRedis(env.REDIS_HOST, env.REDIS_PORT);
+  // A SEPARATE connection for XRANGE/XINFO STREAM (task 2.6 resume/replay) —
+  // `subscriberRedis` is locked into Pub/Sub subscriber mode the moment its
+  // first SUBSCRIBE happens and can never run a plain command again.
+  const commandsRedis = createRedis(env.REDIS_HOST, env.REDIS_PORT);
   await connectRedis(healthRedis);
   await connectRedis(subscriberRedis);
+  await connectRedis(commandsRedis);
 
   // Session lookup — a SEPARATE connection, keyPrefix: 'flower:' (matches
   // apps/api's RedisService exactly; see auth/redis.ts's doc comment for why
@@ -53,7 +58,7 @@ async function main(): Promise<void> {
   const jwt = new JwtService(backendConfig);
   const sessions = new RedisSessionStore(sessionRedis);
   const authenticator = new SessionAuthenticator(jwt, sessions);
-  const hub = new GatewayHub(subscriberRedis);
+  const hub = new GatewayHub(subscriberRedis, commandsRedis);
 
   const app = await buildRealtimeApp({
     redisHealthy: () => redisHealthy(healthRedis),
@@ -62,12 +67,14 @@ async function main(): Promise<void> {
     onConnect: () => log.debug('ws connected'),
     onClose: () => log.debug('ws closed'),
     onAuthFailed: (reason) => log.debug({ reason }, 'ws auth failed'),
+    onMessageError: (err) => log.error({ err }, 'ws message handling failed'),
   });
 
   installShutdown(log, async () => {
     await app.close();
     healthRedis.disconnect();
     subscriberRedis.disconnect();
+    commandsRedis.disconnect();
     sessionRedis.disconnect();
   });
 
