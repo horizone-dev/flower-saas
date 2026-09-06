@@ -38,7 +38,8 @@ export const AUDITABLE_ACTIONS = {
 
   // ── catalog capability & Business-Type template foundation (task 3.1) ───
   /** initial Business-Type template snapshot during provisioning; (later)
-   *  Task 3.10's explicit re-apply */
+   *  Task 3.10's explicit re-apply. SECURITY-significant — it establishes a
+   *  tenant's initial capability configuration. */
   'catalog.template_applied': { resourceType: 'business_type_template', security: true },
   /** a Super-Admin PATCH to a tenant's catalog-capability set — written ONLY
    *  inside a committed write transaction (no row for a stale/failed/no-op) */
@@ -46,6 +47,24 @@ export const AUDITABLE_ACTIONS = {
     resourceType: 'tenant_catalog_capability',
     security: true,
   },
+
+  // ── generic catalog core — Category / Product Type / Product (task 3.2) ──
+  // Ordinary tenant catalog CRUD by an Owner/Admin — business events, NOT
+  // security events (owner §15 / §16). They do NOT surface in `security_event`
+  // even though the action name begins with `catalog.` (the view + the
+  // prefix/exact registry below are narrowed accordingly).
+  'catalog.category_created': { resourceType: 'category', security: false },
+  'catalog.category_updated': { resourceType: 'category', security: false },
+  'catalog.category_status_changed': { resourceType: 'category', security: false },
+  'catalog.category_deleted': { resourceType: 'category', security: false },
+  'catalog.product_type_created': { resourceType: 'product_type', security: false },
+  'catalog.product_type_updated': { resourceType: 'product_type', security: false },
+  'catalog.product_type_status_changed': { resourceType: 'product_type', security: false },
+  'catalog.product_type_deleted': { resourceType: 'product_type', security: false },
+  'catalog.product_created': { resourceType: 'product', security: false },
+  'catalog.product_updated': { resourceType: 'product', security: false },
+  'catalog.product_status_changed': { resourceType: 'product', security: false },
+  'catalog.product_deleted': { resourceType: 'product', security: false },
 
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
@@ -61,8 +80,18 @@ export function isAuditableAction(value: string): value is AuditableAction {
   return value in AUDITABLE_ACTIONS;
 }
 
-/** SQL `LIKE` patterns for the `security_event` view — kept in sync with the
- *  `security: true` entries above by `actions.test.ts`. */
+/**
+ * The `security_event` view membership, kept in sync with the `security: true`
+ * entries above by `actions.test.ts` (build-blocking). An action is a security
+ * event iff it matches a prefix here OR is listed in `SECURITY_ACTION_EXACT`.
+ *
+ * `catalog.` is deliberately NOT a prefix (owner §16 / R-6): task 3.2's ordinary
+ * `catalog.category_*` / `catalog.product_*` / `catalog.product_type_*` CRUD is
+ * business activity, not security activity. The one security-significant catalog
+ * action — `catalog.template_applied` (establishes a tenant's initial capability
+ * configuration) — is matched exactly below. `tenant.catalog_capability_changed`
+ * stays covered by the `tenant.` prefix.
+ */
 export const SECURITY_ACTION_PREFIXES = [
   'tenant.',
   'role.',
@@ -70,8 +99,17 @@ export const SECURITY_ACTION_PREFIXES = [
   'provider_credential.',
   'session.',
   'IMPERSONATION:',
-  // task 3.1 — `catalog.template_applied` is security-significant (it establishes
-  // a tenant's initial capability configuration). `tenant.catalog_capability_changed`
-  // is already covered by the `tenant.` prefix.
-  'catalog.',
 ] as const;
+
+/** Security-event actions matched exactly (not by prefix). Mirrors the
+ *  `a."action" = '…'` clauses in the `security_event` view. */
+export const SECURITY_ACTION_EXACT: ReadonlySet<string> = new Set<string>([
+  'catalog.template_applied',
+]);
+
+/** Whether an action surfaces in the `security_event` view. */
+export function isSecurityEventAction(action: string): boolean {
+  return (
+    SECURITY_ACTION_PREFIXES.some((p) => action.startsWith(p)) || SECURITY_ACTION_EXACT.has(action)
+  );
+}

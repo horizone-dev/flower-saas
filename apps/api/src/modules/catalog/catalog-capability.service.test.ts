@@ -71,6 +71,51 @@ describe('CatalogCapabilityService (task 3.1)', () => {
     expect(snap.get('delivery')).toEqual({ enabled: false, config: null });
   });
 
+  it('assertEntitledFor: reuses ctx.entitlements + MODULE_NOT_ENTITLED (403); no-op when unmapped', () => {
+    const svc = new CatalogCapabilityService(fakeRepo({ rows: [] }));
+    // strategy.stocked has no required entitlement -> always ok
+    runWithContext(ctx([]), () => svc.assertEntitledFor('strategy.stocked'));
+    // strategy.bom requires production_bom
+    let err: unknown;
+    try {
+      runWithContext(ctx([]), () => svc.assertEntitledFor('strategy.bom'));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toMatchObject({ code: 'MODULE_NOT_ENTITLED', status: 403 });
+    expect(err).toBeInstanceOf(DomainError);
+    // granted -> no throw
+    runWithContext(ctx(['production_bom']), () => svc.assertEntitledFor('strategy.bom'));
+  });
+
+  it('assertStrategyAllowed: capability first (409), then entitlement (403) — errors stay distinct', async () => {
+    const disabled = new CatalogCapabilityService(fakeRepo({ rows: [] }));
+    // BOM disabled + unentitled -> the CAPABILITY error wins (checked first)
+    await expect(
+      runWithContext(ctx([]), () => disabled.assertStrategyAllowed('BOM')),
+    ).rejects.toMatchObject({ code: 'CAPABILITY_NOT_ENABLED', status: 409 });
+
+    const bomOn = new CatalogCapabilityService(
+      fakeRepo({ rows: [{ capabilityKey: 'strategy.bom', enabled: true, config: null }] }),
+    );
+    // BOM enabled but not entitled -> the ENTITLEMENT error
+    await expect(
+      runWithContext(ctx([]), () => bomOn.assertStrategyAllowed('BOM')),
+    ).rejects.toMatchObject({ code: 'MODULE_NOT_ENTITLED', status: 403 });
+    // BOM enabled + entitled -> ok
+    await expect(
+      runWithContext(ctx(['production_bom']), () => bomOn.assertStrategyAllowed('BOM')),
+    ).resolves.toBeUndefined();
+
+    // STOCKED needs only the capability (no entitlement)
+    const stockedOn = new CatalogCapabilityService(
+      fakeRepo({ rows: [{ capabilityKey: 'strategy.stocked', enabled: true, config: null }] }),
+    );
+    await expect(
+      runWithContext(ctx([]), () => stockedOn.assertStrategyAllowed('STOCKED')),
+    ).resolves.toBeUndefined();
+  });
+
   it('ownView: inert is computed from entitlements — a capability row is never rewritten', async () => {
     const svc = new CatalogCapabilityService(
       fakeRepo({

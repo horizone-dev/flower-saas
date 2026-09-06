@@ -119,4 +119,50 @@ describe('@flower/api-client', () => {
     });
     expect(JSON.parse(String(init.body)).slug).toBe('acme');
   });
+
+  it('catalog: createProduct sends Idempotency-Key; updateProduct sends If-Match; activate sends both (task 3.2)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ id: 'p1', version: 2, fulfilmentStrategy: 'STOCKED' }),
+    );
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    await client.createProduct(
+      { categoryId: 'c1', nameEn: 'Rose', fulfilmentStrategy: 'STOCKED' },
+      'idem-prod-1',
+    );
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({
+      'idempotency-key': 'idem-prod-1',
+    });
+    expect(fetchMock.mock.calls[0]![1]!.headers).not.toHaveProperty('if-match');
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('http://api.test/v1/catalog/products');
+
+    await client.updateProduct('p1', { nameEn: 'Red Rose' }, 3);
+    const upd = fetchMock.mock.calls[1]![1]!;
+    expect(upd.method).toBe('PUT');
+    expect(upd.headers).toMatchObject({ 'if-match': '"3"' });
+    expect(upd.headers).not.toHaveProperty('idempotency-key');
+
+    await client.activateProduct('p1', 3, 'idem-act-1');
+    const act = fetchMock.mock.calls[2]![1]!;
+    expect(act.method).toBe('POST');
+    expect(act.headers).toMatchObject({ 'if-match': '"3"', 'idempotency-key': 'idem-act-1' });
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(
+      'http://api.test/v1/catalog/products/p1/activate',
+    );
+  });
+
+  it('catalog: listProducts builds a query string and drops undefined params', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ data: [], nextCursor: null, hasNextPage: false }),
+    );
+    const client = createApiClient({ baseUrl: 'http://api.test', fetch: fetchMock });
+    await client.listProducts({ status: 'ACTIVE', q: 'rose', limit: 20 });
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://api.test/v1/catalog/products?status=ACTIVE&q=rose&limit=20',
+    );
+  });
 });

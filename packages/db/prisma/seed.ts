@@ -15,6 +15,7 @@
 import 'dotenv/config';
 import {
   PHASE_1_TENANT_PERMISSIONS,
+  PHASE_3_2_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   PERMISSION_GROUP_OF,
 } from '@flower/permissions';
@@ -58,17 +59,26 @@ async function main(): Promise<void> {
     });
 
     // ── permission registry ────────────────────────────────────────────────
-    for (const key of PHASE_1_TENANT_PERMISSIONS) {
+    const TENANT_REGISTRY: readonly { key: string; phase: number }[] = [
+      ...PHASE_1_TENANT_PERMISSIONS.map((key) => ({ key, phase: 1 })),
+      // task 3.2 — the two foundational catalog keys (owner R-1). Existing DBs
+      // also get these via the task 3.2 migration; this covers a fresh platform.
+      ...PHASE_3_2_TENANT_PERMISSIONS.map((key) => ({ key, phase: 3 })),
+    ];
+    for (const { key, phase } of TENANT_REGISTRY) {
       await prisma.permissionRegistry.upsert({
         where: { key },
         create: {
           key,
           realm: 'TENANT',
-          groupKey: PERMISSION_GROUP_OF[key],
+          groupKey: PERMISSION_GROUP_OF[key as keyof typeof PERMISSION_GROUP_OF],
           description: humanize(key),
-          addedInPhase: 1,
+          addedInPhase: phase,
         },
-        update: { realm: 'TENANT', groupKey: PERMISSION_GROUP_OF[key] },
+        update: {
+          realm: 'TENANT',
+          groupKey: PERMISSION_GROUP_OF[key as keyof typeof PERMISSION_GROUP_OF],
+        },
       });
     }
     for (const key of PLATFORM_PERMISSIONS) {

@@ -273,6 +273,87 @@ export interface CatalogCapabilityChange {
   config?: unknown;
 }
 
+// ── generic catalog core (task 3.2) ─────────────────────────────────────────
+export type FulfilmentStrategy = 'STOCKED' | 'BOM' | 'CUSTOM';
+
+export interface CategoryRow {
+  id: string;
+  parentId: string | null;
+  slug: string;
+  nameEn: string;
+  nameAr: string | null;
+  sortOrder: number;
+  status: 'ACTIVE' | 'ARCHIVED';
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ProductTypeRow {
+  id: string;
+  key: string;
+  nameEn: string;
+  nameAr: string | null;
+  status: 'ACTIVE' | 'ARCHIVED';
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ProductRow {
+  id: string;
+  categoryId: string;
+  productTypeId: string | null;
+  slug: string;
+  nameEn: string;
+  nameAr: string | null;
+  description: string | null;
+  fulfilmentStrategy: FulfilmentStrategy;
+  hidePrice: boolean;
+  status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ProductPage {
+  data: ProductRow[];
+  nextCursor: string | null;
+  hasNextPage: boolean;
+}
+export interface CategoryCreateInput {
+  parentId?: string | null;
+  slug?: string;
+  nameEn: string;
+  nameAr?: string | null;
+  sortOrder?: number;
+}
+export interface CategoryUpdateInput {
+  parentId?: string | null;
+  slug?: string;
+  nameEn?: string;
+  nameAr?: string | null;
+  sortOrder?: number;
+}
+export interface ProductCreateInput {
+  categoryId: string;
+  productTypeId?: string | null;
+  slug?: string;
+  nameEn: string;
+  nameAr?: string | null;
+  description?: string | null;
+  fulfilmentStrategy: FulfilmentStrategy;
+  hidePrice?: boolean;
+}
+export interface ProductUpdateInput {
+  categoryId?: string;
+  productTypeId?: string | null;
+  slug?: string;
+  nameEn?: string;
+  nameAr?: string | null;
+  description?: string | null;
+  hidePrice?: boolean;
+  /** only honoured while the product is a DRAFT */
+  fulfilmentStrategy?: FulfilmentStrategy;
+}
+
 export interface ProvisionTenantResponse {
   tenantId: string;
   companyId: string;
@@ -495,6 +576,173 @@ export class ApiClient {
       (raw) => raw as TenantCatalogCapabilityState,
     );
   }
+  // ── generic catalog core (task 3.2) — tenant realm ───────────────────────
+  // `catalog:view` reads / `catalog:manage` writes. POST → Idempotency-Key;
+  // PUT / DELETE → If-Match; activate / archive → BOTH.
+  listCategories(query?: {
+    status?: 'ACTIVE' | 'ARCHIVED';
+    parentId?: string;
+    q?: string;
+  }): Promise<CategoryRow[]> {
+    return this.get('/v1/catalog/categories', query);
+  }
+  getCategory(id: string): Promise<CategoryRow> {
+    return this.get(`/v1/catalog/categories/${id}`);
+  }
+  createCategory(input: CategoryCreateInput, idempotencyKey: string): Promise<CategoryRow> {
+    return this.send('POST', '/v1/catalog/categories', input, idempotencyKey);
+  }
+  updateCategory(
+    id: string,
+    input: CategoryUpdateInput,
+    expectedVersion: number,
+  ): Promise<CategoryRow> {
+    return this.call(
+      `/v1/catalog/categories/${id}`,
+      { method: 'PUT', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as CategoryRow,
+    );
+  }
+  archiveCategory(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<CategoryRow> {
+    return this.call(
+      `/v1/catalog/categories/${id}/archive`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as CategoryRow,
+    );
+  }
+  activateCategory(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<CategoryRow> {
+    return this.call(
+      `/v1/catalog/categories/${id}/activate`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as CategoryRow,
+    );
+  }
+  deleteCategory(id: string, expectedVersion: number): Promise<{ status: 'deleted' }> {
+    return this.call(
+      `/v1/catalog/categories/${id}`,
+      { method: 'DELETE', ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as { status: 'deleted' },
+    );
+  }
+
+  listProductTypes(query?: {
+    status?: 'ACTIVE' | 'ARCHIVED';
+    q?: string;
+  }): Promise<ProductTypeRow[]> {
+    return this.get('/v1/catalog/product-types', query);
+  }
+  getProductType(id: string): Promise<ProductTypeRow> {
+    return this.get(`/v1/catalog/product-types/${id}`);
+  }
+  createProductType(
+    input: { key: string; nameEn: string; nameAr?: string | null },
+    idempotencyKey: string,
+  ): Promise<ProductTypeRow> {
+    return this.send('POST', '/v1/catalog/product-types', input, idempotencyKey);
+  }
+  updateProductType(
+    id: string,
+    input: { nameEn?: string; nameAr?: string | null },
+    expectedVersion: number,
+  ): Promise<ProductTypeRow> {
+    return this.call(
+      `/v1/catalog/product-types/${id}`,
+      { method: 'PUT', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as ProductTypeRow,
+    );
+  }
+  archiveProductType(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<ProductTypeRow> {
+    return this.call(
+      `/v1/catalog/product-types/${id}/archive`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as ProductTypeRow,
+    );
+  }
+  activateProductType(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<ProductTypeRow> {
+    return this.call(
+      `/v1/catalog/product-types/${id}/activate`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as ProductTypeRow,
+    );
+  }
+  deleteProductType(id: string, expectedVersion: number): Promise<{ status: 'deleted' }> {
+    return this.call(
+      `/v1/catalog/product-types/${id}`,
+      { method: 'DELETE', ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as { status: 'deleted' },
+    );
+  }
+
+  listProducts(query?: {
+    status?: 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+    categoryId?: string;
+    productTypeId?: string;
+    fulfilmentStrategy?: FulfilmentStrategy;
+    q?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<ProductPage> {
+    return this.get('/v1/catalog/products', query);
+  }
+  getProduct(id: string): Promise<ProductRow> {
+    return this.get(`/v1/catalog/products/${id}`);
+  }
+  createProduct(input: ProductCreateInput, idempotencyKey: string): Promise<ProductRow> {
+    return this.send('POST', '/v1/catalog/products', input, idempotencyKey);
+  }
+  updateProduct(
+    id: string,
+    input: ProductUpdateInput,
+    expectedVersion: number,
+  ): Promise<ProductRow> {
+    return this.call(
+      `/v1/catalog/products/${id}`,
+      { method: 'PUT', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as ProductRow,
+    );
+  }
+  activateProduct(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<ProductRow> {
+    return this.call(
+      `/v1/catalog/products/${id}/activate`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as ProductRow,
+    );
+  }
+  archiveProduct(id: string, expectedVersion: number, idempotencyKey: string): Promise<ProductRow> {
+    return this.call(
+      `/v1/catalog/products/${id}/archive`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as ProductRow,
+    );
+  }
+  deleteProduct(id: string, expectedVersion: number): Promise<{ status: 'deleted' }> {
+    return this.call(
+      `/v1/catalog/products/${id}`,
+      { method: 'DELETE', ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as { status: 'deleted' },
+    );
+  }
+
   overrideTenantLimit(
     tenantId: string,
     limitKey: string,

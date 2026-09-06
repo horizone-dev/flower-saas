@@ -498,7 +498,8 @@ async function seed(url: string): Promise<void> {
       INSERT INTO permission_registry (key, realm, "groupKey", description, "addedInPhase")
       VALUES ('catalog:view','TENANT','catalog','v',1),('users:view','TENANT','admin','v',1),
              ('platform:tenants:view','PLATFORM','platform','v',1),
-             ('platform:catalog_capability:manage','PLATFORM','platform','v',1);
+             ('platform:catalog_capability:manage','PLATFORM','platform','v',1)
+      ON CONFLICT (key) DO NOTHING;
       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'x');
       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
       VALUES ('AE', 'United Arab Emirates', 'x', 'gcc', 'AED', 'SAT_SUN', true, now());

@@ -1021,3 +1021,118 @@ model TenantCatalogCapability {
   @@index([tenantId])
   @@map("tenant_catalog_capability")
 }
+
+// ═════════ generic catalog core — Category / Product Type / Product (task 3.2) ═
+// docs/phase-3/PHASE-3-PLAN.md §C.3 / §A.3. ONE generic catalog definition layer
+// for every business type — NO FlowerProduct / PerfumeProduct / BakeryProduct
+// entity, table or service (HG3-GENERIC-CATALOG). Behaviour is driven ONLY by
+// `product.fulfilmentStrategy` (STOCKED | BOM | CUSTOM) + the enabled
+// `tenant_catalog_capability` rows — `tenant.businessTypeKey` is NEVER read to
+// branch behaviour (HG3-NO-BT-BRANCH). Tenant-scoped, company-neutral,
+// branch-neutral, currency-neutral: no companyId / branchId / price / currency /
+// stock / media / tax column (HG3-CATALOG-SCOPE-SEPARATION / D2-7). Attributes →
+// 3.3, variants → 3.4, identifiers → 3.5, UOM → 3.6, pricing → 3.7 / 3.8,
+// tax-category → 3.9, media → later, inventory → Phase 5.
+//
+// Tenant-safe FKs (owner §9): every intra-catalog reference is ALSO enforced as a
+// composite `(tenantId, xId) → x(tenantId, id)` FK in the migration (backed by a
+// `UNIQUE (tenantId, id)` on the referenced table) so the DB itself rejects a
+// tenant-A row that points at a tenant-B category / product type. Prisma models
+// the single-column relation for client ergonomics; the migration adds both.
+
+/// A tenant catalog category. Self-referential tree — max depth 5, enforced by
+/// the service (root = depth 1). Company-neutral. `ACTIVE` ↔ `ARCHIVED` only
+/// (no `DRAFT` — plan §C.3). Archive never cascades to children (owner §3).
+model Category {
+  id       String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId String  @db.Uuid
+  /// nullable ⇒ a root category. The tenant-safe self FK `(tenantId, parentId) →
+  /// category(tenantId, id)` is added in the migration.
+  parentId String? @db.Uuid
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children Category[] @relation("CategoryTree")
+  /// url-safe; sibling-unique via `(tenantId, parentId, slug)`, root-unique via a
+  /// partial `(tenantId, slug) WHERE parentId IS NULL` index (migration).
+  /// `^[a-z0-9][a-z0-9-]{0,62}$` (CHECK).
+  slug      String
+  nameEn    String
+  /// optional — an absent Arabic name is NULL, never a fake empty string (owner §8)
+  nameAr    String?
+  sortOrder Int      @default(0)
+  /// ACTIVE | ARCHIVED (CHECK)
+  status    String   @default("ACTIVE")
+  /// optimistic-concurrency counter — every successful update / status change +1
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  products Product[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, parentId, slug])
+  @@index([tenantId, parentId])
+  @@index([tenantId, status])
+  @@map("category")
+}
+
+/// A tenant-defined reusable classification (`PERFUME`, `CUT_FLOWER`, `CAKE`,
+/// `GENERAL` …). Descriptive metadata ONLY — it is never a behaviour source and
+/// never a hardcoded enum (owner §4 / §10). Task 3.3 attaches typed attribute
+/// definitions to a product type; Task 3.2 stores nothing behavioural on it.
+model ProductType {
+  id       String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId String  @db.Uuid
+  /// tenant-defined key — `^[A-Z][A-Z0-9_]{1,63}$` (CHECK). Immutable after create.
+  key       String
+  nameEn    String
+  nameAr    String?
+  /// ACTIVE | ARCHIVED (CHECK)
+  status    String   @default("ACTIVE")
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  products Product[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, key])
+  @@index([tenantId, status])
+  @@map("product_type")
+}
+
+/// A tenant catalog product — the generic "what exists to sell". No money /
+/// company / branch / stock / media / tax / attribute / variant / UOM / identifier
+/// column (owner §11 / HG3-CATALOG-SCOPE-SEPARATION). `fulfilmentStrategy` is
+/// STORED only — no BOM / recipe / composition / production / consumption logic
+/// (owner §4). Lifecycle: DRAFT → ACTIVE ↔ ARCHIVED (never ACTIVE → DRAFT).
+/// `status = ACTIVE` means "this catalog definition is active" — NOT "sellable"
+/// (owner §7); sellability is derived later from price + variant + availability.
+model Product {
+  id            String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String       @db.Uuid
+  categoryId    String       @db.Uuid
+  category      Category     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  productTypeId String?      @db.Uuid
+  productType   ProductType? @relation(fields: [productTypeId], references: [id], onDelete: Restrict)
+  /// tenant-unique; `^[a-z0-9][a-z0-9-]{0,127}$` (CHECK)
+  slug        String
+  nameEn      String
+  nameAr      String?
+  description String?
+  /// STOCKED | BOM | CUSTOM (CHECK). Mutable ONLY while status = DRAFT (owner §5);
+  /// each change re-runs the capability + entitlement check in the service.
+  fulfilmentStrategy String
+  /// merchandising display flag — NOT a price (plan §C.3)
+  hidePrice Boolean @default(false)
+  /// DRAFT | ACTIVE | ARCHIVED (CHECK)
+  status    String  @default("DRAFT")
+  version   Int     @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, productTypeId])
+  @@index([tenantId, status])
+  @@map("product")
+}

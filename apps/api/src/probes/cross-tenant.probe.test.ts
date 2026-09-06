@@ -9,7 +9,11 @@ import {
   type IsolationProbeCase,
   type ProbeOutcome,
 } from '@flower/testing';
-import { PHASE_1_TENANT_PERMISSIONS, PLATFORM_PERMISSIONS } from '@flower/permissions';
+import {
+  PHASE_1_TENANT_PERMISSIONS,
+  PHASE_3_2_TENANT_PERMISSIONS,
+  PLATFORM_PERMISSIONS,
+} from '@flower/permissions';
 import pg from 'pg';
 import { AppModule } from '../app.module.js';
 import { AllExceptionsFilter } from '../common/errors/all-exceptions.filter.js';
@@ -47,6 +51,8 @@ describe('cross-tenant isolation probe suite', () => {
     ownerId: '',
     roleId: '',
     credId: '',
+    categoryId: '',
+    productId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -146,14 +152,14 @@ describe('cross-tenant isolation probe suite', () => {
       tenantId: A.tenantId,
       userId: A.ownerId,
       accountType: 'OWNER',
-      permissions: [...PHASE_1_TENANT_PERMISSIONS],
+      permissions: [...PHASE_1_TENANT_PERMISSIONS, ...PHASE_3_2_TENANT_PERMISSIONS],
     });
     ownerBTok = await mint('probe-owner-b', {
       realm: 'tenant',
       tenantId: B.tenantId,
       userId: B.ownerId,
       accountType: 'OWNER',
-      permissions: [...PHASE_1_TENANT_PERMISSIONS],
+      permissions: [...PHASE_1_TENANT_PERMISSIONS, ...PHASE_3_2_TENANT_PERMISSIONS],
     });
 
     // seed a couple of A-owned resources to probe for
@@ -170,6 +176,31 @@ describe('cross-tenant isolation probe suite', () => {
         mode: 'TEST',
         secret: 'sk_test_a_only_9f8e7d6c000',
       })
+    ).json().id;
+
+    // task 3.2 — an A-owned catalog category + product to probe cross-tenant
+    A.categoryId = (
+      await send(
+        'POST',
+        '/v1/catalog/categories',
+        ownerATok,
+        { slug: 'a-only-category', nameEn: 'A only category' },
+        { 'idempotency-key': 'probe-cat-a-0001' },
+      )
+    ).json().id;
+    A.productId = (
+      await send(
+        'POST',
+        '/v1/catalog/products',
+        ownerATok,
+        {
+          categoryId: A.categoryId,
+          slug: 'a-only-product',
+          nameEn: 'A-ONLY-PRODUCT-SECRET',
+          fulfilmentStrategy: 'STOCKED',
+        },
+        { 'idempotency-key': 'probe-prod-a-0001' },
+      )
     ).json().id;
   }, 300_000);
 
@@ -247,11 +278,15 @@ describe('cross-tenant isolation probe suite', () => {
     url: string,
     token: string | null,
     body?: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
   ) =>
     app.inject({
       method,
       url,
-      ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
+      headers: {
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(extraHeaders ?? {}),
+      },
       ...(body ? { payload: body } : {}),
     });
 
@@ -262,9 +297,10 @@ describe('cross-tenant isolation probe suite', () => {
       url: string,
       token: string,
       body?: Record<string, unknown>,
+      extraHeaders?: Record<string, string>,
     ) =>
     async (): Promise<number> =>
-      (await send(method, url, token, body)).statusCode;
+      (await send(method, url, token, body, extraHeaders)).statusCode;
 
   // ═══════════════════════ tenant axis — B attacks A ══════════════════════════
   it('tenant axis: tenant B cannot reach tenant A resources', async () => {
@@ -365,6 +401,82 @@ describe('cross-tenant isolation probe suite', () => {
           return {
             status: res.statusCode,
             leaked: [A.tenantId, A.companyId, A.branchId].some((id) => blob.includes(id)),
+          };
+        },
+      },
+      // ── task 3.2: the generic catalog core (category / product) is tenant-
+      // scoped through RLS + tenant-safe composite FKs. B cannot read, mutate,
+      // archive or delete A's catalog rows, and lists/search never leak them.
+      {
+        name: 'GET A category by id as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus('GET', `/v1/catalog/categories/${A.categoryId}`, ownerBTok),
+      },
+      {
+        name: 'GET A product by id as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus('GET', `/v1/catalog/products/${A.productId}`, ownerBTok),
+      },
+      {
+        name: 'PUT A product as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/products/${A.productId}`,
+          ownerBTok,
+          { nameEn: 'pwned-by-B' },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'DELETE A category as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'DELETE',
+          `/v1/catalog/categories/${A.categoryId}`,
+          ownerBTok,
+          undefined,
+          {
+            'if-match': '"1"',
+          },
+        ),
+      },
+      {
+        name: 'POST a B product pointing at A’s category (tenant-safe FK)',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          '/v1/catalog/products',
+          ownerBTok,
+          {
+            categoryId: A.categoryId,
+            slug: 'b-inject',
+            nameEn: 'x',
+            fulfilmentStrategy: 'STOCKED',
+          },
+          { 'idempotency-key': 'probe-b-inject-0001' },
+        ),
+      },
+      {
+        name: 'catalog lists + name search never contain A rows',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const [cats, prods, search] = await Promise.all([
+            send('GET', '/v1/catalog/categories', ownerBTok),
+            send('GET', '/v1/catalog/products', ownerBTok),
+            send('GET', '/v1/catalog/products?q=A-ONLY-PRODUCT-SECRET', ownerBTok),
+          ]);
+          const blob = JSON.stringify([cats.json(), prods.json(), search.json()]);
+          return {
+            status: 200,
+            leaked:
+              [A.categoryId, A.productId].some((id) => blob.includes(id)) ||
+              blob.includes('A-ONLY-PRODUCT-SECRET'),
           };
         },
       },
@@ -631,10 +743,12 @@ async function seed(url: string): Promise<void> {
              ('${PLAN_V}', 'max_pos_terminals', 5), ('${PLAN_V}', 'max_sessions_per_user', 20);
       INSERT INTO platform_user (id, email, name, "updatedAt")
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
+      -- catalog:view / catalog:manage are registered by the task 3.2 migration.
       INSERT INTO permission_registry (key, realm, "groupKey", description, "addedInPhase")
       VALUES ('users:view','TENANT','admin','v',1),('users:manage','TENANT','admin','v',1),
              ('roles:manage','TENANT','admin','v',1),('audit:view','TENANT','admin','v',1),
-             ('settings:branch:manage','TENANT','admin','v',1),('settings:tenant:manage','TENANT','admin','v',1);
+             ('settings:branch:manage','TENANT','admin','v',1),('settings:tenant:manage','TENANT','admin','v',1)
+      ON CONFLICT (key) DO NOTHING;
       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
       VALUES ('AED', 2, 'AED', 'UAE Dirham', 'درهم إماراتي');
       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")

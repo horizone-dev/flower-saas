@@ -44,6 +44,10 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   'translation',
   // Phase 3 (task 3.1) — the only runtime catalog-capability-state table
   'tenant_catalog_capability',
+  // Phase 3 (task 3.2) — generic catalog core (tenant-scoped, company-neutral)
+  'category',
+  'product_type',
+  'product',
 ]);
 
 /**
