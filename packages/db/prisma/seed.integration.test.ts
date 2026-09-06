@@ -122,4 +122,16 @@ describe('packages/db — Business-Type template seed (task 3.1)', () => {
     );
     expect(rows[0]?.realm).toBe('PLATFORM');
   });
+
+  it('task 3.2 — catalog:view / catalog:manage are registered as TENANT keys (owner R-1)', async () => {
+    const { rows } = await pool.query<{ key: string; realm: string; addedInPhase: number }>(
+      `SELECT key, realm, "addedInPhase" FROM permission_registry
+        WHERE key = ANY(ARRAY['catalog:view','catalog:manage']) ORDER BY key`,
+    );
+    expect(rows.map((r) => r.key)).toEqual(['catalog:manage', 'catalog:view']);
+    for (const r of rows) {
+      expect(r.realm).toBe('TENANT');
+      expect(r.addedInPhase).toBe(3);
+    }
+  });
 });

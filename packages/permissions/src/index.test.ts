@@ -4,7 +4,9 @@ import {
   ALL_PERMISSIONS,
   PERMISSION_GROUP_OF,
   PHASE_1_TENANT_PERMISSIONS,
+  PHASE_3_2_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
+  MODULE_OF_PERMISSION,
   STEP_UP_PERMISSIONS,
   requiresStepUp,
   resolveEffectivePermissions,
@@ -69,6 +71,22 @@ describe('@flower/permissions registry', () => {
     expect(requiresStepUp('platform:catalog_capability:manage')).toBe(true);
     // it is distinct from the entitlement permission (delegable independently)
     expect('platform:catalog_capability:manage').not.toBe('platform:entitlements:manage');
+  });
+
+  // ── task 3.2 — HG3-PERMISSION-STABILITY ─────────────────────────────────
+  it('task 3.2 activates ONLY the existing catalog:view / catalog:manage keys', () => {
+    expect([...PHASE_3_2_TENANT_PERMISSIONS]).toEqual(['catalog:view', 'catalog:manage']);
+    for (const k of PHASE_3_2_TENANT_PERMISSIONS) {
+      expect(isPermissionKey(k), k).toBe(true);
+      expect(PERMISSION_GROUP_OF[k]).toBe('catalog');
+    }
+    // catalog is a FOUNDATION module — not entitlement-gated (E.1). The per-
+    // strategy production_bom / custom_composition check lives in the service.
+    expect(MODULE_OF_PERMISSION['catalog:view']).toBeUndefined();
+    expect(MODULE_OF_PERMISSION['catalog:manage']).toBeUndefined();
+    // catalog writes are not money / permission / secret — no step-up (owner)
+    expect(requiresStepUp('catalog:manage')).toBe(false);
+    expect(requiresStepUp('catalog:view')).toBe(false);
   });
 
   it('identifiers:manage stays the one canonical key, in the inventory group (D2-6)', () => {

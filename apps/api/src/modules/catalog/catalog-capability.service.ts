@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import {
   CATALOG_CAPABILITY_KEYS,
+  CAPABILITY_OF_STRATEGY,
   CAPABILITY_REQUIRED_ENTITLEMENT,
   type CapabilityKey,
+  type FulfilmentStrategy,
 } from '@flower/shared-types';
 import { getContext } from '../../common/context/index.js';
 import { DomainError } from '../../common/errors/domain-error.js';
@@ -43,6 +45,43 @@ export class CatalogCapabilityService {
         409,
       );
     }
+  }
+
+  /**
+   * The entitlement half of the "usable" contract (spec §D). Reuses the canonical
+   * entitlement mechanism — the session-resolved `ctx.entitlements` set and the
+   * shared `CAPABILITY_REQUIRED_ENTITLEMENT` map — and throws the SAME
+   * `MODULE_NOT_ENTITLED` (403) domain error the guard pipeline emits. NOT a
+   * parallel entitlement architecture (owner §6). A capability with no required
+   * entitlement is a no-op here.
+   *
+   * Deliberately distinct from `assertEnabled` (409 `CAPABILITY_NOT_ENABLED`):
+   * a disabled capability and an un-entitled module are different failures.
+   */
+  assertEntitledFor(key: CapabilityKey): void {
+    const mod = CAPABILITY_REQUIRED_ENTITLEMENT[key];
+    if (mod === undefined) return;
+    const entitled = getContext()?.entitlements ?? new Set<string>();
+    if (!entitled.has(mod)) {
+      throw new DomainError(
+        'MODULE_NOT_ENTITLED',
+        `module "${mod}" is not enabled for this tenant`,
+        403,
+      );
+    }
+  }
+
+  /**
+   * The full gate a `fulfilment_strategy` must pass on product create / a DRAFT
+   * strategy change / activate (owner §5 / §6): the strategy's capability must be
+   * enabled (409) AND its module entitled (403). Checked in that order so a
+   * disabled strategy always reports `CAPABILITY_NOT_ENABLED`. Business Type is
+   * NEVER consulted.
+   */
+  async assertStrategyAllowed(strategy: FulfilmentStrategy): Promise<void> {
+    const key = CAPABILITY_OF_STRATEGY[strategy];
+    await this.assertEnabled(key);
+    this.assertEntitledFor(key);
   }
 
   /** The full 16-key snapshot (missing rows -> `{ enabled: false, config: null }`). */

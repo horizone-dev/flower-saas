@@ -97,7 +97,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_idempotency_claim_token'))).toBe(true);
     expect(names.some((n) => /_outbox_dispatcher$/.test(n))).toBe(true);
     expect(names.some((n) => /_outbox_dispatcher_least_privilege$/.test(n))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_capability_foundation$/);
+    expect(names.some((n) => n.endsWith('_catalog_capability_foundation'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_core$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -774,18 +775,21 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       for (const r of rls.rows) expect(r.rls, `${r.relname} must be RLS-exempt`).toBe(false);
     });
 
-    it('no Product / Category / Variant / UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
+    it('no Variant / UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
       const { rows } = await pool.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
       );
       const present = new Set(rows.map((r) => r.tablename));
+      // product / category / product_type are created by task 3.2 (below) — the
+      // rest stay forbidden through Phase 3a.
       for (const forbidden of [
-        'product',
-        'category',
-        'product_type',
         'attribute_definition',
+        'attribute_option',
+        'product_attribute_value',
         'variant',
         'option_group',
+        'option_value',
+        'variant_option_value',
         'item_identifier',
         'uom',
         'uom_conversion',
@@ -801,7 +805,370 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         'payment',
         'journal_entry',
       ]) {
-        expect(present.has(forbidden), `${forbidden} must NOT exist in task 3.1`).toBe(false);
+        expect(present.has(forbidden), `${forbidden} must NOT exist yet`).toBe(false);
+      }
+    });
+  });
+
+  // ── task 3.2 — generic catalog core (Category / Product Type / Product) ────
+  // docs/phase-3/PHASE-3-PLAN.md §C.3. Tenant-safe composite FKs + RLS + the
+  // narrowed security_event view + the built-in system-role backfill.
+  describe('generic catalog core schema (task 3.2)', () => {
+    const CAT_A = '0000aaaa-0000-7000-8000-00000000ca11';
+    const CAT_B = '0000bbbb-0000-7000-8000-00000000cb22';
+
+    it('creates exactly category / product_type / product — no other new table', async () => {
+      const cols = async (table: string): Promise<Record<string, string>> => {
+        const { rows } = await pool.query<{ column_name: string; is_nullable: string }>(
+          `SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = $1`,
+          [table],
+        );
+        return Object.fromEntries(rows.map((r) => [r.column_name, r.is_nullable]));
+      };
+
+      const cat = await cols('category');
+      expect(Object.keys(cat).sort()).toEqual(
+        [
+          'id',
+          'tenantId',
+          'parentId',
+          'slug',
+          'nameEn',
+          'nameAr',
+          'sortOrder',
+          'status',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      expect(cat['parentId']).toBe('YES');
+      expect(cat['nameAr']).toBe('YES');
+      expect(cat['nameEn']).toBe('NO');
+
+      const pt = await cols('product_type');
+      expect(Object.keys(pt).sort()).toEqual(
+        [
+          'id',
+          'tenantId',
+          'key',
+          'nameEn',
+          'nameAr',
+          'status',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      // owner R-4 — NO behaviour column on product_type
+      expect(pt['defaultFulfilmentStrategy']).toBeUndefined();
+      expect(pt['fulfilmentStrategy']).toBeUndefined();
+
+      const p = await cols('product');
+      expect(Object.keys(p).sort()).toEqual(
+        [
+          'id',
+          'tenantId',
+          'categoryId',
+          'productTypeId',
+          'slug',
+          'nameEn',
+          'nameAr',
+          'description',
+          'fulfilmentStrategy',
+          'hidePrice',
+          'status',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      // owner §11 / HG3-CATALOG-SCOPE-SEPARATION — no money / company / branch /
+      // stock / media / tax / attribute / variant / uom / identifier column
+      for (const forbidden of [
+        'companyId',
+        'branchId',
+        'price',
+        'priceMinor',
+        'currency',
+        'currencyCode',
+        'stock',
+        'quantity',
+        'inventoryBalance',
+        'media',
+        'mediaJson',
+        'taxCategory',
+        'taxCategoryKey',
+      ]) {
+        expect(p[forbidden], `product.${forbidden} must not exist`).toBeUndefined();
+      }
+    });
+
+    it('pg_trgm is installed with GIN trigram indexes on product name(s)', async () => {
+      const ext = await pool.query(`SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'`);
+      expect(ext.rowCount).toBe(1);
+      const idx = await pool.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes WHERE tablename = 'product' AND indexname LIKE '%trgm%'`,
+      );
+      const defs = idx.rows.map((r) => r.indexdef).join('\n');
+      expect(defs).toMatch(/gin.*"nameEn" gin_trgm_ops/is);
+      expect(defs).toMatch(/gin.*"nameAr" gin_trgm_ops/is);
+    });
+
+    it('every new table has RLS ENABLE + FORCE + a policy; no-GUC → zero rows', async () => {
+      const meta = await pool.query<{
+        relname: string;
+        rls: boolean;
+        force: boolean;
+        policies: number;
+      }>(
+        `SELECT c.relname, c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
+                (SELECT count(*) FROM pg_policies p WHERE p.tablename = c.relname) AS policies
+           FROM pg_class c WHERE c.relname = ANY($1)`,
+        [['category', 'product_type', 'product']],
+      );
+      expect(meta.rows).toHaveLength(3);
+      for (const r of meta.rows) {
+        expect(r.rls, `${r.relname} RLS`).toBe(true);
+        expect(r.force, `${r.relname} FORCE`).toBe(true);
+        expect(Number(r.policies), `${r.relname} policy`).toBeGreaterThanOrEqual(1);
+      }
+
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        for (const t of ['category', 'product_type', 'product']) {
+          const n = Number((await c.query(`SELECT count(*)::int AS n FROM "${t}"`)).rows[0].n);
+          expect(n, `${t} with no GUC`).toBe(0);
+        }
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+    });
+
+    it('flower_app has full tenant-scoped DML (NOT SELECT-only — these are Owner-written)', async () => {
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        await c.query(`SELECT set_config('app.tenant_id', $1, false)`, [TENANT_A]);
+        const ins = await c.query(
+          `INSERT INTO "category" ("tenantId","slug","nameEn","updatedAt")
+           VALUES ($1,'app-write-test','App write', now()) RETURNING id`,
+          [TENANT_A],
+        );
+        expect(ins.rowCount).toBe(1);
+        await c.query(`DELETE FROM "category" WHERE id = $1`, [ins.rows[0].id]);
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        await c.query(`SELECT set_config('app.tenant_id', '', false)`).catch(() => {});
+        c.release();
+      }
+    });
+
+    it('TENANT-SAFE composite FKs: the DB rejects a cross-tenant category parent / product ref', async () => {
+      // seed a category in each tenant (superuser pool bypasses RLS)
+      await pool.query(
+        `INSERT INTO "category" (id,"tenantId","slug","nameEn","updatedAt")
+         VALUES ($1,$2,'root-a','Root A', now()), ($3,$4,'root-b','Root B', now())
+         ON CONFLICT (id) DO NOTHING`,
+        [CAT_A, TENANT_A, CAT_B, TENANT_B],
+      );
+      const ptA = (
+        await pool.query(
+          `INSERT INTO "product_type" (id,"tenantId","key","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'TYPE_A','Type A', now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+
+      // tenant A category cannot point its parent at tenant B's category
+      await expect(
+        pool.query(
+          `INSERT INTO "category" (id,"tenantId","parentId","slug","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'child-x','Child', now())`,
+          [TENANT_A, CAT_B],
+        ),
+      ).rejects.toThrow(/category_tenant_parent_fkey|violates foreign key/i);
+
+      // tenant A product cannot reference tenant B's category
+      await expect(
+        pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId","slug","nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,'prod-x','Prod','STOCKED', now())`,
+          [TENANT_A, CAT_B],
+        ),
+      ).rejects.toThrow(/product_tenant_category_fkey|violates foreign key/i);
+
+      // tenant B product cannot reference tenant A's product type
+      await expect(
+        pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId","productTypeId","slug","nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'prod-y','Prod','STOCKED', now())`,
+          [TENANT_B, CAT_B, ptA],
+        ),
+      ).rejects.toThrow(/product_tenant_product_type_fkey|violates foreign key/i);
+
+      // the same-tenant reference is fine
+      await expect(
+        pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId","productTypeId","slug","nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'prod-ok','Prod','STOCKED', now())`,
+          [TENANT_A, CAT_A, ptA],
+        ),
+      ).resolves.toBeTruthy();
+
+      await pool.query(`DELETE FROM "product" WHERE "tenantId" IN ($1,$2)`, [TENANT_A, TENANT_B]);
+      await pool.query(`DELETE FROM "product_type" WHERE id = $1`, [ptA]);
+      await pool.query(`DELETE FROM "category" WHERE id IN ($1,$2)`, [CAT_A, CAT_B]);
+    });
+
+    it('root-slug uniqueness (partial index) + sibling-slug uniqueness', async () => {
+      await pool.query(
+        `INSERT INTO "category" (id,"tenantId","slug","nameEn","updatedAt")
+         VALUES ($1,$2,'dup-root','R', now())`,
+        [CAT_A, TENANT_A],
+      );
+      // second root with the same slug in the same tenant → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "category" (id,"tenantId","slug","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'dup-root','R2', now())`,
+          [TENANT_A],
+        ),
+      ).rejects.toThrow(/category_root_slug_key|duplicate key/i);
+      // a child with slug 'dup-root' under CAT_A is allowed (different scope)
+      const child = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId","parentId","slug","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'dup-root','child', now()) RETURNING id`,
+          [TENANT_A, CAT_A],
+        )
+      ).rows[0].id as string;
+      // but a SECOND child with the same slug under the same parent → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "category" (id,"tenantId","parentId","slug","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'dup-root','child2', now())`,
+          [TENANT_A, CAT_A],
+        ),
+      ).rejects.toThrow(/category_tenantId_parentId_slug_key|duplicate key/i);
+
+      await pool.query(`DELETE FROM "category" WHERE id IN ($1,$2)`, [CAT_A, child]);
+    });
+
+    it('CHECK constraints: status enums, fulfilment strategy, slug + product-type key shape', async () => {
+      const { rows } = await pool.query<{ conname: string; def: string }>(
+        `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE contype = 'c' AND conrelid::regclass::text = ANY($1)`,
+        [['category', 'product_type', 'product']],
+      );
+      const byName = Object.fromEntries(rows.map((r) => [r.conname, r.def]));
+      expect(byName['category_status_chk']).toMatch(/ACTIVE.*ARCHIVED/s);
+      expect(byName['product_status_chk']).toMatch(/DRAFT.*ACTIVE.*ARCHIVED/s);
+      expect(byName['product_fulfilment_strategy_chk']).toMatch(/STOCKED.*BOM.*CUSTOM/s);
+      expect(byName['product_type_key_chk']).toBeTruthy();
+
+      await expect(
+        pool.query(
+          `INSERT INTO "product_type" (id,"tenantId","key","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'bad key','x', now())`,
+          [TENANT_A],
+        ),
+      ).rejects.toThrow(/product_type_key_chk/i);
+    });
+
+    it('security_event view is NARROWED — no ordinary catalog CRUD, keeps catalog.template_applied', async () => {
+      const { rows } = await pool.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
+      );
+      const def = rows[0]!.definition;
+      // the old broad `catalog.%` prefix match is gone…
+      expect(def).not.toMatch(/catalog\.%/);
+      // …replaced by an exact match on the one security-significant catalog action
+      expect(def).toMatch(/catalog\.template_applied/);
+    });
+
+    it('built-in system-role backfill is applied and idempotent (owner R-1)', async () => {
+      // seed a minimal tenant with owner/admin/manager + a custom role
+      const T = '0000cccc-0000-7000-8000-00000000cc33';
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1,'bf','bf','AE','ACTIVE','00000000-0000-7000-8000-000000000002', now())
+         ON CONFLICT (id) DO NOTHING`,
+        [T],
+      );
+      const roleIds: Record<string, string> = {};
+      for (const [key, isSystem] of [
+        ['owner', true],
+        ['admin', true],
+        ['manager', true],
+        ['custom_role', false],
+      ] as const) {
+        const r = await pool.query(
+          `INSERT INTO role (id,"tenantId",key,name,"isSystem","updatedAt")
+           VALUES (uuidv7(),$1,$2,$2,$3, now()) RETURNING id`,
+          [T, key, isSystem],
+        );
+        roleIds[key] = r.rows[0].id;
+      }
+      // re-run the migration's exact backfill statements — FORCE-toggle so a
+      // NOBYPASSRLS owner can write cross-tenant, then the two idempotent
+      // INSERT ... SELECT ... ON CONFLICT DO NOTHING.
+      const backfill = `
+        ALTER TABLE "role"            NO FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", k.key
+          FROM "role" r CROSS JOIN (VALUES ('catalog:view'),('catalog:manage')) AS k(key)
+         WHERE r."isSystem" = true AND r."key" IN ('owner','admin')
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", 'catalog:view'
+          FROM "role" r
+         WHERE r."isSystem" = true AND r."key" = 'manager'
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        ALTER TABLE "role"            FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`;
+      await pool.query(backfill);
+      await pool.query(backfill); // twice — must not create duplicates
+
+      const perms = async (roleId: string): Promise<string[]> =>
+        (
+          await pool.query<{ permissionKey: string }>(
+            `SELECT "permissionKey" FROM "role_permission" WHERE "roleId" = $1 ORDER BY "permissionKey"`,
+            [roleId],
+          )
+        ).rows.map((r) => r.permissionKey);
+
+      expect(await perms(roleIds['owner']!)).toEqual(['catalog:manage', 'catalog:view']);
+      expect(await perms(roleIds['admin']!)).toEqual(['catalog:manage', 'catalog:view']);
+      expect(await perms(roleIds['manager']!)).toEqual(['catalog:view']);
+      expect(await perms(roleIds['custom_role']!)).toEqual([]); // untouched
+
+      // the FORCE toggle restored FORCE on both tables
+      const force = await pool.query<{ relname: string; f: boolean }>(
+        `SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relname = ANY($1)`,
+        [['role', 'role_permission']],
+      );
+      for (const r of force.rows) expect(r.f, `${r.relname} FORCE restored`).toBe(true);
+
+      await pool.query(`DELETE FROM "role_permission" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "role" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "tenant" WHERE id = $1`, [T]);
+    });
+
+    it('catalog:view / catalog:manage are registered in permission_registry (owner R-1)', async () => {
+      const { rows } = await pool.query<{ key: string; realm: string; addedInPhase: number }>(
+        `SELECT key, realm, "addedInPhase" FROM permission_registry WHERE key = ANY($1) ORDER BY key`,
+        [['catalog:manage', 'catalog:view']],
+      );
+      // seed.ts is NOT run in migration.test — their presence proves the
+      // MIGRATION registered them.
+      expect(rows.map((r) => r.key)).toEqual(['catalog:manage', 'catalog:view']);
+      for (const r of rows) {
+        expect(r.realm).toBe('TENANT');
+        expect(r.addedInPhase).toBe(3);
       }
     });
   });

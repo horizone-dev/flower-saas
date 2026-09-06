@@ -174,6 +174,24 @@ export const PHASE_1_TENANT_PERMISSIONS = [
 export type Phase1TenantPermission = (typeof PHASE_1_TENANT_PERMISSIONS)[number];
 
 /**
+ * Phase 3 task 3.2 activates the two foundational catalog keys — no key is
+ * renamed, duplicated or invented (D2-6 / HG3-PERMISSION-STABILITY). They are
+ * seeded into `permission_registry` and assigned to the built-in `owner` /
+ * `admin` (both) and `manager` (`catalog:view` only) system roles — for new
+ * tenants via `SYSTEM_ROLE_TEMPLATES`, for existing tenants via the task 3.2
+ * migration backfill. `catalog:manage` gates every catalog write; `catalog:view`
+ * every catalog read. Neither is in `MODULE_OF_PERMISSION` — `catalog` is a
+ * foundation module (always entitled); the per-strategy `production_bom` /
+ * `custom_composition` entitlement check happens in the catalog service.
+ */
+export const PHASE_3_2_TENANT_PERMISSIONS = [
+  'catalog:view',
+  'catalog:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase32TenantPermission = (typeof PHASE_3_2_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the

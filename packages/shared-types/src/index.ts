@@ -155,6 +155,52 @@ export const CAPABILITY_REQUIRED_ENTITLEMENT: Partial<Record<CapabilityKey, Enti
   customer_ordering: 'customer_web',
 };
 
+// --- generic catalog core (Phase 3 task 3.2) — docs/phase-3/PHASE-3-PLAN.md §C.3 ---
+
+/**
+ * The closed set of product fulfilment strategies (ADR-0018 §1). This is the
+ * ONLY behaviour discriminator on a product — `tenant.businessTypeKey` is never
+ * read to decide what a product may do (HG3-NO-BT-BRANCH). Mirrored by the
+ * `product_fulfilment_strategy_chk` DB CHECK.
+ */
+export const FULFILMENT_STRATEGIES = ['STOCKED', 'BOM', 'CUSTOM'] as const;
+export type FulfilmentStrategy = (typeof FULFILMENT_STRATEGIES)[number];
+export const fulfilmentStrategySchema = z.enum(FULFILMENT_STRATEGIES);
+export function isFulfilmentStrategy(value: string): value is FulfilmentStrategy {
+  return (FULFILMENT_STRATEGIES as readonly string[]).includes(value);
+}
+
+/**
+ * The catalog-capability key a `fulfilment_strategy` requires to be enabled in
+ * `tenant_catalog_capability` (spec §A). The consuming service (task 3.2) does
+ * `assertEnabled(CAPABILITY_OF_STRATEGY[strategy])` on product create / a DRAFT
+ * strategy change / activate — plus `assertEntitledFor` for the entitlement half
+ * (`strategy.bom` → `production_bom`, `strategy.custom` → `custom_composition`,
+ * from `CAPABILITY_REQUIRED_ENTITLEMENT`).
+ */
+export const CAPABILITY_OF_STRATEGY: Readonly<Record<FulfilmentStrategy, CapabilityKey>> =
+  Object.freeze({
+    STOCKED: 'strategy.stocked',
+    BOM: 'strategy.bom',
+    CUSTOM: 'strategy.custom',
+  });
+
+/** Category / product-type lifecycle — `ACTIVE` ↔ `ARCHIVED` only. */
+export const CATALOG_NODE_STATUSES = ['ACTIVE', 'ARCHIVED'] as const;
+export type CatalogNodeStatus = (typeof CATALOG_NODE_STATUSES)[number];
+
+/**
+ * Product lifecycle. `DRAFT` → `ACTIVE` ↔ `ARCHIVED`; `ACTIVE` → `DRAFT` is
+ * never allowed (owner §12). `ACTIVE` means "catalog definition active", NOT
+ * "sellable" (owner §7).
+ */
+export const PRODUCT_STATUSES = ['DRAFT', 'ACTIVE', 'ARCHIVED'] as const;
+export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
+
+/** Max category tree depth, root = depth 1 (owner §3 / R-3). Service-enforced on
+ *  create + re-parent. */
+export const MAX_CATEGORY_DEPTH = 5;
+
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
  * counts"). Enforced by `LimitService` on create / activate / login.

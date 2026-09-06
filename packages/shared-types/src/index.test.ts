@@ -11,6 +11,13 @@ import {
   checkCapabilityConfig,
   CAPABILITY_REQUIRED_ENTITLEMENT,
   ENTITLEMENT_MODULES,
+  FULFILMENT_STRATEGIES,
+  fulfilmentStrategySchema,
+  isFulfilmentStrategy,
+  CAPABILITY_OF_STRATEGY,
+  MAX_CATEGORY_DEPTH,
+  PRODUCT_STATUSES,
+  CATALOG_NODE_STATUSES,
 } from './index.js';
 
 describe('@flower/shared-types schemas', () => {
@@ -110,5 +117,34 @@ describe('@flower/shared-types — catalog capabilities (task 3.1)', () => {
     }
     expect(CAPABILITY_REQUIRED_ENTITLEMENT['strategy.custom']).toBe('custom_composition');
     expect(CAPABILITY_REQUIRED_ENTITLEMENT['strategy.stocked']).toBeUndefined();
+  });
+});
+
+describe('@flower/shared-types — generic catalog core (task 3.2)', () => {
+  it('the frozen fulfilment strategies are exactly STOCKED / BOM / CUSTOM', () => {
+    expect([...FULFILMENT_STRATEGIES]).toEqual(['STOCKED', 'BOM', 'CUSTOM']);
+    expect(fulfilmentStrategySchema.safeParse('BOM').success).toBe(true);
+    expect(fulfilmentStrategySchema.safeParse('KIT').success).toBe(false);
+    expect(isFulfilmentStrategy('CUSTOM')).toBe(true);
+    expect(isFulfilmentStrategy('flower')).toBe(false);
+  });
+
+  it('CAPABILITY_OF_STRATEGY maps each strategy to its strategy.* capability key', () => {
+    expect(CAPABILITY_OF_STRATEGY).toEqual({
+      STOCKED: 'strategy.stocked',
+      BOM: 'strategy.bom',
+      CUSTOM: 'strategy.custom',
+    });
+    for (const cap of Object.values(CAPABILITY_OF_STRATEGY)) {
+      expect(isCapabilityKey(cap)).toBe(true);
+    }
+  });
+
+  it('category tree depth is capped at 5 (root = 1); status enums are closed', () => {
+    expect(MAX_CATEGORY_DEPTH).toBe(5);
+    expect([...PRODUCT_STATUSES]).toEqual(['DRAFT', 'ACTIVE', 'ARCHIVED']);
+    expect([...CATALOG_NODE_STATUSES]).toEqual(['ACTIVE', 'ARCHIVED']);
+    // a category / product type is never a DRAFT (owner §12)
+    expect(CATALOG_NODE_STATUSES).not.toContain('DRAFT');
   });
 });
