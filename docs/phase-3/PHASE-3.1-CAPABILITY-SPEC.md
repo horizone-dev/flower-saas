@@ -1,8 +1,9 @@
 # PHASE-3.1-CAPABILITY-SPEC.md — Catalog Capability & Business-Type Template Foundation
 
-> **Status:** DRAFT — pre-migration owner sign-off document. **Documentation only.**
-> No `schema.prisma` change, no migration, no runtime code is produced by this
-> document. Task 3.1 implementation does not begin until this spec is approved.
+> **Status:** APPROVED (owner, 2026-09-06) subject to §R being closed — done in
+> this revision. **Documentation only.** No `schema.prisma` change, no migration,
+> no runtime code is produced by this document. Task 3.1 implementation does not
+> begin until the owner separately approves integration.
 >
 > **Parent plan:** [`PHASE-3-PLAN.md`](./PHASE-3-PLAN.md) §J (Task 3.1),
 > directionally approved and merged to `main` @ `193bce4`.
@@ -15,11 +16,16 @@
 > (§5) · no `catalog` entitlement module (§6) · `flower_app` SELECT-only on the
 > config tables (§7) · Task 3.1 does initial apply only (§8) · re-apply removed
 > from the Task 3.1 API, contract locked for Task 3.10 (§9) · `PATCH` change-set
-> API with an explicit aggregate-version proposal (§10) · minimal Super Admin UI
-> in Task 3.1 (§11) · one new permission (§12) · two audit actions (§13) · no
+> API with an aggregate-version concurrency contract (§10) · minimal Super Admin
+> UI in Task 3.1 (§11) · one new permission (§12) · two audit actions (§13) · no
 > realtime (§14) · capability service reads only `tenant_catalog_capability`
 > (§15) · explicit `source_kind` provenance model (§16) · additive forward-only
 > migration (§17).
+>
+> **§R closed 2026-09-06 — all nine open items resolved (R-1…R-9) + three
+> additional locks (template versioning · CUSTOM · capability config).** §R is
+> now the authoritative resolved-decision record; there are **no
+> Task-3.1-blocking TBDs**.
 
 ---
 
@@ -36,13 +42,13 @@
 - [I. Initial template-apply algorithm](#i-initial-template-apply-algorithm)
 - [J. Future re-apply merge / replace contract (Task 3.10)](#j-future-re-apply-merge--replace-contract-task-310)
 - [K. API DTOs](#k-api-dtos)
-- [L. Optimistic-concurrency proposal](#l-optimistic-concurrency-proposal)
+- [L. Aggregate optimistic-concurrency (locked)](#l-aggregate-optimistic-concurrency-locked)
 - [M. Super Admin UI contract](#m-super-admin-ui-contract)
 - [N. RLS / privilege matrix](#n-rls--privilege-matrix)
 - [O. Audit actions](#o-audit-actions)
 - [P. Hard gates / tests](#p-hard-gates--tests)
 - [Q. Explicit non-scope](#q-explicit-non-scope)
-- [R. Open items for owner sign-off](#r-open-items-for-owner-sign-off)
+- [R. Resolved decisions (locked 2026-09-06)](#r-resolved-decisions-locked-2026-09-06)
 
 ---
 
@@ -54,8 +60,9 @@ that must exist before any catalog-create endpoint (Task 3.2+). It delivers:
 1. Three new tables — `business_type_template`, `business_type_template_capability`
    (both platform-global reference), `tenant_catalog_capability` (tenant runtime
    state).
-2. Additive nullable columns on `tenant` for the Business-Type link + snapshot
-   provenance (+ one aggregate-version column pending §L approval).
+2. Additive columns on `tenant` — nullable Business-Type link + snapshot
+   provenance, plus `catalog_capability_version int NOT NULL DEFAULT 0` (the
+   capability-set aggregate concurrency counter — locked, §L / §R R-3).
 3. One new platform permission — `platform:catalog_capability:manage` (step-up).
 4. One new entitlement module — `custom_composition` (referenced by
    `strategy.custom`; the entitlement axis is otherwise untouched).
@@ -240,6 +247,20 @@ Nothing else. Super Admin turns on what the tenant needs.
 > BOM/custom by default. A tenant that genuinely needs assembled or made-to-order
 > products has Super Admin enable `strategy.bom` / `strategy.custom` explicitly.
 
+### C.4 B2B / trade defaults (owner R-2 — locked)
+
+For **`WHOLESALE_DISTRIBUTION`**, **`ELECTRICAL_PLUMBING`**,
+**`BUILDING_MATERIALS`** and **`PACKAGING_DISPOSABLES`** the template ships
+`channel.customer_web` and `customer_ordering` **`enabled = false`** (or simply
+no row — the apply snapshots exactly what the template says).
+
+- This is a **default only.** Super Admin may later `PATCH` those capabilities on
+  for any individual tenant.
+- **No runtime, provisioning, or service code branches on the Business-Type key
+  or name to infer "B2B".** The only B2B-flavoured difference is the value of
+  those two `business_type_template_capability` rows — data, not behaviour
+  (`HG3-NO-BT-BRANCH`).
+
 ---
 
 ## D. Entitlement dependency per capability
@@ -249,24 +270,24 @@ foundational — always available, gated only by permission + capability.
 `custom_composition` is a **new** entitlement module added in Task 3.1
 (as separately planned). The entitlement axis is otherwise untouched.
 
-| Capability               | Required entitlement module               | Module status              | If entitlement absent                                                                                                   |
-| ------------------------ | ----------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `strategy.stocked`       | — (none)                                  | —                          | always usable (subject to permission)                                                                                   |
-| `strategy.bom`           | `production_bom`                          | exists                     | capability row may be `enabled`, but **inert** — Task 3.2 rejects a BOM product create until the entitlement is present |
-| `strategy.custom`        | `custom_composition`                      | **new in Task 3.1**        | capability row may be `enabled`, but **inert** — same as above                                                          |
-| `variants`               | — (none)                                  | —                          | always usable                                                                                                           |
-| `multi_uom`              | — (none)                                  | —                          | always usable                                                                                                           |
-| `identifiers.barcode_qr` | — (none)                                  | —                          | always usable                                                                                                           |
-| `branch_pricing`         | — (none)                                  | —                          | always usable                                                                                                           |
-| `channel.pos`            | — (none)                                  | —                          | always usable                                                                                                           |
-| `channel.customer_web`   | `customer_web`                            | exists                     | inert until entitled (Phase 7)                                                                                          |
-| `inventory.tracked`      | — (none — basic tracking is foundational) | —                          | stored intent; Phase 5 enforces                                                                                         |
-| `inventory.lot_batch`    | `advanced_inventory`                      | exists                     | inert until entitled (Phase 5)                                                                                          |
-| `inventory.expiry`       | `advanced_inventory`                      | exists                     | inert until entitled (Phase 5)                                                                                          |
-| `purchasing`             | — (open — see §R)                         | Phase 5 owns this decision | stored intent; Phase 5 defines the module (if any)                                                                      |
-| `production`             | `production_bom`                          | exists                     | inert until entitled (Phase 6)                                                                                          |
-| `delivery`               | `delivery`                                | exists                     | inert until entitled (Phase 7)                                                                                          |
-| `customer_ordering`      | `customer_web`                            | exists                     | inert until entitled (Phase 7)                                                                                          |
+| Capability               | Required entitlement module         | Module status              | If entitlement absent                                                                                                   |
+| ------------------------ | ----------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `strategy.stocked`       | — (none)                            | —                          | always usable (subject to permission)                                                                                   |
+| `strategy.bom`           | `production_bom`                    | exists                     | capability row may be `enabled`, but **inert** — Task 3.2 rejects a BOM product create until the entitlement is present |
+| `strategy.custom`        | `custom_composition`                | **new in Task 3.1**        | capability row may be `enabled`, but **inert** — same as above                                                          |
+| `variants`               | — (none)                            | —                          | always usable                                                                                                           |
+| `multi_uom`              | — (none)                            | —                          | always usable                                                                                                           |
+| `identifiers.barcode_qr` | — (none)                            | —                          | always usable                                                                                                           |
+| `branch_pricing`         | — (none)                            | —                          | always usable                                                                                                           |
+| `channel.pos`            | — (none)                            | —                          | always usable                                                                                                           |
+| `channel.customer_web`   | `customer_web`                      | exists                     | inert until entitled (Phase 7)                                                                                          |
+| `inventory.tracked`      | — (none — foundational; R-6 locked) | —                          | stored intent; Phase 5 enforces. Task 3.1 invents no entitlement; Phase 5 decides if one is introduced.                 |
+| `inventory.lot_batch`    | `advanced_inventory`                | exists                     | inert until entitled (Phase 5)                                                                                          |
+| `inventory.expiry`       | `advanced_inventory`                | exists                     | inert until entitled (Phase 5)                                                                                          |
+| `purchasing`             | — (none — foundational; R-5 locked) | Phase 5 owns this decision | stored intent; Phase 5 decides whether a `procurement` module is introduced. Task 3.1 invents nothing.                  |
+| `production`             | `production_bom`                    | exists                     | inert until entitled (Phase 6)                                                                                          |
+| `delivery`               | `delivery`                          | exists                     | inert until entitled (Phase 7)                                                                                          |
+| `customer_ordering`      | `customer_web`                      | exists                     | inert until entitled (Phase 7)                                                                                          |
 
 ### D.1 Enabled-but-inert consequence (owner §6 — document explicitly)
 
@@ -286,22 +307,26 @@ this.
 
 ## E. Config-JSON schema per capability
 
-**No capability in this initial registry defines a config schema.** Every one of
-the 16 keys is a plain boolean toggle in Task 3.1.
+**Locked (owner additional lock — capability config).** For Task 3.1 **all 16
+capability keys have `config = null`.** No speculative JSON schema is introduced.
 
 - `business_type_template_capability.config` and `tenant_catalog_capability.config`
-  are **`jsonb NULL`** and are always `NULL` for Task 3.1's capabilities.
-- The column exists so a future capability that genuinely needs bounded structure
-  (e.g. a Phase 5 `inventory.expiry` with `{ "policy": "FEFO", "warnDays": 30 }`)
-  can use it **without a migration**.
-- Any capability that introduces a config shape does so **in its owning phase**.
-  At that point the shape is registered in a closed
+  are **`jsonb NULL`** and are **always `NULL`** for every Task 3.1 capability, in
+  the seed and via every write path.
+- The column exists so a **future** capability that genuinely needs bounded
+  structure (e.g. a Phase 5 `inventory.expiry` with
+  `{ "policy": "FEFO", "warnDays": 30 }`) can use it **without a migration**.
+- Task 3.1 ships a **typed but empty** validation registry —
   `CATALOG_CAPABILITY_CONFIG_SCHEMAS: Partial<Record<CapabilityKey, ZodSchema>>`
-  map in `packages/shared-types`, and both write paths (`PATCH` change-set,
-  template apply) validate `config` against it — an unknown key or a
-  schema-invalid `config` is `422`.
-- Task 3.1 ships the empty map + the validation hook (so the contract is proven),
-  not any actual schema.
+  in `packages/shared-types` (`= {}`) — plus the validation hook that both write
+  paths (`PATCH` change-set, template apply) call.
+- **Rejection, not silent persistence:** a write that supplies a non-null `config`
+  for a capability **without a registered schema** is rejected `422
+CAPABILITY_CONFIG_NOT_SUPPORTED` — arbitrary JSON is **never** stored. A write
+  that supplies a `config` that fails a **registered** schema is `422`. An unknown
+  `capabilityKey` is `422 UNKNOWN_CAPABILITY_KEY`.
+- A later task that adds a real schema does so **deliberately** — it registers the
+  shape in the map in its own PR; Task 3.1 registers none.
 
 ---
 
@@ -324,8 +349,31 @@ Two platform-global reference tables. **Both RLS-exempt** (like `country` /
 | `updated_at` | `timestamptz NOT NULL` (`@updatedAt`)                                                                                                                    |
 
 - No `template_payload` jsonb (owner §3). No category/attribute/UOM structure.
-- Seeded: 35 rows, `version = 1`, `status = 'ACTIVE'` (except none deprecated at
-  seed).
+- Seeded: 35 rows, `version = 1`, `status = 'ACTIVE'` (none deprecated at seed).
+
+#### F.1.1 Template curation semantics (owner additional lock — template versioning)
+
+`business_type_template.version` is **the current curated version of that
+template.** When a platform seed/curation change alters any capability default
+for a template:
+
+1. **bump** `business_type_template.version`;
+2. **update** that template's `business_type_template_capability` rows to the new
+   defaults;
+3. **do NOT** mutate any existing `tenant_catalog_capability` row — not one
+   (`HG3-TEMPLATE-SNAPSHOT`).
+
+A tenant's provenance (`source_template_key` + `source_template_version` on each
+snapshotted row, plus `tenant.business_type_applied_version`) records exactly
+which curated version it was snapshotted from. **The tenant's snapshot is
+authoritative for that tenant** — it does not depend on the old template rows
+remaining mutable, active, or even present.
+
+**Templates in use are `DEPRECATED`, never destructively deleted.** A
+`DEPRECATED` template cannot be chosen for a new tenant; existing tenants that
+snapshotted from it are unaffected. `business_type_template.key` carries an
+`ON DELETE RESTRICT` FK from `tenant.business_type_key`, so a template a tenant
+points at cannot be dropped.
 
 ### F.2 `business_type_template_capability`
 
@@ -394,12 +442,12 @@ The **only** runtime capability-state table. Tenant-scoped, `ENABLE + FORCE` RLS
 
 All **nullable**, forward-only (D2-12). No retype of any existing column.
 
-| Column                          | Type                            | Purpose                                                                                                                                                                                                                                                                              |
-| ------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `business_type_key`             | `text NULL`                     | FK → `business_type_template.key` `ON DELETE RESTRICT`. **Never read at runtime to branch behaviour** (D0-3 / HG3-NO-BT-BRANCH) — used only at apply time. Nullable **only** for migration compatibility with pre-Task-3.1 tenants (owner §1); the new provisioning API requires it. |
-| `business_type_applied_version` | `int NULL`                      | the `business_type_template.version` the current capability set was snapshotted from                                                                                                                                                                                                 |
-| `business_type_applied_at`      | `timestamptz NULL`              | when the initial apply ran                                                                                                                                                                                                                                                           |
-| `catalog_capability_version`    | `int` — **pending §L approval** | the aggregate optimistic-concurrency counter for the capability set                                                                                                                                                                                                                  |
+| Column                          | Type                                               | Purpose                                                                                                                                                                                                                                                                              |
+| ------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `business_type_key`             | `text NULL`                                        | FK → `business_type_template.key` `ON DELETE RESTRICT`. **Never read at runtime to branch behaviour** (D0-3 / HG3-NO-BT-BRANCH) — used only at apply time. Nullable **only** for migration compatibility with pre-Task-3.1 tenants (owner §1); the new provisioning API requires it. |
+| `business_type_applied_version` | `int NULL`                                         | the `business_type_template.version` the current capability set was snapshotted from                                                                                                                                                                                                 |
+| `business_type_applied_at`      | `timestamptz NULL`                                 | when the initial apply ran                                                                                                                                                                                                                                                           |
+| `catalog_capability_version`    | `int NOT NULL DEFAULT 0` (locked — §L / R-3 / R-8) | the aggregate optimistic-concurrency counter for the tenant's complete capability configuration (§L)                                                                                                                                                                                 |
 
 ---
 
@@ -521,6 +569,19 @@ Catalog-create endpoints (Task 3.2+) call `assertEnabled(...)` and therefore
 configured — a safe closed default. Task 3.1 itself has no create endpoint, so it
 is unaffected.
 
+### I.3 CUSTOM is not a code path (owner additional lock — CUSTOM)
+
+`CUSTOM` is a **completely normal, data-driven `business_type_template` row**. The
+generic algorithm above handles it **identically** to `BAKERY_CAKE` or any other
+key:
+
+- **No** `if (businessTypeKey === 'CUSTOM')` — not in provisioning, not in the
+  apply step, not in any service, not in the SA UI logic, not in a `switch`.
+- `CUSTOM`'s only difference is the contents of its
+  `business_type_template_capability` rows (the 3-key minimal set, §C.2).
+- `HG3-1-GENERIC-APPLY` (§P) is a repo scan + a test that provisions `CUSTOM` and
+  a non-`CUSTOM` preset through the same call path and diffs it.
+
 ---
 
 ## J. Future re-apply merge / replace contract (Task 3.10)
@@ -537,10 +598,11 @@ Route (Task 3.10): `POST /v1/platform/tenants/:tenantId/apply-business-type-temp
 | `merge` (default) | For each capability in the target template: upsert the `(tenant_id, capability_key)` row **only if it is `source_kind = 'TEMPLATE'`** (untouched since the last apply). A `MANUAL` row is **left exactly as-is**. Capabilities not in the template are **not touched**. Nothing is ever deleted or disabled implicitly.                                      |
 | `replace`         | For each capability in the target template: **overwrite** the row's `enabled` / `config` to the template's value **regardless of `source_kind`**, and set `source_kind = 'TEMPLATE'`, `source_template_version = <new>`, `overridden_at = NULL`. Capabilities **not** in the template — including tenant-specific `MANUAL` keys — are **still not deleted**. |
 
-Both modes: bump `business_type_template_applied_version` + `catalog_capability_version`,
-write one `catalog.template_applied` audit row capturing
-`{ mode, fromVersion, toVersion, changedCapabilityKeys }`, and run in one
-transaction. Neither mode is a destructive wipe.
+Both modes: set `tenant.business_type_applied_version` to the re-applied
+template's version, increment `tenant.catalog_capability_version` **exactly once**
+per successful re-apply transaction (§L.3), write one `catalog.template_applied`
+audit row capturing `{ mode, fromVersion, toVersion, changedCapabilityKeys }`, and
+run in one transaction. Neither mode is a destructive wipe.
 
 ---
 
@@ -581,9 +643,12 @@ guard pipeline, `@RequirePermission(...)` on every route (CLAUDE.md rule 9).
 
 ### K.2 `GET /v1/platform/tenants/:tenantId/catalog-capabilities`
 
-- **Realm/permission:** platform · `platform:catalog_capability:manage`
-  _(read of the surface a step-up write will modify; no step-up on the read)_
-- **Concurrency:** returns the aggregate version (§L) as `ETag` + body
+- **Realm/permission:** platform · `platform:catalog_capability:manage`.
+  **No step-up on the read** (owner R-7 — locked). No separate
+  capability-view permission is created.
+- **Concurrency:** returns the aggregate version (§L) as an `ETag` header **and**
+  the `aggregateVersion` body field, so the client has the value to send as the
+  next `PATCH` `If-Match`.
 
 ```jsonc
 // 200
@@ -614,12 +679,15 @@ guard pipeline, `@RequirePermission(...)` on every route (CLAUDE.md rule 9).
 
 ### K.3 `PATCH /v1/platform/tenants/:tenantId/catalog-capabilities`
 
-- **Realm/permission:** platform · `platform:catalog_capability:manage` **+ step-up**
-- **Concurrency:** **`If-Match: "<aggregateVersion>"` required** → `409 CATALOG_CAPABILITY_VERSION_CONFLICT` on mismatch (§L)
-- **Idempotency:** `Idempotency-Key` **not** required — the operation is a
-  version-guarded state transition, not a command with external side effects
-  (D2-9). _(Open item R-4: add an optional `Idempotency-Key` anyway? Recommend
-  no.)_
+- **Realm/permission:** platform · `platform:catalog_capability:manage` **+ fresh
+  step-up** (owner R-7 — locked; step-up only on the mutation).
+- **Concurrency:** **`If-Match: "<aggregateVersion>"` required** (a request
+  without it is `428 PRECONDITION_REQUIRED`); a stale value is
+  `409 CATALOG_CAPABILITY_VERSION_CONFLICT` (§L). The version check and the
+  increment happen in the **same DB transaction** as the row upserts.
+- **Idempotency:** `Idempotency-Key` **not** required and **not** added (owner
+  R-4 — locked). `If-Match` is the sufficient guard for a version-guarded state
+  transition with no external side effect (D2-9).
 - **No `applyTemplateKey`, no `mode`** — those are Task 3.10 only (owner §9).
 
 ```jsonc
@@ -636,20 +704,26 @@ guard pipeline, `@RequirePermission(...)` on every route (CLAUDE.md rule 9).
 
 - `changes` is a **non-empty** array; each entry names one capability.
   `capabilityKey` must be in the closed registry (else `422 UNKNOWN_CAPABILITY_KEY`);
-  `config` must satisfy that key's schema if it has one (else `422`); duplicate
-  `capabilityKey` in one request → `422`.
+  a non-null `config` for a capability with no registered schema →
+  `422 CAPABILITY_CONFIG_NOT_SUPPORTED` (§E); a `config` that fails a registered
+  schema → `422`; duplicate `capabilityKey` in one request → `422`.
 - Each change is a **per-row upsert**: create (`source_kind = 'MANUAL'`) or update
-  (`source_kind → 'MANUAL'`, `overridden_at` first-time). Rows not named are
-  **untouched** (byte-identical).
+  (`source_kind → 'MANUAL'`, `overridden_at` first-time — §H). Rows not named are
+  **untouched** (byte-identical, `updated_at` included).
 - A change whose `enabled` + `config` already match the stored row is a **no-op**
-  for that row (no write, no `source_kind` change) but the request still succeeds
-  and still bumps the aggregate version if any _other_ change wrote.
-- On success: bump `tenant.catalog_capability_version`, one
-  `tenant.catalog_capability_changed` audit row (§O), return the full new state
-  (same shape as K.2) + the new `ETag`.
+  for that row (no write, no `source_kind` change).
+- **On success with ≥ 1 row actually changed:** the version compare + the
+  `catalog_capability_version + 1` + the row upserts + one
+  `tenant.catalog_capability_changed` audit row (§O) all commit in **one
+  transaction**; the response is the full new state (shape of §K.2) + the new
+  `ETag`.
+- **On a request where every change is a no-op:** `200` with the unchanged state,
+  **no** version bump, **no** audit row.
+- **On a stale `If-Match`:** `409 CATALOG_CAPABILITY_VERSION_CONFLICT`, nothing
+  written (§L.3 / §O.3).
 
 ```jsonc
-// 200 — same body shape as K.2, with aggregateVersion incremented
+// 200 — same body shape as K.2, with aggregateVersion incremented (or unchanged for an all-no-op request)
 ```
 
 ### K.4 `GET /v1/catalog/capabilities`
@@ -682,48 +756,71 @@ changes.
 
 ---
 
-## L. Optimistic-concurrency proposal
+## L. Aggregate optimistic-concurrency (locked)
 
-**Proposed for approval before any code (owner §10).**
+**Locked — owner R-3 / R-8, 2026-09-06.** The authoritative concurrency contract
+for the capability-set API; not a proposal.
 
 ### L.1 The aggregate
 
-The **tenant's catalog-capability set** is one aggregate. A `PATCH` with N
-`changes` is a single atomic transition of that aggregate. Concurrency control
-belongs at the aggregate boundary, not per row.
+The **tenant's complete catalog-capability configuration** is one aggregate. A
+`PATCH` with N `changes` is a single atomic transition of that aggregate.
+Concurrency is controlled at the aggregate boundary — **not per row**.
 
-### L.2 Recommended mechanism — a single tenant-level counter
+### L.2 The column
 
 Add **`tenant.catalog_capability_version int NOT NULL DEFAULT 0`** (additive
-column, owner §17).
+column — R-8: `NOT NULL DEFAULT 0`, a PostgreSQL 11+ metadata-only change, no
+table rewrite even though `tenant` has rows). It is the aggregate version for the
+tenant's **entire** capability configuration.
 
-| Step                           | Behaviour                                                                                                                                                                                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| provisioning initial apply     | sets it to `1`                                                                                                                                                                                                                            |
-| `GET …/catalog-capabilities`   | returns it as `aggregateVersion` + `ETag: "<n>"`                                                                                                                                                                                          |
-| `PATCH …/catalog-capabilities` | **requires** `If-Match: "<n>"`; if `n != current` → `409 CATALOG_CAPABILITY_VERSION_CONFLICT`; on success, `UPDATE tenant SET catalog_capability_version = catalog_capability_version + 1` **in the same transaction** as the row upserts |
-| Task 3.10 re-apply             | bumps it too                                                                                                                                                                                                                              |
+### L.3 Locked semantics
 
-- **Migration note:** `int NOT NULL DEFAULT 0` on `tenant` is a metadata-only
-  change on PostgreSQL 11+ (constant default, no table rewrite) — safe and fast
-  even though `tenant` has rows. If the owner prefers strict "nullable-additive
-  first" (D2-12), the alternative is `int NULL` with the app treating `NULL` as
-  `0`; the recommended form is `NOT NULL DEFAULT 0` for a cleaner invariant.
-- Existing (pre-3.1) tenants get `0`; their first `PATCH` uses `If-Match: "0"`.
+| Situation                                                  | Aggregate-version behaviour                                                                                                            |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| pre-3.1 existing tenant, no capability configuration       | `catalog_capability_version = 0`                                                                                                       |
+| newly provisioned tenant                                   | the initial Business-Type template application establishes the first capability snapshot **and sets `catalog_capability_version = 1`** |
+| every **successful** manual `PATCH`                        | increments the aggregate version **exactly once**                                                                                      |
+| future Task 3.10 **successful** explicit template re-apply | increments the aggregate version **exactly once per successful re-apply transaction**                                                  |
+| **failed / rolled-back / no-op** command                   | **must not** advance the version                                                                                                       |
 
-### L.3 Alternatives considered and rejected
+- **`PATCH` requires `If-Match` / expected aggregate version.** A request without
+  it is `428 PRECONDITION_REQUIRED`.
+- **The version comparison and the version increment occur atomically in the same
+  database transaction as the capability-row changes** (`SELECT … catalog_capability_version FOR UPDATE`
+  on the `tenant` row → compare → apply the row upserts →
+  `UPDATE tenant SET catalog_capability_version = catalog_capability_version + 1`
+  → commit).
+- **Stale `If-Match`:**
+  - rejected with the project's established optimistic-concurrency response —
+    `409 CATALOG_CAPABILITY_VERSION_CONFLICT` (API-CONVENTIONS "Concurrency");
+  - **no capability row is partially modified** — the whole transaction rolls
+    back;
+  - **no successful audit event is written** — a conflict produces **no**
+    `tenant.catalog_capability_changed` record (§O.3).
+- **Both `GET` responses expose the aggregate version** — `aggregateVersion` body
+  field + `ETag` header on the platform read (§K.2); `aggregateVersion` body
+  field on the tenant read (§K.4) — so a client always has the value to submit as
+  the next `PATCH` `If-Match`.
+- A **no-op** `PATCH` (every `change` already matches the stored row) writes
+  nothing, **does not** bump the version, and returns `200` with the unchanged
+  state + the unchanged `ETag`.
 
-| Alternative                                                                                  | Rejected because                                                                                                                                                                                                                                                                                              |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-row `tenant_catalog_capability.version` + one `If-Match` per changed key                 | A `PATCH` touching 5 rows needs 5 `If-Match` values; the audit + client-retry story is messy; concurrent disjoint edits give a false sense of safety. The per-row `version` column is still kept (reserved) for a possible future single-row edit route, but it is **not** the `PATCH` concurrency mechanism. |
-| No column — ETag = hash of the sorted `(capability_key, enabled, config, updated_at)` tuples | Works, but an opaque hash is harder to reason about in logs/audit and in the SA UI than a monotonic integer; recompute cost grows with the row count.                                                                                                                                                         |
-| No column — ETag = `max(updated_at)` epoch-ms                                                | Not monotonic-safe under clock skew / same-ms writes.                                                                                                                                                                                                                                                         |
+### L.4 Per-row metadata is not the concurrency contract
 
-### L.4 If §L is not approved
+`tenant_catalog_capability.version` (per row) and the `source_kind` /
+`overridden_at` provenance columns **may exist and are useful** — for provenance,
+and for a possible future single-row edit route — but they are **not** the
+concurrency mechanism for the capability-set API. The aggregate counter
+`tenant.catalog_capability_version` is **authoritative for the set** (owner R-3).
 
-Task 3.1's `PATCH` would fall back to **no `If-Match`** (last-write-wins per row,
-each row still an isolated upsert). Not recommended — a two-admin race could
-silently clobber. The spec recommends approving L.2.
+### L.5 Alternatives considered and rejected
+
+| Alternative                                                                                          | Rejected because                                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-row `tenant_catalog_capability.version` + one `If-Match` per changed key as the primary contract | A `PATCH` touching 5 rows needs 5 `If-Match` values; concurrent disjoint edits give a false sense of safety; the audit + client-retry story is messy. |
+| No column — `ETag` = hash of the sorted `(capability_key, enabled, config, updated_at)` tuples       | An opaque hash is harder to reason about in logs / audit / the SA UI than a monotonic integer; recompute cost grows with row count.                   |
+| No column — `ETag` = `max(updated_at)` epoch-ms                                                      | Not monotonic-safe under clock skew / same-millisecond writes.                                                                                        |
 
 ---
 
@@ -745,21 +842,22 @@ silently clobber. The spec recommends approving L.2.
 
 ### M.2 Tenant detail → "Catalog / Business Capabilities" section
 
-**Read (any SA with `platform:tenants:view`):**
+**Read (`platform:catalog_capability:manage`, no step-up — R-7):** calls
+`GET /v1/platform/tenants/:tenantId/catalog-capabilities` and shows —
 
-- Selected Business Type (`businessTypeKey` + `nameEn`).
-- Applied template version + `businessTypeAppliedAt`.
+- Selected Business Type (`businessTypeKey` + `nameEn`), applied template version,
+  `businessTypeAppliedAt`, and the current `aggregateVersion`.
 - The capability list: each row shows `capabilityKey`, a human label, `enabled`
-  toggle state, `sourceKind` (`TEMPLATE` / `MANUAL` badge), and — for
-  entitlement-backed capabilities whose entitlement is **absent** — an
-  **"Inert — requires <entitlement>"** badge.
+  state, `sourceKind` (`TEMPLATE` / `MANUAL` badge), and — for entitlement-backed
+  capabilities whose entitlement is **absent** — an **"Inert — requires
+  `<entitlement>`"** badge.
 
-**Write (SA with `platform:catalog_capability:manage` + fresh step-up):**
+**Write (`platform:catalog_capability:manage` + fresh step-up — R-7):**
 
 - Toggle an individual capability row on/off. Each toggle issues a `PATCH` with a
-  single `changes` entry and the current `If-Match`.
+  single `changes` entry and the `If-Match` from the last read.
 - On `409` (another admin changed the set): re-fetch, show a "changed elsewhere —
-  review and retry" notice, re-apply.
+  review and retry" notice, re-apply against the new `aggregateVersion`.
 - The step-up challenge follows the existing platform step-up flow (same as
   `platform:entitlements:manage`).
 
@@ -869,31 +967,40 @@ state per key**, timestamp, and `reason` (from the request body where present):
 for `catalog.template_applied`. `actions.test.ts` keeps the `security_event` view
 `LIKE` patterns in sync with the `security: true` entries.
 
+### O.3 No audit event on a rejected command (owner R-3)
+
+An audit row is written **only inside a committed write transaction**. A `PATCH`
+rejected for a stale `If-Match` (`409 CATALOG_CAPABILITY_VERSION_CONFLICT`), a
+validation `422`, or any other pre-commit failure writes **no**
+`tenant.catalog_capability_changed` record — the audit trail never shows a
+"successful" capability change that did not happen. Likewise a **no-op** `PATCH`
+(no row actually changed) writes no audit row. `HG3-AUDIT` (§P) asserts this.
+
 ---
 
 ## P. Hard gates / tests
 
 ### P.1 Hard gates (build-blocking on the Task 3.1 PR)
 
-| Gate                             | Assertion                                                                                                                                                                                                                                                                                                                   |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HG3-CAPABILITY-NORMALIZATION`   | `UNIQUE (tenant_id, capability_key)` + `UNIQUE (template_key, capability_key)`; a `PATCH` of one key leaves every other row byte-identical; no single-blob storage                                                                                                                                                          |
-| `HG3-TEMPLATE-SNAPSHOT`          | an edit to `business_type_template` / `_capability` (bump `version`, change a row) does **not** mutate any already-applied tenant's `tenant_catalog_capability` rows; the tenant's `source_template_version` still records the version it snapshotted                                                                       |
-| `HG3-1-PROVENANCE`               | `source_kind` transitions per §H (apply → `TEMPLATE`; first `PATCH` change → `MANUAL` + `overridden_at`; template-never-granted key via `PATCH` → `MANUAL`, null `source_template_*`); no reliance on `version === 1`                                                                                                       |
-| `HG3-1-GENERIC-APPLY`            | the provisioning apply has **no per-template branch** — a repo scan for `=== 'CUSTOM'` / a `switch` on `businessTypeKey` in the apply path fails the gate; `CUSTOM` provisions through the identical code path as `BAKERY_CAKE` (a test provisions both and diffs the code path)                                            |
-| `HG3-1-BUSINESS-TYPE-REQUIRED`   | `POST /v1/platform/tenants` with no `businessTypeKey` → `422 BUSINESS_TYPE_REQUIRED`; with an unknown/deprecated key → `422`; the API never substitutes a default                                                                                                                                                           |
-| `HG3-NO-BT-BRANCH`               | no code path reads `tenant.business_type_key` to branch runtime behaviour — repo scan (`business_?type`) outside the apply/provisioning code + review; the capability service reads only `tenant_catalog_capability`                                                                                                        |
-| `HG3-1-ENTITLEMENT-INDEPENDENCE` | a template apply does **not** write `tenant_entitlement`; an `enabled` capability whose entitlement is absent is inert; granting the entitlement later makes it usable with **no** capability-row write (a test toggles the entitlement and re-checks `assertEnabled ∧ assertEntitled` without touching the capability row) |
-| `HG3-PERMISSION-STABILITY`       | only `platform:catalog_capability:manage` is added; `identifiers:manage` unchanged and appears exactly once; `@flower/permissions` key-registry test + probe meta-test green                                                                                                                                                |
-| `HG3-RLS`                        | `tenant_catalog_capability` `ENABLE + FORCE` + policy; no-GUC scoped query → 0 rows; `WITH CHECK` blocks a foreign-`tenant_id` insert; `business_type_template*` RLS-exempt, `flower_app` SELECT-only (INSERT/UPDATE/DELETE denied at the DB); `flower_app` still `NOBYPASSRLS`; **no new DB role**                         |
-| `HG3-1-CONCURRENCY`              | (if §L approved) `PATCH` without `If-Match` → `428`/`400`; stale `If-Match` → `409 CATALOG_CAPABILITY_VERSION_CONFLICT`; a successful `PATCH` bumps `tenant.catalog_capability_version` in the same txn                                                                                                                     |
-| `HG3-TENANT-ISOLATION`           | the cross-tenant probe suite is extended to all four new endpoints — tenant B cannot read/write tenant A's capabilities by id / param / URL → 403/404/0 rows; mutation-tested                                                                                                                                               |
-| `HG3-IDEM`                       | provisioning replay (same idempotency key) is a full no-op — no duplicate capability rows                                                                                                                                                                                                                                   |
-| `HG3-AUDIT`                      | `catalog.template_applied` + `tenant.catalog_capability_changed` registered in `AUDITABLE_ACTIONS`; `actions.test.ts` (closed set) green; the apply writes exactly one row; a `PATCH` writes exactly one row with the before/after detail of §O.1                                                                           |
-| `HG3-NO-PREMATURE-DOMAIN`        | no `category` / `product` / `product_type` / `attribute*` / `variant*` / `item_identifier` / `uom*` / price / inventory / order table or service; boundary lint + review                                                                                                                                                    |
-| `HG3-1-NO-REALTIME`              | no `outbox` write, no new realtime topic/channel, no gateway change in the Task 3.1 diff                                                                                                                                                                                                                                    |
-| `HG3-REGRESSION`                 | full Phase 0–2-core `turbo run test` green after Task 3.1 (api · worker · realtime · scheduler · db · backend · spike-rls · money · uom)                                                                                                                                                                                    |
-| `HG3-CI`                         | GitHub CI `verify` + `security` + `e2e` + `realtime` green on the PR HEAD; cumulative `security-review` (`phase-2-core-complete` → HEAD) no open Critical/High                                                                                                                                                              |
+| Gate                             | Assertion                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HG3-CAPABILITY-NORMALIZATION`   | `UNIQUE (tenant_id, capability_key)` + `UNIQUE (template_key, capability_key)`; a `PATCH` of one key leaves every other row byte-identical; no single-blob storage                                                                                                                                                                                  |
+| `HG3-TEMPLATE-SNAPSHOT`          | an edit to `business_type_template` / `_capability` (bump `version`, change a row) does **not** mutate any already-applied tenant's `tenant_catalog_capability` rows; the tenant's `source_template_version` still records the version it snapshotted                                                                                               |
+| `HG3-1-PROVENANCE`               | `source_kind` transitions per §H (apply → `TEMPLATE`; first `PATCH` change → `MANUAL` + `overridden_at`; template-never-granted key via `PATCH` → `MANUAL`, null `source_template_*`); no reliance on `version === 1`                                                                                                                               |
+| `HG3-1-GENERIC-APPLY`            | the provisioning apply has **no per-template branch** — a repo scan for `=== 'CUSTOM'` / a `switch` on `businessTypeKey` in the apply path fails the gate; `CUSTOM` provisions through the identical code path as `BAKERY_CAKE` (a test provisions both and diffs the code path)                                                                    |
+| `HG3-1-BUSINESS-TYPE-REQUIRED`   | `POST /v1/platform/tenants` with no `businessTypeKey` → `422 BUSINESS_TYPE_REQUIRED`; with an unknown/deprecated key → `422`; the API never substitutes a default                                                                                                                                                                                   |
+| `HG3-NO-BT-BRANCH`               | no code path reads `tenant.business_type_key` to branch runtime behaviour — repo scan (`business_?type`) outside the apply/provisioning code + review; the capability service reads only `tenant_catalog_capability`                                                                                                                                |
+| `HG3-1-ENTITLEMENT-INDEPENDENCE` | a template apply does **not** write `tenant_entitlement`; an `enabled` capability whose entitlement is absent is inert; granting the entitlement later makes it usable with **no** capability-row write (a test toggles the entitlement and re-checks `assertEnabled ∧ assertEntitled` without touching the capability row)                         |
+| `HG3-PERMISSION-STABILITY`       | only `platform:catalog_capability:manage` is added; `identifiers:manage` unchanged and appears exactly once; `@flower/permissions` key-registry test + probe meta-test green                                                                                                                                                                        |
+| `HG3-RLS`                        | `tenant_catalog_capability` `ENABLE + FORCE` + policy; no-GUC scoped query → 0 rows; `WITH CHECK` blocks a foreign-`tenant_id` insert; `business_type_template*` RLS-exempt, `flower_app` SELECT-only (INSERT/UPDATE/DELETE denied at the DB); `flower_app` still `NOBYPASSRLS`; **no new DB role**                                                 |
+| `HG3-1-CONCURRENCY`              | `PATCH` without `If-Match` → `428`; stale `If-Match` → `409 CATALOG_CAPABILITY_VERSION_CONFLICT` **with no row modified and no audit row written**; a successful `PATCH` bumps `tenant.catalog_capability_version` by exactly 1 **in the same txn** as the row upserts; provisioning apply sets it to `1`; a no-op `PATCH` does not advance it (§L) |
+| `HG3-TENANT-ISOLATION`           | the cross-tenant probe suite is extended to all four new endpoints — tenant B cannot read/write tenant A's capabilities by id / param / URL → 403/404/0 rows; mutation-tested                                                                                                                                                                       |
+| `HG3-IDEM`                       | provisioning replay (same idempotency key) is a full no-op — no duplicate capability rows                                                                                                                                                                                                                                                           |
+| `HG3-AUDIT`                      | `catalog.template_applied` + `tenant.catalog_capability_changed` registered in `AUDITABLE_ACTIONS`; `actions.test.ts` (closed set) green; the apply writes exactly one row; a `PATCH` writes exactly one row with the before/after detail of §O.1                                                                                                   |
+| `HG3-NO-PREMATURE-DOMAIN`        | no `category` / `product` / `product_type` / `attribute*` / `variant*` / `item_identifier` / `uom*` / price / inventory / order table or service; boundary lint + review                                                                                                                                                                            |
+| `HG3-1-NO-REALTIME`              | no `outbox` write, no new realtime topic/channel, no gateway change in the Task 3.1 diff                                                                                                                                                                                                                                                            |
+| `HG3-REGRESSION`                 | full Phase 0–2-core `turbo run test` green after Task 3.1 (api · worker · realtime · scheduler · db · backend · spike-rls · money · uom)                                                                                                                                                                                                            |
+| `HG3-CI`                         | GitHub CI `verify` + `security` + `e2e` + `realtime` green on the PR HEAD; cumulative `security-review` (`phase-2-core-complete` → HEAD) no open Critical/High                                                                                                                                                                                      |
 
 ### P.2 Tests
 
@@ -930,8 +1037,16 @@ for `catalog.template_applied`. `actions.test.ts` keeps the `security_event` vie
   byte-identical; `business_type_applied_version` still `1`.
 - `PATCH`: enable `multi_uom` → row becomes `MANUAL`, `overridden_at` set,
   aggregate version `1 → 2`, one audit row with before/after; a second `PATCH`
-  with the stale `If-Match` → `409`; a `PATCH` that only sets an already-true
-  value → success, no write, no version bump.
+  with the stale `If-Match` → `409` **and** no capability row changed **and** no
+  `tenant.catalog_capability_changed` audit row written **and** the aggregate
+  version unchanged; a `PATCH` with no `If-Match` → `428`; a `PATCH` that only
+  sets an already-true value → `200`, no write, no version bump, no audit row.
+- concurrency: two `PATCH`es with the same starting `If-Match` — the first
+  commits (version `n → n+1`), the second gets `409`; the losing transaction
+  leaves no partial state.
+- config rejection: a `PATCH` (or a template seed) with a non-null `config` for a
+  capability with no registered schema → `422 CAPABILITY_CONFIG_NOT_SUPPORTED`;
+  the arbitrary JSON is never persisted.
 - tenant read: `GET /v1/catalog/capabilities` returns only the caller's tenant;
   `inert` is `true` for `delivery` when the `delivery` entitlement is off and
   flips to `false` when it is granted — **with no capability-row write**.
@@ -976,19 +1091,40 @@ Also **not** in Task 3.1:
 
 ---
 
-## R. Open items for owner sign-off
+## R. Resolved decisions (locked 2026-09-06)
 
-| #       | Item                                                                                                                                                                                                                                                              | Recommendation                                                                                                                   |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **R-1** | The 16-key closed capability registry (§A)                                                                                                                                                                                                                        | Approve as written                                                                                                               |
-| **R-2** | The per-preset capability matrix (§C.3), incl. the 5 owner adjustments and the B2B/trade presets defaulting `channel.customer_web` / `customer_ordering` **off** (`WHOLESALE_DISTRIBUTION`, `ELECTRICAL_PLUMBING`, `BUILDING_MATERIALS`, `PACKAGING_DISPOSABLES`) | Approve, or send deltas                                                                                                          |
-| **R-3** | **§L** — add `tenant.catalog_capability_version int NOT NULL DEFAULT 0` as the aggregate optimistic-concurrency counter; `PATCH` requires `If-Match`; `409` on mismatch                                                                                           | **Approve L.2** (the recommended mechanism)                                                                                      |
-| **R-4** | `PATCH …/catalog-capabilities` — add an optional `Idempotency-Key` in addition to `If-Match`?                                                                                                                                                                     | **No** — `If-Match` is sufficient for a version-guarded state transition with no external side effect (D2-9)                     |
-| **R-5** | `purchasing` capability — entitlement mapping (§D)                                                                                                                                                                                                                | Leave **unmapped** in Task 3.1 (foundational intent); Phase 5 decides whether a `procurement` module is introduced               |
-| **R-6** | `inventory.tracked` — entitlement mapping                                                                                                                                                                                                                         | Leave **unmapped** (basic per-branch tracking is foundational; `advanced_inventory` gates lot/batch/expiry only)                 |
-| **R-7** | `GET /v1/platform/tenants/:tenantId/catalog-capabilities` permission — `platform:catalog_capability:manage` (no step-up on read) vs a lighter `platform:tenants:view`                                                                                             | Use **`platform:catalog_capability:manage`** for the read too (it is the surface the write mutates); step-up only on the `PATCH` |
-| **R-8** | `tenant.catalog_capability_version` column form — `NOT NULL DEFAULT 0` (recommended, PG11+ fast) vs `NULL` treated as `0`                                                                                                                                         | `NOT NULL DEFAULT 0`                                                                                                             |
-| **R-9** | Config-schema map (§E) — ship the empty `CATALOG_CAPABILITY_CONFIG_SCHEMAS` + validation hook now, or defer entirely to the first phase that needs a schema                                                                                                       | Ship the **empty map + hook** now (proves the contract; zero schemas)                                                            |
+This section was "open items for owner sign-off". **All nine items are now
+resolved** with the outcomes below, plus **three additional locks**. This is the
+authoritative locked-decision record for Task 3.1 — there are **no
+Task-3.1-blocking TBDs**.
+
+### R.1 The nine open items — closed
+
+| #       | Item                                                                 | Locked outcome                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **R-1** | The 16-key closed capability registry (§A)                           | **Approved as written.** The 16 keys of §A are the closed set; `packages/shared-types` exports `CATALOG_CAPABILITY_KEYS` + `CapabilityKey`; a write with a key outside the set is `422`. No key added or removed in Task 3.1.                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **R-2** | Per-preset matrix (§C.3) incl. B2B/trade defaults                    | **Approved.** `WHOLESALE_DISTRIBUTION`, `ELECTRICAL_PLUMBING`, `BUILDING_MATERIALS`, `PACKAGING_DISPOSABLES` ship `channel.customer_web` = OFF and `customer_ordering` = OFF by default (§C.4). Defaults only — Super Admin may enable them per tenant later. No code branches on the Business-Type name/key to infer B2B (`HG3-NO-BT-BRANCH`).                                                                                                                                                                                                                                                                                                        |
+| **R-3** | Aggregate optimistic-concurrency for the capability-set API          | **Approved.** `tenant.catalog_capability_version int NOT NULL DEFAULT 0` is the aggregate version. Full locked semantics in **§L.3**: pre-3.1 tenant = 0; provisioning apply sets 1; every successful `PATCH` +1; Task 3.10 re-apply +1 per successful txn; failed / rolled-back / no-op never advances it. `PATCH` **requires** `If-Match` (`428` if absent); stale → `409 CATALOG_CAPABILITY_VERSION_CONFLICT` with **no partial row change and no audit row**. Compare + increment are atomic in the **same DB transaction** as the row upserts. Both `GET`s expose the version. Per-row `version` is **not** the concurrency contract for the set. |
+| **R-4** | Add an optional `Idempotency-Key` to `PATCH …/catalog-capabilities`? | **No** (approved as recommended). `If-Match` is the sufficient guard for a version-guarded state transition with no external side effect (D2-9). No `Idempotency-Key` on this route.                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **R-5** | `purchasing` capability — entitlement mapping                        | **Approved: no entitlement mapping in Task 3.1.** `purchasing` is a foundational intent/config flag. Phase 5 decides whether a `procurement` (or similar) commercial entitlement is introduced when the Purchasing domain is built. Task 3.1 must not invent it early.                                                                                                                                                                                                                                                                                                                                                                                 |
+| **R-6** | `inventory.tracked` — entitlement mapping                            | **Approved: no entitlement mapping in Task 3.1.** Basic per-branch stock-tracking intent is foundational. `advanced_inventory` gates `inventory.lot_batch` / `inventory.expiry` only. Phase 5 decides whether additional Inventory entitlements are introduced. Task 3.1 must not invent them early.                                                                                                                                                                                                                                                                                                                                                   |
+| **R-7** | Platform read permission + step-up                                   | **Approved.** `GET /v1/platform/tenants/:tenantId/catalog-capabilities` → `platform:catalog_capability:manage`, **no step-up on the read**. `PATCH …/catalog-capabilities` → `platform:catalog_capability:manage` **+ fresh step-up**. No separate platform capability-view permission is created in Task 3.1.                                                                                                                                                                                                                                                                                                                                         |
+| **R-8** | `tenant.catalog_capability_version` column form                      | **Approved: `int NOT NULL DEFAULT 0`** (PostgreSQL 11+ metadata-only add, no table rewrite).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| **R-9** | Config-schema registry — ship empty map + hook now, or defer         | **Approved: ship the empty-but-typed registry + validation hook now.** `CATALOG_CAPABILITY_CONFIG_SCHEMAS = {}` in `packages/shared-types`; both write paths call the hook; **all 16 keys have `config = null` in Task 3.1**; a non-null `config` for a key with no registered schema is **rejected** `422`, never silently persisted (§E).                                                                                                                                                                                                                                                                                                            |
+
+### R.2 Additional locks (owner, 2026-09-06)
+
+| Lock                    | Statement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Template versioning** | `business_type_template.version` is the current curated version. A platform seed/curation change to any capability default: (1) bump `business_type_template.version`, (2) update that template's `business_type_template_capability` rows, (3) **never** mutate any existing `tenant_catalog_capability` row (`HG3-TEMPLATE-SNAPSHOT`). Tenant provenance keeps `source_template_key` + `source_template_version`; the **snapshot is authoritative for that tenant** and does not need the old template rows to stay mutable / active / present. Templates in use are `DEPRECATED`, never destructively deleted (`ON DELETE RESTRICT` FK). Detail: §F.1.1. |
+| **CUSTOM**              | `CUSTOM` is a completely normal, data-driven `business_type_template` row. The generic initial-apply code path handles it **identically** to every other Business Type. No `if businessTypeKey === 'CUSTOM'` (or `switch`) anywhere — provisioning, apply, service, or SA UI logic. Its only difference is the contents of its `business_type_template_capability` rows. Detail: §I.3, gate `HG3-1-GENERIC-APPLY`.                                                                                                                                                                                                                                          |
+| **Capability config**   | For Task 3.1 **all 16 capability keys have `config = null`.** No speculative JSON schema. The validation registry/hook ships **empty but typed**. A non-null `config` for a capability with **no** registered schema is **rejected** `422 CAPABILITY_CONFIG_NOT_SUPPORTED` — arbitrary JSON is never persisted. A later task adds a bounded schema deliberately, in its own PR. Detail: §E.                                                                                                                                                                                                                                                                 |
+
+### R.3 No remaining Task-3.1-blocking TBDs
+
+Every design question needed to begin Task 3.1 implementation is resolved here or
+in the section referenced. The only work that remains explicitly deferred is
+**owner approval to start integration** (separate from approving this spec).
 
 ---
 
@@ -1007,7 +1143,7 @@ existing table `tenant` — additive nullable / defaulted columns only:
   business_type_key             text NULL         FK -> business_type_template.key ON DELETE RESTRICT
   business_type_applied_version  int  NULL
   business_type_applied_at       timestamptz NULL
-  catalog_capability_version      int  NOT NULL DEFAULT 0     (pending R-3 / R-8)
+  catalog_capability_version      int  NOT NULL DEFAULT 0     (locked — R-3 / R-8; PG11+ metadata-only add)
 
 grants:
   REVOKE INSERT, UPDATE, DELETE on the three new tables FROM flower_app  (SELECT retained)
@@ -1030,5 +1166,7 @@ test's `.at(-1)` assertion updates to the new migration name.
 
 ---
 
-_End of PHASE-3.1-CAPABILITY-SPEC.md. Documentation only — awaiting owner approval
-of the capability spec before any Task 3.1 schema, migration, or runtime code._
+_End of PHASE-3.1-CAPABILITY-SPEC.md. Documentation only. The capability spec is
+APPROVED (owner, 2026-09-06) with §R closed. No Task 3.1 schema, migration, or
+runtime code is started; implementation waits for the owner's separate
+integration approval._
