@@ -15,6 +15,8 @@ const PLATFORM_PERMISSIONS = [
   'platform:sessions:revoke',
   'platform:audit:view',
   'platform:secrets:manage',
+  // task 3.1
+  'platform:catalog_capability:manage',
 ];
 const TENANT_KEYS = [
   'users:view',

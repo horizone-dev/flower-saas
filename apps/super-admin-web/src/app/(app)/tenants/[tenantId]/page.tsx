@@ -33,13 +33,19 @@ export default async function TenantDetail({ params }: { params: Promise<{ tenan
   let caps: Awaited<ReturnType<typeof api.getTenantCatalogCapabilities>> | null = null;
   let loadError: string | undefined;
   try {
-    [config, creds, caps] = await Promise.all([
+    [config, creds] = await Promise.all([
       api.getTenantConfig(tenantId),
       api.listProviderCredentials(tenantId),
-      api.getTenantCatalogCapabilities(tenantId),
     ]);
   } catch (err) {
     loadError = errorMessage(err);
+  }
+  // separate — a capability-read failure (e.g. missing permission) must not hide
+  // the entitlements / limits / credentials sections.
+  try {
+    caps = await api.getTenantCatalogCapabilities(tenantId);
+  } catch {
+    caps = null;
   }
 
   const impersonation = await getImpersonation();
