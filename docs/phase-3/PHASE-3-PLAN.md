@@ -117,11 +117,26 @@ group — grouping is display metadata, unrelated to which routes use it). Only
 `platform:catalog_capability:manage` is **added** (platform realm, step-up).
 No two semantically identical identifier permissions (HG3-PERMISSION-STABILITY).
 
-**D2-7 — Product media deferred.** No arbitrary product-media `jsonb` on the
-`product` row. Phase 3a catalog definitions may exist with **no** media. Media
-is introduced with the proper file/media foundation (Phase 5 `files` /
-`documents`), using explicit media references with ownership, ordering and
-lifecycle rules.
+**D2-7 — Product/catalog media integration is not required for Phase 3a.**
+
+- **Product/catalog media integration is NOT required for Phase 3a.** Phase 3a
+  catalog may operate with **no** product media at all.
+- **No temporary `media jsonb` (or equivalent shortcut) column is added to
+  `product`** — a catalog definition without media is a complete, valid
+  definition.
+- **The `files` module is not being moved out of Phase 3.** `ROADMAP.md`
+  §Phase 3's module list already includes `files`; this plan does **not**
+  reclassify it. If the approved Phase 3b roadmap requires the minimal `files`
+  module (e.g. for expense receipts, supplier-bill attachments, or a first
+  product-image path), it **remains Phase 3 scope** and is specified in the
+  **Phase 3b plan**.
+- **Rich product-media integration** (explicit file/media references with
+  ownership, ordering, lifecycle rules, an `owner_type = PRODUCT` binding) may be
+  deferred to that later file/media work if that is where the approved roadmap
+  ultimately places it — a decision recorded in the Phase 3b plan, not here.
+- **`ROADMAP.md` is not changed by this PR.** No genuine roadmap correction is
+  required for product media; if one ever is, it is reported and approved
+  separately first.
 
 **D2-8 — Tax scope.** Phase 3a: **tax-category assignment** on the catalog +
 **`company.country_code`-based effective-rate resolution** (a read service).
@@ -635,25 +650,25 @@ existing branch filter already covers this or needs a company-scope check added.
 
 ### H.1 Explicitly OUT of Phase 3a
 
-| Item                                                                                     | Phase         | Foundation-only hook in 3a?                                                                                                                                                     |
-| ---------------------------------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Inventory movement ledger, `branch_inventory_balance`, adjustment, `inventory_item`      | **5**         | **No table** (D2-11). `item_identifier.target_kind` reserves `INVENTORY_ITEM`; `variant.base_uom_code` is the normalisation anchor.                                             |
-| Batch / lot / expiry / FEFO                                                              | 5             | **Stored not enforced:** `tenant_catalog_capability` carries `lot_batch` / `expiry` toggles (generalises Z-11); no `lot` table, no enforcement.                                 |
-| Purchase receiving, `goods_receipt`, supplier bills / documents                          | 5             | `company_variant_uom_price.purchase_*` nullable columns → Phase 5 needs no schema change for UOM-specific cost.                                                                 |
-| **Product media**                                                                        | 5 (`files`)   | **No hook** — D2-7. Catalog definitions have no media in 3a; media arrives with explicit file references + ownership/ordering/lifecycle.                                        |
-| BOM / recipe / bouquet / hamper composition                                              | 6             | `product.fulfilment_strategy` models `BOM` / `CUSTOM`; such a product may exist in 3a with no recipe (unsellable until Phase 6). `custom_composition` entitlement module added. |
-| Production / work orders / wastage / spoilage                                            | 6             | none                                                                                                                                                                            |
-| **Orders, order lines, walk-in sale, gapless numbering**                                 | **3b**        | The catalog **price/tax resolution services** (3.7 / 3.9) are the read APIs a 3b order line will call to build a self-contained **snapshot** (§H.2.1). No `order` table in 3a.  |
-| **Payments, provider adapter, webhooks**                                                 | 3b            | `provider_credential` (Phase 1 vault shell) already exists; no payment table.                                                                                                   |
-| **Accounting / GL / posting engine / CoA / periods**                                     | 3b            | none — §H.2 for the constraints 3a must respect.                                                                                                                                |
-| **Receivables / credit / advances / gift cards**                                         | 3b            | none                                                                                                                                                                            |
-| **Settlement / allocation / settlement discount**                                        | 3b            | §H.2                                                                                                                                                                            |
-| **Cancellation / refund / cancellation charge / account credit**                         | 3b            | §H.2                                                                                                                                                                            |
-| **Customer financial subledger**                                                         | 3b            | none                                                                                                                                                                            |
-| Z-Report, cash register, POS shift, X-Report, expenses                                   | 4             | none                                                                                                                                                                            |
-| Customer Web storefront, online-order queue, delivery                                    | 7             | `customer_web_visible` capability flag exists so Phase 7's published-catalog projection has a source of truth; no storefront code.                                              |
-| Promotions / coupons / loyalty / subscriptions                                           | 7 / 10        | `promotions:manage` stays inert; no table.                                                                                                                                      |
-| Cart/line/order **tax computation**, inclusive/exclusive, rounding policy, tax snapshots | **3b** (D2-8) | 3a ships tax **category** + rate **resolution** only.                                                                                                                           |
+| Item                                                                                     | Phase         | Foundation-only hook in 3a?                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Inventory movement ledger, `branch_inventory_balance`, adjustment, `inventory_item`      | **5**         | **No table** (D2-11). `item_identifier.target_kind` reserves `INVENTORY_ITEM`; `variant.base_uom_code` is the normalisation anchor.                                                                                                                                                                                                                                                                                           |
+| Batch / lot / expiry / FEFO                                                              | 5             | **Stored not enforced:** `tenant_catalog_capability` carries `lot_batch` / `expiry` toggles (generalises Z-11); no `lot` table, no enforcement.                                                                                                                                                                                                                                                                               |
+| Purchase receiving, `goods_receipt`, supplier bills / documents                          | 5             | `company_variant_uom_price.purchase_*` nullable columns → Phase 5 needs no schema change for UOM-specific cost.                                                                                                                                                                                                                                                                                                               |
+| **Product/catalog media integration** (not the `files` module itself)                    | 3b / later    | **Not required for Phase 3a; no hook, no `media jsonb`** (D2-7). Catalog definitions operate with no media. The `files` module stays `ROADMAP.md` §Phase 3 scope — if Phase 3b needs the minimal `files` module it is specified in the Phase 3b plan; rich media (explicit file refs + ownership/ordering/lifecycle, `owner_type = PRODUCT`) may be deferred to that later file/media work. `ROADMAP.md` is not changed here. |
+| BOM / recipe / bouquet / hamper composition                                              | 6             | `product.fulfilment_strategy` models `BOM` / `CUSTOM`; such a product may exist in 3a with no recipe (unsellable until Phase 6). `custom_composition` entitlement module added.                                                                                                                                                                                                                                               |
+| Production / work orders / wastage / spoilage                                            | 6             | none                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Orders, order lines, walk-in sale, gapless numbering**                                 | **3b**        | The catalog **price/tax resolution services** (3.7 / 3.9) are the read APIs a 3b order line will call to build a self-contained **snapshot** (§H.2.1). No `order` table in 3a.                                                                                                                                                                                                                                                |
+| **Payments, provider adapter, webhooks**                                                 | 3b            | `provider_credential` (Phase 1 vault shell) already exists; no payment table.                                                                                                                                                                                                                                                                                                                                                 |
+| **Accounting / GL / posting engine / CoA / periods**                                     | 3b            | none — §H.2 for the constraints 3a must respect.                                                                                                                                                                                                                                                                                                                                                                              |
+| **Receivables / credit / advances / gift cards**                                         | 3b            | none                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Settlement / allocation / settlement discount**                                        | 3b            | §H.2                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Cancellation / refund / cancellation charge / account credit**                         | 3b            | §H.2                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **Customer financial subledger**                                                         | 3b            | none                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Z-Report, cash register, POS shift, X-Report, expenses                                   | 4             | none                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Customer Web storefront, online-order queue, delivery                                    | 7             | `customer_web_visible` capability flag exists so Phase 7's published-catalog projection has a source of truth; no storefront code.                                                                                                                                                                                                                                                                                            |
+| Promotions / coupons / loyalty / subscriptions                                           | 7 / 10        | `promotions:manage` stays inert; no table.                                                                                                                                                                                                                                                                                                                                                                                    |
+| Cart/line/order **tax computation**, inclusive/exclusive, rounding policy, tax snapshots | **3b** (D2-8) | 3a ships tax **category** + rate **resolution** only.                                                                                                                                                                                                                                                                                                                                                                         |
 
 ### H.2 ADR-0019 structural constraints Phase 3a must not violate
 
@@ -702,9 +717,10 @@ roadmap exit criteria — D2-1).
 
 Most prior open items (I.1, I.4–I.11 in the earlier draft) are now **locked** by
 §0.2 (D2-1 split · D2-3 two price tables · D2-5 normalized capability · D2-6
-permission stability · D2-7 media deferred · D2-8 tax scope · D2-9 idempotency
-contract · D2-10 audit scope · D2-11 no inventory shell · D2-12 migration
-wording · Appendix A presets). What remains:
+permission stability · D2-7 no product-media integration in 3a (`files` module
+stays Phase 3 scope) · D2-8 tax scope · D2-9 idempotency contract · D2-10 audit
+scope · D2-11 no inventory shell · D2-12 migration wording · Appendix A
+presets). What remains:
 
 | #       | Decision                                                                                                                                                                                                                       | Recommendation                                                                                                                                                                                                                           |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -753,11 +769,13 @@ wording · Appendix A presets). What remains:
    duplicated** (D2-6).
 3. **`@flower/shared-types` `ENTITLEMENT_MODULES`** — add `custom_composition`;
    note `catalog` is a foundation module (always on).
-4. **`ROADMAP.md` §Phase 3** — a note that Phase 3 executes as **3a (catalog)**
-   then **3b (revenue path + financial truth)** with a
-   `phase-3a-catalog-complete` **checkpoint** (never full-Phase-3) between
-   (D2-1); dependency order and exit criteria unchanged; `phase-3-complete` only
-   after the full Phase 3b roadmap exit criteria.
+4. **`ROADMAP.md` §Phase 3** — **not changed by this PR.** A note (to be added in
+   a later task, not here) that Phase 3 executes as **3a (catalog)** then **3b
+   (revenue path + financial truth)** with a `phase-3a-catalog-complete`
+   **checkpoint** (never full-Phase-3) between (D2-1); the §Phase 3 **module list
+   — including `files` — dependency order and exit criteria are unchanged**;
+   `phase-3-complete` only after the full Phase 3b roadmap exit criteria. Any
+   genuine roadmap correction is reported and approved separately first.
 5. **`DB-CONVENTIONS.md` §Migrations** — a note that an **additive nullable
    column** on a shipped table is permitted (D2-12), distinct from a destructive
    rewrite (which is not).
