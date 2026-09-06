@@ -11,6 +11,7 @@ import { IdentityModule } from './modules/identity/identity.module.js';
 import { OrgModule } from './modules/org/org.module.js';
 import { SecretsModule } from './modules/secrets/secrets.module.js';
 import { LocalizationModule } from './modules/localization/localization.module.js';
+import { CatalogModule } from './modules/catalog/catalog.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
@@ -32,6 +33,7 @@ import { HealthModule } from './health/health.module.js';
     OrgModule,
     SecretsModule,
     LocalizationModule,
+    CatalogModule,
     HealthModule,
   ],
 })

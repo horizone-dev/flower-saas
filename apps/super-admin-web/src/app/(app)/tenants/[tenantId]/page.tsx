@@ -8,6 +8,7 @@ import { tenantLifecycle } from '../actions';
 import {
   overrideLimit,
   overrideEntitlement,
+  toggleCatalogCapability,
   createProviderCredential,
   revokeProviderCredential,
   startImpersonation,
@@ -29,11 +30,13 @@ export default async function TenantDetail({ params }: { params: Promise<{ tenan
 
   let config: Awaited<ReturnType<typeof api.getTenantConfig>> | null = null;
   let creds: Awaited<ReturnType<typeof api.listProviderCredentials>> = [];
+  let caps: Awaited<ReturnType<typeof api.getTenantCatalogCapabilities>> | null = null;
   let loadError: string | undefined;
   try {
-    [config, creds] = await Promise.all([
+    [config, creds, caps] = await Promise.all([
       api.getTenantConfig(tenantId),
       api.listProviderCredentials(tenantId),
+      api.getTenantCatalogCapabilities(tenantId),
     ]);
   } catch (err) {
     loadError = errorMessage(err);
@@ -178,6 +181,57 @@ export default async function TenantDetail({ params }: { params: Promise<{ tenan
             </Table>
           </Card>
         </>
+      ) : null}
+
+      {caps ? (
+        <Card title="Catalog / Business Capabilities">
+          <p className="muted" style={{ marginBottom: '0.5rem' }}>
+            Business Type <code>{caps.businessTypeKey ?? '—'}</code>
+            {caps.businessTypeAppliedVersion != null
+              ? ` · applied template v${caps.businessTypeAppliedVersion}`
+              : ''}{' '}
+            · capability set v{caps.aggregateVersion}
+          </p>
+          <Table head={['Capability', 'State', 'Source', '']}>
+            {caps.capabilities.map((c) => (
+              <tr key={c.capabilityKey}>
+                <td>
+                  <code>{c.capabilityKey}</code>
+                  {c.inert ? (
+                    <div className="muted">
+                      inert — requires <code>{c.requiredEntitlement}</code>
+                    </div>
+                  ) : null}
+                </td>
+                <td>
+                  <Badge tone={c.enabled ? 'good' : 'neutral'}>{c.enabled ? 'on' : 'off'}</Badge>
+                </td>
+                <td>
+                  {c.sourceKind ? (
+                    <Badge tone={c.sourceKind === 'MANUAL' ? 'warn' : 'neutral'}>
+                      {c.sourceKind.toLowerCase()}
+                    </Badge>
+                  ) : null}
+                </td>
+                <td>
+                  <form action={toggleCatalogCapability} className="row gap">
+                    <input type="hidden" name="tenantId" value={tenantId} />
+                    <input type="hidden" name="capabilityKey" value={c.capabilityKey} />
+                    <input type="hidden" name="enabled" value={c.enabled ? 'false' : 'true'} />
+                    <input
+                      type="hidden"
+                      name="expectedVersion"
+                      value={String(caps.aggregateVersion)}
+                    />
+                    <button className="btn" type="submit">
+                      {c.enabled ? 'Disable' : 'Enable'}
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </Table>
+        </Card>
       ) : null}
 
       <Card title="Provider credentials (secrets vault)">

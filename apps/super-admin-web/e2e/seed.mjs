@@ -66,6 +66,21 @@ export async function seedForSmoke(databaseUrl) {
        VALUES ('AE', 'United Arab Emirates', 'x', 'gcc', 'AED', 'SAT_SUN', true, now())`,
     );
 
+    // task 3.1 — a couple of Business-Type templates so the "Provision a tenant"
+    // form's (required) Business Type selector has options and the snapshot runs.
+    await c.query(`
+      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+      VALUES ('CUSTOM', 1, 'Custom / other', 'x', 'ACTIVE', now()),
+             ('FLOWER_FLORIST', 1, 'Flower Shop / Florist', 'x', 'ACTIVE', now());
+      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt")
+      VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),
+             ('CUSTOM','channel.pos',true,now()),
+             ('FLOWER_FLORIST','strategy.stocked',true,now()),('FLOWER_FLORIST','variants',true,now()),
+             ('FLOWER_FLORIST','multi_uom',true,now()),('FLOWER_FLORIST','branch_pricing',true,now()),
+             ('FLOWER_FLORIST','channel.pos',true,now()),('FLOWER_FLORIST','strategy.bom',true,now()),
+             ('FLOWER_FLORIST','delivery',true,now());
+    `);
+
     const planId = randomUUID();
     const planVersionId = randomUUID();
     await c.query(

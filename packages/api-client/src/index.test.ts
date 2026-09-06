@@ -104,6 +104,7 @@ describe('@flower/api-client', () => {
         name: 'Acme',
         region: 'AE',
         companyCountryCode: 'AE',
+        businessTypeKey: 'CUSTOM',
         planVersionId: 'pv1',
         ownerEmail: 'a@b.co',
       },

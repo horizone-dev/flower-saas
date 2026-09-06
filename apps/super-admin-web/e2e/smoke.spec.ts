@@ -33,10 +33,19 @@ test('Super Admin: login → provision → lifecycle → role assign → preview
   await page.fill('input[name="slug"]', SLUG);
   await page.fill('input[name="name"]', 'Smoke Florist FZE');
   await page.fill('input[name="ownerEmail"]', `owner@${SLUG}.test`);
+  // task 3.1 — Business Type is REQUIRED (no blank option); pick the florist preset
+  await page.selectOption('select[name="businessTypeKey"]', 'FLOWER_FLORIST');
   await page.click('button:has-text("Provision")');
   await page.waitForURL(/\/tenants\/[0-9a-f-]{36}$/);
   const tenantId = page.url().split('/').pop()!;
   await expect(page.locator('.badge', { hasText: 'ACTIVE' }).first()).toBeVisible();
+
+  // ── task 3.1 — the Catalog / Business Capabilities card is populated + toggles ─
+  await expect(page.locator('h2:has-text("Catalog / Business Capabilities")')).toBeVisible();
+  await expect(page.locator('td code', { hasText: 'strategy.bom' })).toBeVisible();
+  const bomRow = page.locator('tr', { has: page.locator('td code', { hasText: 'strategy.bom' }) });
+  await bomRow.locator('button:has-text("Disable")').click();
+  await expect(bomRow.locator('button:has-text("Enable")')).toBeVisible();
 
   // ── lifecycle ────────────────────────────────────────────────────────────
   await page.click('button:has-text("suspend")');

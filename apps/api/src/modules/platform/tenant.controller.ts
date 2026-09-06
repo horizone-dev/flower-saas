@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { PlatformRealm } from '../../common/auth/pipeline.decorators.js';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
 import { Ctx, type RequestContext } from '../../common/context/index.js';
+import { DomainError } from '../../common/errors/domain-error.js';
 import { ZodBody } from '../../common/validation/zod-body.js';
 import { ProvisioningService } from './provisioning.service.js';
 import { TenantLifecycleService } from './tenant-lifecycle.service.js';
@@ -26,6 +27,13 @@ const provisionSchema = z.object({
   // field from `region`: never derived from it, even though the values may
   // coincide today (task 2.7).
   companyCountryCode: z.string().length(2),
+  // Business-Type preset — REQUIRED (owner §1 / task 3.1). Optional at the zod
+  // layer so a missing/empty value is a specific `422 BUSINESS_TYPE_REQUIRED`
+  // (HG3-1-BUSINESS-TYPE-REQUIRED), not a generic 400. The API never picks a
+  // default; if no curated preset fits, Super Admin explicitly selects "CUSTOM".
+  // A present-but-unknown / DEPRECATED key is `422 UNKNOWN_BUSINESS_TYPE` /
+  // `422 BUSINESS_TYPE_NOT_ACTIVE`, thrown inside the provisioning transaction.
+  businessTypeKey: z.string().max(64).optional(),
   planVersionId: z.string().uuid(),
   ownerEmail: z.string().email(),
   companyLegalNameEn: z.string().min(1).optional(),
@@ -65,8 +73,18 @@ export class TenantController {
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Ctx() ctx: RequestContext,
   ) {
+    const businessTypeKey = dto.businessTypeKey?.trim();
+    if (!businessTypeKey) {
+      // owner §1 — the API never substitutes a default (HG3-1-BUSINESS-TYPE-REQUIRED)
+      throw new DomainError(
+        'BUSINESS_TYPE_REQUIRED',
+        'a Business Type is required — select a curated preset or "CUSTOM"',
+        422,
+      );
+    }
     return this.provisioning.provision({
       ...dto,
+      businessTypeKey,
       ...(idempotencyKey ? { idempotencyKey } : {}),
       actorPlatformUserId: ctx.platformUserId,
     });

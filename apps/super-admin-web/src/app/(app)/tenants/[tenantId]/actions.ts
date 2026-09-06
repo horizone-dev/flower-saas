@@ -26,6 +26,32 @@ export async function overrideEntitlement(formData: FormData): Promise<void> {
   revalidatePath(`/tenants/${tenantId}`);
 }
 
+/**
+ * Toggle one catalog capability (task 3.1). `expectedVersion` is the
+ * `aggregateVersion` the page was last rendered with — the If-Match precondition
+ * (spec §L). On a `409 CATALOG_CAPABILITY_VERSION_CONFLICT` the backend writes
+ * NOTHING; the `finally` revalidate re-renders the page with the current version
+ * so the Super Admin retries against it (never a silent overwrite).
+ */
+export async function toggleCatalogCapability(formData: FormData): Promise<void> {
+  const tenantId = String(formData.get('tenantId'));
+  try {
+    await serverApi().patchTenantCatalogCapabilities(
+      tenantId,
+      [
+        {
+          capabilityKey: String(formData.get('capabilityKey')),
+          enabled: formData.get('enabled') === 'true',
+        },
+      ],
+      Number(formData.get('expectedVersion')),
+      'toggled via Super Admin',
+    );
+  } finally {
+    revalidatePath(`/tenants/${tenantId}`);
+  }
+}
+
 export async function createProviderCredential(
   _prev: string | undefined,
   formData: FormData,

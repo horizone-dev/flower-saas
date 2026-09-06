@@ -234,6 +234,7 @@ describe('cross-tenant isolation probe suite', () => {
       name: slug,
       region: 'AE',
       companyCountryCode: 'AE',
+      businessTypeKey: 'CUSTOM',
       planVersionId: PLAN_V,
       ownerEmail,
     });
@@ -353,6 +354,20 @@ describe('cross-tenant isolation probe suite', () => {
           };
         },
       },
+      // ── task 3.1: the tenant-realm catalog-capability read returns ONLY the
+      // caller's own tenant state (RLS / ScopedRepository) — never tenant A's.
+      {
+        name: 'GET /v1/catalog/capabilities as ownerB returns B’s own state, no A identifiers',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send('GET', '/v1/catalog/capabilities', ownerBTok);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode,
+            leaked: [A.tenantId, A.companyId, A.branchId].some((id) => blob.includes(id)),
+          };
+        },
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -425,6 +440,12 @@ describe('cross-tenant isolation probe suite', () => {
         axis: 'tenant',
         expectDenied: [401, 403],
         attempt: asStatus('GET', '/v1/localization/reference', platformTok),
+      },
+      {
+        name: 'GET /v1/catalog/capabilities as platform token',
+        axis: 'tenant',
+        expectDenied: [401, 403],
+        attempt: asStatus('GET', '/v1/catalog/capabilities', platformTok),
       },
       {
         name: 'GET /v1/localization/companies/{A} as platform token',
@@ -557,11 +578,18 @@ describe('cross-tenant isolation probe suite', () => {
       'GET /v1/platform/audit',
       'GET /v1/platform/audit/security-events',
       'POST /v1/platform/tenants',
+      // task 3.1 — a global reference read (like GET /v1/platform/plans); carries
+      // no per-tenant resource. `platform:tenants:view`, platform realm.
+      'GET /v1/platform/business-type-templates',
     ]);
     const PROBED_PREFIXES = [
       '/v1/org',
       '/v1/access',
       '/v1/localization',
+      // task 3.1 — the tenant-realm capability read (probed below: ownerB sees
+      // only B's own state). The platform capability routes are under
+      // /v1/platform/tenants/:tenantId (already covered + realm-probed).
+      '/v1/catalog',
       '/v1/platform/tenants/:tenantId',
       '/v1/platform/tenants/:id',
     ];
@@ -620,6 +648,10 @@ async function seed(url: string): Promise<void> {
       VALUES ('AE', '2018-01-01', NULL, 'VAT');
       INSERT INTO tax_rate ("countryCode", "taxCategoryKey", "rateBps", "effectiveFrom", "effectiveTo")
       VALUES ('AE', 'STANDARD', 500, '2018-01-01', NULL), ('AE', 'ZERO_RATED', 0, '2018-01-01', NULL);
+      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+      VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
+      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt")
+      VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),('CUSTOM','channel.pos',true,now());
     `);
   } finally {
     await c.end();

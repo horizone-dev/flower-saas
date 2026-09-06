@@ -42,6 +42,8 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   // Phase 2-core (task 2.1)
   'idempotency_key',
   'translation',
+  // Phase 3 (task 3.1) — the only runtime catalog-capability-state table
+  'tenant_catalog_capability',
 ]);
 
 /**
@@ -79,6 +81,10 @@ export const PLATFORM_GLOBAL_TABLES: readonly string[] = Object.freeze([
   // platform operations) and `flower_dispatcher` (narrowed to exactly this +
   // `outbox` — task 2.4 remediation) ever reach it.
   'outbox_tenant_seq',
+  // Phase 3 (task 3.1) — Business-Type preset templates + their normalized
+  // capability defaults. RLS-exempt reference data; `flower_app` SELECT only.
+  'business_type_template',
+  'business_type_template_capability',
 ]);
 
 /** Range-partitioned tables (declared in the Phase 1 migration; a DEFAULT

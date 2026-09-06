@@ -70,6 +70,7 @@ describe('localization: reference data + company fiscal resolution (integration)
         name: 'LocTest FZE',
         region: 'AE',
         companyCountryCode: 'AE',
+        businessTypeKey: 'CUSTOM',
         planVersionId: PLAN_V,
         ownerEmail: 'owner@loctest.test',
       },
@@ -101,6 +102,7 @@ describe('localization: reference data + company fiscal resolution (integration)
         name: 'LocTest Other FZE',
         region: 'AE',
         companyCountryCode: 'AE',
+        businessTypeKey: 'CUSTOM',
         planVersionId: PLAN_V,
         ownerEmail: 'owner2@loctest.test',
       },
@@ -341,6 +343,11 @@ async function seed(url: string): Promise<void> {
 
       INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES
         ('STANDARD', 'Standard', 'x'), ('ZERO_RATED', 'Zero-rated', 'x'), ('EXEMPT', 'Exempt', 'x');
+
+      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+      VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
+      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt")
+      VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),('CUSTOM','channel.pos',true,now());
 
       INSERT INTO country_tax_config ("countryCode", "effectiveFrom", "effectiveTo", regime) VALUES
         ('AE', '2018-01-01', NULL, 'VAT'),

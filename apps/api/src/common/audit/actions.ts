@@ -36,6 +36,17 @@ export const AUDITABLE_ACTIONS = {
   'provider_credential.rotated': { resourceType: 'provider_credential', security: true },
   'provider_credential.revoked': { resourceType: 'provider_credential', security: true },
 
+  // ── catalog capability & Business-Type template foundation (task 3.1) ───
+  /** initial Business-Type template snapshot during provisioning; (later)
+   *  Task 3.10's explicit re-apply */
+  'catalog.template_applied': { resourceType: 'business_type_template', security: true },
+  /** a Super-Admin PATCH to a tenant's catalog-capability set — written ONLY
+   *  inside a committed write transaction (no row for a stale/failed/no-op) */
+  'tenant.catalog_capability_changed': {
+    resourceType: 'tenant_catalog_capability',
+    security: true,
+  },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },
@@ -59,4 +70,8 @@ export const SECURITY_ACTION_PREFIXES = [
   'provider_credential.',
   'session.',
   'IMPERSONATION:',
+  // task 3.1 — `catalog.template_applied` is security-significant (it establishes
+  // a tenant's initial capability configuration). `tenant.catalog_capability_changed`
+  // is already covered by the `tenant.` prefix.
+  'catalog.',
 ] as const;

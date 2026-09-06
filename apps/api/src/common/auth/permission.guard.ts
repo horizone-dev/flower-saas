@@ -7,7 +7,7 @@ import { DomainError, ForbiddenError, NotFoundError } from '../errors/domain-err
 import { PolicyEngine } from '../../modules/access/policy-engine.js';
 import { IS_PUBLIC_KEY } from './public.decorator.js';
 import { REQUIRED_PERMISSION_KEY } from './require-permission.decorator.js';
-import { SCOPED_PARAM_KEY, type ScopedParamConfig } from './pipeline.decorators.js';
+import { NO_STEP_UP_KEY, SCOPED_PARAM_KEY, type ScopedParamConfig } from './pipeline.decorators.js';
 
 /**
  * The ONLY actions allowed during an impersonated session (OD7). Deliberately a
@@ -63,7 +63,8 @@ export class PermissionGuard implements CanActivate {
       if (ctx.accountType !== 'PLATFORM' || !ctx.effectivePermissions.has(required)) {
         throw new ForbiddenError('missing platform permission', 'MISSING_PERMISSION');
       }
-      if (requiresStepUp(required) && ctx.mfaLevel !== 'STEP_UP') {
+      const stepUpExempt = this.meta<boolean>(execCtx, NO_STEP_UP_KEY) === true;
+      if (requiresStepUp(required) && !stepUpExempt && ctx.mfaLevel !== 'STEP_UP') {
         throw new DomainError('STEP_UP_REQUIRED', 'a fresh step-up is required', 403);
       }
       return true;

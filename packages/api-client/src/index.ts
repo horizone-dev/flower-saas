@@ -44,6 +44,10 @@ interface RequestInitLite {
   body?: unknown;
   query?: Query;
   idempotencyKey?: string;
+  /** optimistic-concurrency precondition (ETag-style) */
+  ifMatch?: string;
+  /** surface the response ETag to the caller */
+  onEtag?: (etag: string | null) => void;
 }
 
 // ── Phase 1 platform types (structural) ──────────────────────────────────────
@@ -218,10 +222,55 @@ export interface ProvisionTenantInput {
    *  source of truth (task 2.7, architecture correction 4). Deliberately
    *  independent of `region`, never derived from it. */
   companyCountryCode: string;
+  /** Business-Type preset — REQUIRED (task 3.1 / owner §1). A
+   *  `business_type_template.key` (see `listBusinessTypeTemplates`). If no
+   *  curated preset fits, pass `"CUSTOM"`. */
+  businessTypeKey: string;
   planVersionId: string;
   ownerEmail: string;
   companyLegalNameEn?: string;
   branchName?: string;
+}
+
+// ── catalog capability & Business-Type templates (task 3.1) ──────────────────
+
+export interface BusinessTypeTemplateCapabilityRow {
+  capabilityKey: string;
+  enabled: boolean;
+  config: unknown;
+}
+export interface BusinessTypeTemplateSummary {
+  key: string;
+  version: number;
+  nameEn: string;
+  nameAr: string;
+  status: 'ACTIVE' | 'DEPRECATED';
+  capabilities: BusinessTypeTemplateCapabilityRow[];
+}
+export interface TenantCatalogCapabilityRow {
+  capabilityKey: string;
+  enabled: boolean;
+  config: unknown;
+  sourceKind: 'TEMPLATE' | 'MANUAL' | null;
+  sourceTemplateKey: string | null;
+  sourceTemplateVersion: number | null;
+  overriddenAt: string | null;
+  requiredEntitlement: string | null;
+  /** true iff `requiredEntitlement` is set AND the tenant is not entitled */
+  inert: boolean;
+}
+export interface TenantCatalogCapabilityState {
+  tenantId: string;
+  businessTypeKey: string | null;
+  businessTypeAppliedVersion: number | null;
+  businessTypeAppliedAt: string | null;
+  aggregateVersion: number;
+  capabilities: TenantCatalogCapabilityRow[];
+}
+export interface CatalogCapabilityChange {
+  capabilityKey: string;
+  enabled: boolean;
+  config?: unknown;
 }
 
 export interface ProvisionTenantResponse {
@@ -272,6 +321,7 @@ export class ApiClient {
     if (token) headers['authorization'] = `Bearer ${token}`;
     if (init.body !== undefined) headers['content-type'] = 'application/json';
     if (init.idempotencyKey) headers['idempotency-key'] = init.idempotencyKey;
+    if (init.ifMatch) headers['if-match'] = init.ifMatch;
 
     const res = await this.doFetch(`${this.baseUrl}${path}${this.qs(init.query)}`, {
       method: init.method ?? 'GET',
@@ -279,6 +329,7 @@ export class ApiClient {
       ...(this.credentials ? { credentials: this.credentials } : {}),
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
     });
+    init.onEtag?.(res.headers.get('etag'));
     const body: unknown = await res.json().catch(() => undefined);
 
     if (!res.ok) {
@@ -416,6 +467,33 @@ export class ApiClient {
 
   getTenantConfig(tenantId: string): Promise<TenantConfig> {
     return this.get(`/v1/platform/tenants/${tenantId}/config`);
+  }
+
+  // ── catalog capabilities & Business-Type templates (task 3.1) ─────────────
+  listBusinessTypeTemplates(): Promise<{ data: BusinessTypeTemplateSummary[] }> {
+    return this.get('/v1/platform/business-type-templates');
+  }
+  getTenantCatalogCapabilities(tenantId: string): Promise<TenantCatalogCapabilityState> {
+    return this.get(`/v1/platform/tenants/${tenantId}/catalog-capabilities`);
+  }
+  /** PATCH a tenant's capability set. `expectedVersion` is the `aggregateVersion`
+   *  from the last read (spec §L). A stale value throws `ApiError` 409
+   *  `CATALOG_CAPABILITY_VERSION_CONFLICT`. */
+  patchTenantCatalogCapabilities(
+    tenantId: string,
+    changes: CatalogCapabilityChange[],
+    expectedVersion: number,
+    reason?: string,
+  ): Promise<TenantCatalogCapabilityState> {
+    return this.call<TenantCatalogCapabilityState>(
+      `/v1/platform/tenants/${tenantId}/catalog-capabilities`,
+      {
+        method: 'PATCH',
+        body: reason !== undefined ? { changes, reason } : { changes },
+        ifMatch: `"${expectedVersion}"`,
+      },
+      (raw) => raw as TenantCatalogCapabilityState,
+    );
   }
   overrideTenantLimit(
     tenantId: string,

@@ -96,7 +96,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_phase_2_core_infra'))).toBe(true);
     expect(names.some((n) => n.endsWith('_idempotency_claim_token'))).toBe(true);
     expect(names.some((n) => /_outbox_dispatcher$/.test(n))).toBe(true);
-    expect(names.at(-1)).toMatch(/_outbox_dispatcher_least_privilege$/);
+    expect(names.some((n) => /_outbox_dispatcher_least_privilege$/.test(n))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_capability_foundation$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -508,6 +509,300 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
           /permission denied/i,
         );
       });
+    });
+  });
+
+  // ── task 3.1 — catalog capability & Business-Type template foundation ──────
+  // docs/phase-3/PHASE-3.1-CAPABILITY-SPEC.md §F / §G / §N.
+  describe('catalog capability foundation schema (task 3.1)', () => {
+    const CAP_KEYS = [
+      'strategy.stocked',
+      'strategy.bom',
+      'strategy.custom',
+      'variants',
+      'multi_uom',
+      'identifiers.barcode_qr',
+      'branch_pricing',
+      'channel.pos',
+      'channel.customer_web',
+      'inventory.tracked',
+      'inventory.lot_batch',
+      'inventory.expiry',
+      'purchasing',
+      'production',
+      'delivery',
+      'customer_ordering',
+    ];
+
+    it('creates the three tables with the frozen columns (no template_payload jsonb)', async () => {
+      const cols = async (table: string): Promise<Record<string, string>> => {
+        const { rows } = await pool.query<{ column_name: string; is_nullable: string }>(
+          `SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = $1`,
+          [table],
+        );
+        return Object.fromEntries(rows.map((r) => [r.column_name, r.is_nullable]));
+      };
+
+      const tpl = await cols('business_type_template');
+      expect(Object.keys(tpl).sort()).toEqual(
+        ['createdAt', 'key', 'nameAr', 'nameEn', 'status', 'updatedAt', 'version'].sort(),
+      );
+      expect(tpl['template_payload'], 'no giant template_payload jsonb (D2-3)').toBeUndefined();
+
+      const tplCap = await cols('business_type_template_capability');
+      expect(Object.keys(tplCap).sort()).toEqual(
+        [
+          'capabilityKey',
+          'config',
+          'createdAt',
+          'enabled',
+          'id',
+          'templateKey',
+          'updatedAt',
+        ].sort(),
+      );
+      expect(tplCap['config']).toBe('YES'); // nullable — always NULL in task 3.1
+
+      const tenantCap = await cols('tenant_catalog_capability');
+      expect(Object.keys(tenantCap).sort()).toEqual(
+        [
+          'appliedAt',
+          'appliedBy',
+          'capabilityKey',
+          'config',
+          'createdAt',
+          'enabled',
+          'id',
+          'lastChangedBy',
+          'overriddenAt',
+          'sourceKind',
+          'sourceTemplateKey',
+          'sourceTemplateVersion',
+          'tenantId',
+          'updatedAt',
+          'version',
+        ].sort(),
+      );
+      expect(tenantCap['config']).toBe('YES');
+      expect(tenantCap['sourceKind']).toBe('NO');
+      expect(tenantCap['sourceTemplateKey']).toBe('YES');
+    });
+
+    it('adds the four additive tenant columns (3 nullable + catalogCapabilityVersion NOT NULL DEFAULT 0)', async () => {
+      const { rows } = await pool.query<{
+        column_name: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        `SELECT column_name, is_nullable, column_default FROM information_schema.columns
+          WHERE table_name = 'tenant' AND column_name = ANY($1)`,
+        [
+          [
+            'businessTypeKey',
+            'businessTypeAppliedVersion',
+            'businessTypeAppliedAt',
+            'catalogCapabilityVersion',
+          ],
+        ],
+      );
+      const byName = Object.fromEntries(rows.map((r) => [r.column_name, r]));
+      expect(byName['businessTypeKey']?.is_nullable).toBe('YES');
+      expect(byName['businessTypeAppliedVersion']?.is_nullable).toBe('YES');
+      expect(byName['businessTypeAppliedAt']?.is_nullable).toBe('YES');
+      expect(byName['catalogCapabilityVersion']?.is_nullable).toBe('NO');
+      expect(byName['catalogCapabilityVersion']?.column_default).toBe('0');
+    });
+
+    it('normalizes capabilities: UNIQUE (templateKey, capabilityKey) + UNIQUE (tenantId, capabilityKey)', async () => {
+      const idx = await pool.query<{ indexname: string; indexdef: string }>(
+        `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = ANY($1)`,
+        [['business_type_template_capability', 'tenant_catalog_capability']],
+      );
+      const defs = idx.rows.map((r) => r.indexdef);
+      expect(
+        defs.some((d) =>
+          /UNIQUE.*business_type_template_capability.*templateKey.*capabilityKey/s.test(d),
+        ),
+      ).toBe(true);
+      expect(
+        defs.some((d) => /UNIQUE.*tenant_catalog_capability.*tenantId.*capabilityKey/s.test(d)),
+      ).toBe(true);
+      expect(defs.some((d) => /tenant_catalog_capability_tenantId_idx/.test(d))).toBe(true);
+    });
+
+    it('CHECK constraints: status, sourceKind, and the closed 16-key capabilityKey registry', async () => {
+      const { rows } = await pool.query<{ conname: string; def: string }>(
+        `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE contype = 'c' AND conrelid::regclass::text = ANY($1)`,
+        [
+          [
+            'business_type_template',
+            'business_type_template_capability',
+            'tenant_catalog_capability',
+          ],
+        ],
+      );
+      const byName = Object.fromEntries(rows.map((r) => [r.conname, r.def]));
+      expect(byName['business_type_template_status_chk']).toMatch(/ACTIVE.*DEPRECATED/s);
+      expect(byName['tenant_catalog_capability_sourceKind_chk']).toMatch(/TEMPLATE.*MANUAL/s);
+      for (const table of [
+        'business_type_template_capability_capabilityKey_chk',
+        'tenant_catalog_capability_capabilityKey_chk',
+      ]) {
+        const def = byName[table];
+        expect(def, `${table} missing`).toBeTruthy();
+        for (const k of CAP_KEYS) expect(def).toContain(`'${k}'`);
+      }
+    });
+
+    it('a capabilityKey outside the closed registry is rejected by the DB CHECK', async () => {
+      await expect(
+        pool.query(
+          `INSERT INTO business_type_template (key, version, "nameEn", "nameAr", "updatedAt")
+           VALUES ('X_TMP', 1, 'x', 'x', now())`,
+        ),
+      ).resolves.toBeTruthy();
+      await expect(
+        pool.query(
+          `INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt")
+           VALUES ('X_TMP', 'category_template.flowers', true, now())`,
+        ),
+      ).rejects.toThrow(/capabilityKey_chk/i);
+      await pool.query(`DELETE FROM business_type_template WHERE key = 'X_TMP'`);
+    });
+
+    it('tenant.businessTypeKey -> business_type_template.key with ON DELETE RESTRICT', async () => {
+      const { rows } = await pool.query<{ def: string }>(
+        `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'tenant_businessTypeKey_fkey'`,
+      );
+      expect(rows[0]?.def).toMatch(
+        /FOREIGN KEY .*"businessTypeKey".* REFERENCES business_type_template\(key\).*ON DELETE RESTRICT/s,
+      );
+    });
+
+    it('flower_app is SELECT-only on all three configuration tables', async () => {
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        // reads succeed (reference tables have no GUC requirement)
+        await expect(c.query('SELECT count(*) FROM business_type_template')).resolves.toBeTruthy();
+        await expect(
+          c.query('SELECT count(*) FROM business_type_template_capability'),
+        ).resolves.toBeTruthy();
+        // writes are denied at the DB
+        await expect(
+          c.query(
+            `INSERT INTO business_type_template (key, version, "nameEn", "nameAr", "updatedAt")
+             VALUES ('ZZ', 1, 'z', 'z', now())`,
+          ),
+        ).rejects.toThrow(/permission denied/i);
+        await expect(
+          c.query(
+            `INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+             VALUES ('ZZ','variants',true, now())`,
+          ),
+        ).rejects.toThrow(/permission denied/i);
+        await c.query(`SELECT set_config('app.tenant_id', $1, false)`, [TENANT_A]);
+        await expect(
+          c.query(
+            `INSERT INTO tenant_catalog_capability ("tenantId","capabilityKey",enabled,"sourceKind","updatedAt")
+             VALUES ($1,'variants',true,'MANUAL', now())`,
+            [TENANT_A],
+          ),
+        ).rejects.toThrow(/permission denied/i);
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        await c.query(`SELECT set_config('app.tenant_id', '', false)`).catch(() => {});
+        c.release();
+      }
+    });
+
+    it('tenant_catalog_capability has RLS ENABLE + FORCE, isolates tenants, fails closed with no GUC', async () => {
+      // seed one row per tenant via the superuser pool (bypasses RLS)
+      for (const t of [TENANT_A, TENANT_B]) {
+        await pool.query(
+          `INSERT INTO tenant_catalog_capability ("tenantId","capabilityKey",enabled,"sourceKind","updatedAt")
+           VALUES ($1,'strategy.stocked',true,'TEMPLATE', now())
+           ON CONFLICT ("tenantId","capabilityKey") DO NOTHING`,
+          [t],
+        );
+      }
+      const meta = await pool.query<{ rls: boolean; force: boolean; policies: number }>(
+        `SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
+                (SELECT count(*) FROM pg_policies p WHERE p.tablename = 'tenant_catalog_capability') AS policies
+           FROM pg_class c WHERE c.relname = 'tenant_catalog_capability'`,
+      );
+      expect(meta.rows[0]?.rls).toBe(true);
+      expect(meta.rows[0]?.force).toBe(true);
+      expect(Number(meta.rows[0]?.policies)).toBeGreaterThanOrEqual(1);
+
+      const asTenant = async (tid: string | null): Promise<number> => {
+        const c = await pool.connect();
+        try {
+          await c.query(`SET ROLE ${DB_ROLES.app}`);
+          if (tid) await c.query(`SELECT set_config('app.tenant_id', $1, false)`, [tid]);
+          return Number(
+            (await c.query('SELECT count(*)::int AS n FROM tenant_catalog_capability')).rows[0].n,
+          );
+        } finally {
+          await c.query('RESET ROLE').catch(() => {});
+          await c.query(`SELECT set_config('app.tenant_id', '', false)`).catch(() => {});
+          c.release();
+        }
+      };
+      expect(await asTenant(TENANT_A)).toBe(1); // only its own row
+      expect(await asTenant(null)).toBe(0); // fails closed, no error
+      await pool.query(
+        `DELETE FROM tenant_catalog_capability WHERE "capabilityKey" = 'strategy.stocked'`,
+      );
+    });
+
+    it('business_type_template* are RLS-exempt (readable with no GUC)', async () => {
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        // no app.tenant_id set — reference data is not tenant-scoped
+        await expect(c.query('SELECT count(*) FROM business_type_template')).resolves.toBeTruthy();
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+      const rls = await pool.query<{ relname: string; rls: boolean }>(
+        `SELECT relname, relrowsecurity AS rls FROM pg_class
+          WHERE relname IN ('business_type_template','business_type_template_capability')`,
+      );
+      for (const r of rls.rows) expect(r.rls, `${r.relname} must be RLS-exempt`).toBe(false);
+    });
+
+    it('no Product / Category / Variant / UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
+      const { rows } = await pool.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
+      );
+      const present = new Set(rows.map((r) => r.tablename));
+      for (const forbidden of [
+        'product',
+        'category',
+        'product_type',
+        'attribute_definition',
+        'variant',
+        'option_group',
+        'item_identifier',
+        'uom',
+        'uom_conversion',
+        'company_variant_uom_price',
+        'branch_variant_uom_price',
+        'branch_variant_availability',
+        'inventory_item',
+        'branch_inventory_balance',
+        'inventory_movement',
+        'stock_reservation',
+        'order',
+        'order_line',
+        'payment',
+        'journal_entry',
+      ]) {
+        expect(present.has(forbidden), `${forbidden} must NOT exist in task 3.1`).toBe(false);
+      }
     });
   });
 

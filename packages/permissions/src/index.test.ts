@@ -61,6 +61,23 @@ describe('@flower/permissions registry', () => {
     expect(PERMISSIONS.finance).toContain('financial_reports:view');
     expect(PERMISSIONS.cashRegister).toContain('z_report:close');
   });
+
+  // ── task 3.1 — HG3-PERMISSION-STABILITY ──────────────────────────────────
+  it('adds ONLY platform:catalog_capability:manage (task 3.1), step-up-gated', () => {
+    expect(PLATFORM_PERMISSIONS).toContain('platform:catalog_capability:manage');
+    expect(isPlatformPermissionKey('platform:catalog_capability:manage')).toBe(true);
+    expect(requiresStepUp('platform:catalog_capability:manage')).toBe(true);
+    // it is distinct from the entitlement permission (delegable independently)
+    expect('platform:catalog_capability:manage').not.toBe('platform:entitlements:manage');
+  });
+
+  it('identifiers:manage stays the one canonical key, in the inventory group (D2-6)', () => {
+    const occurrences = ALL_PERMISSIONS.filter((k) => k === 'identifiers:manage');
+    expect(occurrences).toHaveLength(1);
+    expect(PERMISSION_GROUP_OF['identifiers:manage']).toBe('inventory');
+    // no second, semantically-equivalent identifier key was introduced
+    expect(ALL_PERMISSIONS.filter((k) => k.includes('identifier'))).toEqual(['identifiers:manage']);
+  });
 });
 
 describe('step-up', () => {

@@ -30,6 +30,7 @@ import {
   LOCALES,
   GCC_HOLIDAYS_2026,
 } from './gcc-reference-data.js';
+import { BUSINESS_TYPE_TEMPLATES, BUSINESS_TYPE_TEMPLATE_VERSION } from './catalog-capabilities.js';
 
 const humanize = (key: string): string => key.replace(/[:_]/g, ' ');
 
@@ -229,6 +230,48 @@ async function main(): Promise<void> {
       }
     }
 
+    // ── Business-Type preset templates + capability defaults (task 3.1) ────
+    // Platform-global, RLS-exempt (like the localization reference tables).
+    // Idempotent: templates upsert on `key`; each template's normalized
+    // capability rows are reconciled to the frozen §C.3 set (surplus rows
+    // deleted, desired rows upserted with `enabled = true`, `config = null` —
+    // ALWAYS null in task 3.1, spec §E). `CUSTOM` is seeded exactly like the
+    // other 34 (spec §2). Bumping `BUSINESS_TYPE_TEMPLATE_VERSION` + re-seeding
+    // updates the template rows and NEVER touches any tenant snapshot (§F.1.1).
+    for (const t of BUSINESS_TYPE_TEMPLATES) {
+      await prisma.businessTypeTemplate.upsert({
+        where: { key: t.key },
+        create: {
+          key: t.key,
+          version: BUSINESS_TYPE_TEMPLATE_VERSION,
+          nameEn: t.nameEn,
+          nameAr: t.nameAr,
+          status: 'ACTIVE',
+        },
+        update: {
+          version: BUSINESS_TYPE_TEMPLATE_VERSION,
+          nameEn: t.nameEn,
+          nameAr: t.nameAr,
+          status: 'ACTIVE',
+        },
+      });
+      const desired = new Set<string>(t.capabilities);
+      await prisma.businessTypeTemplateCapability.deleteMany({
+        where: { templateKey: t.key, capabilityKey: { notIn: [...desired] } },
+      });
+      for (const capabilityKey of t.capabilities) {
+        // `config` is deliberately omitted — always SQL NULL in task 3.1 (spec
+        // §E). The column is nullable with no default, so an omitted value on
+        // INSERT is NULL, and an omitted value on UPDATE leaves the (already
+        // null) value untouched.
+        await prisma.businessTypeTemplateCapability.upsert({
+          where: { templateKey_capabilityKey: { templateKey: t.key, capabilityKey } },
+          create: { templateKey: t.key, capabilityKey, enabled: true },
+          update: { enabled: true },
+        });
+      }
+    }
+
     // ── dev platform super-admin (optional) ───────────────────────────────
     const adminEmail = process.env['SEED_PLATFORM_ADMIN_EMAIL'];
     if (adminEmail) {
@@ -264,16 +307,20 @@ async function main(): Promise<void> {
       console.log(`seed: platform super-admin ${adminEmail} (no credential — set-password flow)`);
     }
 
-    const [perms, modules, limits, countries, currencies] = await Promise.all([
-      prisma.permissionRegistry.count(),
-      prisma.entitlementDefault.count({ where: { planVersionId: planVersion.id } }),
-      prisma.limitDefault.count({ where: { planVersionId: planVersion.id } }),
-      prisma.country.count(),
-      prisma.currency.count(),
-    ]);
+    const [perms, modules, limits, countries, currencies, templates, templateCaps] =
+      await Promise.all([
+        prisma.permissionRegistry.count(),
+        prisma.entitlementDefault.count({ where: { planVersionId: planVersion.id } }),
+        prisma.limitDefault.count({ where: { planVersionId: planVersion.id } }),
+        prisma.country.count(),
+        prisma.currency.count(),
+        prisma.businessTypeTemplate.count(),
+        prisma.businessTypeTemplateCapability.count(),
+      ]);
     console.log(
       `seed ok — permission_registry=${perms}, Starter v1 entitlements=${modules}, limits=${limits}, ` +
-        `countries=${countries}, currencies=${currencies}`,
+        `countries=${countries}, currencies=${currencies}, ` +
+        `business_type_templates=${templates}, template_capabilities=${templateCaps}`,
     );
   } finally {
     await prisma.$disconnect();

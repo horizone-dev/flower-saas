@@ -8,10 +8,16 @@ import { LimitService } from './limit.service.js';
 import { ProvisioningService } from './provisioning.service.js';
 import { TenantLifecycleService } from './tenant-lifecycle.service.js';
 import { AuditReadRepository } from './audit-read.repository.js';
+import { PlatformCatalogCapabilityRepository } from './catalog-capability.repository.js';
+import { PlatformCatalogCapabilityService } from './catalog-capability.service.js';
 import { PlanController } from './plan.controller.js';
 import { TenantConfigController } from './tenant-config.controller.js';
 import { TenantController } from './tenant.controller.js';
 import { AuditController } from './audit.controller.js';
+import {
+  BusinessTypeTemplateController,
+  PlatformTenantCatalogCapabilityController,
+} from './catalog-capability.controller.js';
 
 /**
  * `platform` module (ARCHITECTURE §3): plans + versions, entitlements, limits,
@@ -29,8 +35,17 @@ import { AuditController } from './audit.controller.js';
     ProvisioningService,
     TenantLifecycleService,
     AuditReadRepository,
+    PlatformCatalogCapabilityRepository,
+    PlatformCatalogCapabilityService,
   ],
-  controllers: [PlanController, TenantConfigController, TenantController, AuditController],
+  controllers: [
+    PlanController,
+    TenantConfigController,
+    TenantController,
+    AuditController,
+    BusinessTypeTemplateController,
+    PlatformTenantCatalogCapabilityController,
+  ],
   exports: [
     PlanRepository,
     TenantConfigRepository,

@@ -191,6 +191,13 @@ export const PLATFORM_PERMISSIONS = [
   'platform:sessions:revoke',
   'platform:audit:view',
   'platform:secrets:manage',
+  // Phase 3 task 3.1 — the Super-Admin catalog-capability configuration surface
+  // (per-tenant `tenant_catalog_capability` + the initial Business-Type template
+  // apply). Distinct from `platform:entitlements:manage` so it can be delegated
+  // independently. No tenant-realm key ever reaches this data (owner §12 / spec
+  // §8). Step-up is enforced on the mutation (PATCH) only — the read route opts
+  // out with `@NoStepUp()` (owner R-7).
+  'platform:catalog_capability:manage',
 ] as const;
 
 export type PlatformPermissionKey = (typeof PLATFORM_PERMISSIONS)[number];
@@ -213,7 +220,10 @@ export const STEP_UP_PERMISSIONS: ReadonlySet<string> = new Set<string>([
       k === 'platform:entitlements:manage' ||
       k === 'platform:tenant_users:manage' ||
       k === 'platform:tenant_roles:manage' ||
-      k === 'platform:secrets:manage',
+      k === 'platform:secrets:manage' ||
+      // task 3.1 — a capability change is a config mutation on tenant data; the
+      // read route (`GET …/catalog-capabilities`) opts out with `@NoStepUp()`.
+      k === 'platform:catalog_capability:manage',
   ),
 ]);
 

@@ -18,6 +18,9 @@ export interface ProvisionTenantCommand {
    *  never be silently conflated, even though today's only supported region
    *  happens to share a code with its country. */
   companyCountryCode: string;
+  /** Business-Type preset — REQUIRED for a new tenant (owner §1). Validated as a
+   *  known ACTIVE `business_type_template.key` inside the provisioning txn. */
+  businessTypeKey: string;
   planVersionId: string;
   ownerEmail: string;
   companyLegalNameEn?: string | undefined;
@@ -74,6 +77,7 @@ export class ProvisioningService {
       name: cmd.name,
       region: cmd.region,
       companyCountryCode: cmd.companyCountryCode,
+      businessTypeKey: cmd.businessTypeKey,
       planVersionId: cmd.planVersionId,
       companyLegalNameEn: cmd.companyLegalNameEn ?? cmd.name,
       branchName: cmd.branchName ?? 'Main Branch',

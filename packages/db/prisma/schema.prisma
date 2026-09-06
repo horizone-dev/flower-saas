@@ -233,6 +233,19 @@ model Tenant {
   status        String   @default("DRAFT")
   planVersionId String   @db.Uuid
   planVersion   PlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
+  /// Business-Type preset this tenant was provisioned with (Phase 3 task 3.1) —
+  /// a `business_type_template.key`. Nullable ONLY for pre-3.1 tenants; the new
+  /// provisioning API requires it (D2-12 / spec §1). NEVER read at runtime to
+  /// branch behaviour (D0-3 / HG3-NO-BT-BRANCH) — used only at apply time.
+  businessTypeKey            String?
+  businessType               BusinessTypeTemplate? @relation(fields: [businessTypeKey], references: [key], onDelete: Restrict)
+  /// the `business_type_template.version` the current capability snapshot came from
+  businessTypeAppliedVersion Int?
+  businessTypeAppliedAt      DateTime? @db.Timestamptz(6)
+  /// Aggregate optimistic-concurrency counter for the tenant's COMPLETE catalog
+  /// capability configuration (spec §L / R-3). 0 = unconfigured; the initial
+  /// template apply sets it to 1; every successful capability PATCH +1.
+  catalogCapabilityVersion   Int      @default(0)
   createdAt     DateTime @default(now()) @db.Timestamptz(6)
   updatedAt     DateTime @updatedAt @db.Timestamptz(6)
 
@@ -245,6 +258,7 @@ model Tenant {
   branches      Branch[]
   posTerminals  PosTerminal[]
   providerCreds ProviderCredential[]
+  catalogCapabilities TenantCatalogCapability[]
 
   @@map("tenant")
 }
@@ -921,4 +935,89 @@ model Holiday {
   @@id([id])
   @@index([countryCode, onDate])
   @@map("holiday")
+}
+
+// ═════════ catalog capability & Business-Type template foundation (task 3.1) ═══
+// docs/phase-3/PHASE-3.1-CAPABILITY-SPEC.md. Three tables:
+//   - business_type_template + business_type_template_capability — platform-global
+//     reference (RLS-exempt, like country/currency; `flower_app` SELECT-only).
+//   - tenant_catalog_capability — the ONLY runtime capability-state table
+//     (tenant-owned, RLS ENABLE + FORCE).
+// No `template_payload` jsonb (D2-3 / spec §3). Category/attribute/UOM template
+// structures belong to their owning tasks (3.2/3.3/3.6). No catalog CRUD here.
+
+/// A curated Business-Type preset (35 of them, Appendix A). `CUSTOM` is a normal
+/// row like any other — the initial-apply algorithm never branches on the key
+/// (spec §2 / §I.3 / HG3-1-GENERIC-APPLY).
+model BusinessTypeTemplate {
+  /// one of the 35 curated keys (e.g. FLOWER_FLORIST, CUSTOM)
+  key       String   @id
+  /// current curated version — bumped on any seed/curation change to this
+  /// template or its capability rows; a tenant records the version it snapshotted
+  /// from (spec §F.1.1). Editing a template NEVER mutates an existing tenant.
+  version   Int
+  nameEn    String
+  nameAr    String
+  /// ACTIVE | DEPRECATED — a DEPRECATED template cannot be chosen for a new tenant
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  capabilities BusinessTypeTemplateCapability[]
+  tenants      Tenant[]
+
+  @@map("business_type_template")
+}
+
+/// Normalized template capability defaults — one row per (template, capability).
+/// `config` is ALWAYS NULL in task 3.1 (spec §E). Absence of a row = not granted.
+model BusinessTypeTemplateCapability {
+  id            String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  templateKey   String
+  template      BusinessTypeTemplate @relation(fields: [templateKey], references: [key], onDelete: Cascade)
+  /// one of the closed 16-key CapabilityKey set (`@flower/shared-types`)
+  capabilityKey String
+  enabled       Boolean
+  config        Json?
+  createdAt     DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime             @updatedAt @db.Timestamptz(6)
+
+  @@unique([templateKey, capabilityKey])
+  @@map("business_type_template_capability")
+}
+
+/// The tenant's runtime catalog-capability configuration — the ONLY table a
+/// capability check reads. Normalized: one row per (tenant, capability); a giant
+/// JSON blob is never used (D2-5 / HG3-CAPABILITY-NORMALIZATION). Provenance is
+/// explicit via `sourceKind` (spec §H) — never inferred from `version === 1`.
+model TenantCatalogCapability {
+  id            String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String  @db.Uuid
+  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// one of the closed 16-key CapabilityKey set (`@flower/shared-types`)
+  capabilityKey String
+  enabled       Boolean
+  config        Json?
+  /// TEMPLATE — written by an apply, unchanged since; MANUAL — created or edited
+  /// by a PATCH. Task 3.10's `merge` re-apply updates only TEMPLATE rows.
+  sourceKind            String
+  /// the template this row was snapshotted from (soft ref — not a hard FK — §H.3)
+  sourceTemplateKey     String?
+  sourceTemplateVersion Int?
+  appliedAt             DateTime? @db.Timestamptz(6)
+  /// platform user id of the initial apply
+  appliedBy             String?
+  /// platform user id of the most recent write (apply or PATCH)
+  lastChangedBy         String?
+  /// set the first time a PATCH changes a TEMPLATE-sourced row (§H.2)
+  overriddenAt          DateTime? @db.Timestamptz(6)
+  /// per-row counter — reserved for a future single-row edit route; NOT the
+  /// concurrency contract for the set (that is tenant.catalogCapabilityVersion).
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, capabilityKey])
+  @@index([tenantId])
+  @@map("tenant_catalog_capability")
 }

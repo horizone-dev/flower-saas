@@ -55,6 +55,7 @@ describe('platform: tenant administration surface for Super Admin Web (integrati
         name: 'PAdmin FZE',
         region: 'AE',
         companyCountryCode: 'AE',
+        businessTypeKey: 'CUSTOM',
         planVersionId: PLAN_V,
         ownerEmail: 'owner@padmin.test',
       },
@@ -282,6 +283,8 @@ async function seed(url: string): Promise<void> {
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
+      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt") VALUES ('CUSTOM', 1, 'Custom', 'مخصص', 'ACTIVE', now());
+      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt") VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),('CUSTOM','channel.pos',true,now());
     `);
   } finally {
     await c.end();

@@ -2,15 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { runPlatform, type PrismaClient } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
+import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { OutboxWriter } from '../../common/audit/outbox.writer.js';
 import { DomainError } from '../../common/errors/domain-error.js';
 import { SYSTEM_ROLE_TEMPLATES } from './system-roles.js';
+import { applyBusinessTypeTemplate } from './catalog-capability.repository.js';
 
 export interface ProvisionInput {
   slug: string;
   name: string;
   region: string;
   companyCountryCode: string;
+  /** Business-Type preset — REQUIRED for a new tenant (owner §1 / spec §I.1). A
+   *  `business_type_template.key`. Unknown / DEPRECATED -> 422 (rolls the whole
+   *  provisioning transaction back). */
+  businessTypeKey: string;
   planVersionId: string;
   companyLegalNameEn: string;
   branchName: string;
@@ -37,6 +43,7 @@ export class ProvisioningRepository {
   constructor(
     private readonly db: DbService,
     private readonly outbox: OutboxWriter,
+    private readonly audit: AuditWriter,
   ) {}
   private get c(): PrismaClient {
     return this.db.platformClient();
@@ -232,6 +239,18 @@ export class ProvisioningRepository {
               reason: 'first owner (provisioning)',
             },
           ],
+        });
+
+        // Business-Type template snapshot (task 3.1 / spec §I). GENERIC — the
+        // same code path for all 35 presets, `CUSTOM` included (no key branch).
+        // Unknown / DEPRECATED template -> DomainError(422) -> the whole
+        // provisioning transaction rolls back (no partial tenant, no partial
+        // capability rows) — same guarantee as the UNKNOWN_COUNTRY path above.
+        await applyBusinessTypeTemplate(tx, this.audit, {
+          tenantId,
+          businessTypeKey: input.businessTypeKey,
+          actorPlatformUserId: input.actorPlatformUserId,
+          now,
         });
 
         // external effects (owner invite, etc.) go via the outbox — never a call

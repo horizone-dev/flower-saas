@@ -119,6 +119,7 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
         name: 'Acme Corp',
         region: 'AE',
         companyCountryCode: 'AE',
+        businessTypeKey: 'CUSTOM',
         planVersionId: PLAN_V,
         ownerEmail: 'boss@acme.test',
       },
@@ -183,6 +184,153 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
       expect(company.countryCode).toBe('AE');
       expect(company.defaultCurrency).toBe('AED');
       expect(company.fiscalConfig).toEqual({});
+
+      // task 3.1 — the Business-Type template snapshot ran inside the same txn
+      const t = (
+        await q(
+          `SELECT "businessTypeKey", "businessTypeAppliedVersion", "catalogCapabilityVersion" FROM tenant WHERE id=$1`,
+          [tenantId],
+        )
+      )[0];
+      expect(t.businessTypeKey).toBe('CUSTOM');
+      expect(t.businessTypeAppliedVersion).toBe(1);
+      expect(t.catalogCapabilityVersion).toBe(1);
+      const caps = await q(
+        `SELECT "capabilityKey", enabled, "sourceKind", "sourceTemplateKey", "sourceTemplateVersion", config
+           FROM tenant_catalog_capability WHERE "tenantId"=$1 ORDER BY "capabilityKey"`,
+        [tenantId],
+      );
+      expect(caps.map((r) => r.capabilityKey)).toEqual([
+        'branch_pricing',
+        'channel.pos',
+        'strategy.stocked',
+      ]);
+      expect(caps.every((r) => r.enabled === true)).toBe(true);
+      expect(caps.every((r) => r.sourceKind === 'TEMPLATE')).toBe(true);
+      expect(caps.every((r) => r.sourceTemplateKey === 'CUSTOM')).toBe(true);
+      expect(caps.every((r) => r.sourceTemplateVersion === 1)).toBe(true);
+      expect(caps.every((r) => r.config === null)).toBe(true);
+      const applied = await q(
+        `SELECT action, "resourceId" FROM audit_log WHERE "tenantId"=$1 AND action='catalog.template_applied'`,
+        [tenantId],
+      );
+      expect(applied).toHaveLength(1);
+      expect(applied[0].resourceId).toBe('CUSTOM');
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('requires a Business Type — no key -> 422 BUSINESS_TYPE_REQUIRED, creates nothing (owner §1)', async () => {
+    const token = await platformToken();
+    const res = await post(
+      '/platform/tenants',
+      {
+        slug: 'no-bt-co',
+        name: 'No BT Co',
+        region: 'AE',
+        companyCountryCode: 'AE',
+        planVersionId: PLAN_V,
+        ownerEmail: 'boss@nobt.test',
+      },
+      token,
+      { 'idempotency-key': 'prov-no-bt' },
+    );
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.code).toBe('BUSINESS_TYPE_REQUIRED');
+
+    const c = new pg.Client({ connectionString: stack.postgres.url });
+    await c.connect();
+    try {
+      expect((await c.query(`SELECT id FROM tenant WHERE slug='no-bt-co'`)).rowCount).toBe(0);
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('an unknown / DEPRECATED Business Type -> 422 and the whole provision rolls back', async () => {
+    const token = await platformToken();
+    for (const [slug, key, code] of [
+      ['unknown-bt-co', 'NOT_A_REAL_PRESET', 'UNKNOWN_BUSINESS_TYPE'],
+      ['deprecated-bt-co', 'OLD_PRESET', 'BUSINESS_TYPE_NOT_ACTIVE'],
+    ] as const) {
+      const res = await post(
+        '/platform/tenants',
+        {
+          slug,
+          name: slug,
+          region: 'AE',
+          companyCountryCode: 'AE',
+          businessTypeKey: key,
+          planVersionId: PLAN_V,
+          ownerEmail: `boss@${slug}.test`,
+        },
+        token,
+        { 'idempotency-key': `prov-${slug}` },
+      );
+      expect(res.statusCode).toBe(422);
+      expect(res.json().error.code).toBe(code);
+      const c = new pg.Client({ connectionString: stack.postgres.url });
+      await c.connect();
+      try {
+        expect((await c.query(`SELECT id FROM tenant WHERE slug=$1`, [slug])).rowCount).toBe(0);
+        expect(
+          (
+            await c.query(
+              `SELECT t.id FROM tenant_catalog_capability t
+                 JOIN tenant te ON te.id = t."tenantId" WHERE te.slug = $1`,
+              [slug],
+            )
+          ).rowCount,
+        ).toBe(0);
+      } finally {
+        await c.end();
+      }
+    }
+  });
+
+  it('CUSTOM and a non-CUSTOM preset provision through the identical code path (generic apply)', async () => {
+    const token = await platformToken();
+    const mk = async (slug: string, key: string): Promise<string> => {
+      const res = await post(
+        '/platform/tenants',
+        {
+          slug,
+          name: slug,
+          region: 'AE',
+          companyCountryCode: 'AE',
+          businessTypeKey: key,
+          planVersionId: PLAN_V,
+          ownerEmail: `boss@${slug}.test`,
+        },
+        token,
+        { 'idempotency-key': `prov-${slug}` },
+      );
+      expect(res.statusCode).toBe(201);
+      return res.json().tenantId as string;
+    };
+    const customId = await mk('generic-custom', 'CUSTOM');
+    const bakeryId = await mk('generic-bakery', 'BAKERY_CAKE');
+
+    const c = new pg.Client({ connectionString: stack.postgres.url });
+    await c.connect();
+    try {
+      const rows = async (id: string) =>
+        (
+          await c.query(
+            `SELECT "capabilityKey" FROM tenant_catalog_capability WHERE "tenantId"=$1 ORDER BY 1`,
+            [id],
+          )
+        ).rows.map((r) => r.capabilityKey);
+      expect(await rows(customId)).toEqual(['branch_pricing', 'channel.pos', 'strategy.stocked']);
+      expect(await rows(bakeryId)).toEqual(['channel.pos', 'strategy.bom', 'strategy.stocked']);
+      // BAKERY_CAKE was seeded at version 2 — the snapshot records THAT version
+      const v = (
+        await c.query(`SELECT "businessTypeAppliedVersion" AS v FROM tenant WHERE id=$1`, [
+          bakeryId,
+        ])
+      ).rows[0].v;
+      expect(v).toBe(2);
     } finally {
       await c.end();
     }
@@ -197,6 +345,7 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
         name: 'Unknown Country Co',
         region: 'AE',
         companyCountryCode: 'ZZ', // not seeded
+        businessTypeKey: 'CUSTOM',
         planVersionId: PLAN_V,
         ownerEmail: 'boss@unknown-country.test',
       },
@@ -228,6 +377,7 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
         name: 'Acme Corp',
         region: 'AE',
         companyCountryCode: 'AE',
+        businessTypeKey: 'CUSTOM',
         planVersionId: PLAN_V,
         ownerEmail: 'boss@acme.test',
       },
@@ -364,6 +514,18 @@ async function seed(url: string): Promise<void> {
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
+      -- task 3.1: a CUSTOM Business-Type template + its 3-key minimal capability set
+      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+      VALUES ('CUSTOM', 1, 'Custom', 'مخصص', 'ACTIVE', now()),
+             ('BAKERY_CAKE', 2, 'Bakery', 'مخبز', 'ACTIVE', now()),
+             ('OLD_PRESET', 1, 'Old', 'قديم', 'DEPRECATED', now());
+      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt")
+      VALUES ('CUSTOM', 'strategy.stocked', true, now()),
+             ('CUSTOM', 'branch_pricing', true, now()),
+             ('CUSTOM', 'channel.pos', true, now()),
+             ('BAKERY_CAKE', 'strategy.stocked', true, now()),
+             ('BAKERY_CAKE', 'strategy.bom', true, now()),
+             ('BAKERY_CAKE', 'channel.pos', true, now());
     `);
   } finally {
     await c.end();

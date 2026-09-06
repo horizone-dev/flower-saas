@@ -9,9 +9,17 @@ export default async function TenantsPage() {
   const api = serverApi();
   let tenants: Awaited<ReturnType<typeof api.listTenants>> = [];
   let plans: Awaited<ReturnType<typeof api.listPlans>> = [];
+  let templates: Awaited<ReturnType<typeof api.listBusinessTypeTemplates>>['data'] = [];
   let error: string | undefined;
   try {
-    [tenants, plans] = await Promise.all([api.listTenants(), api.listPlans()]);
+    const [t, p, bt] = await Promise.all([
+      api.listTenants(),
+      api.listPlans(),
+      api.listBusinessTypeTemplates(),
+    ]);
+    tenants = t;
+    plans = p;
+    templates = bt.data;
   } catch (err) {
     error = errorMessage(err);
   }
@@ -21,6 +29,9 @@ export default async function TenantsPage() {
       .filter((v) => v.status === 'PUBLISHED')
       .map((v) => ({ value: v.id, label: `${p.name} v${v.version}` })),
   );
+  const businessTypeOptions = templates
+    .filter((t) => t.status === 'ACTIVE')
+    .map((t) => ({ value: t.key, label: t.nameEn }));
 
   return (
     <>
@@ -28,8 +39,12 @@ export default async function TenantsPage() {
       {error ? <p className="error">{error}</p> : null}
 
       <Card title="Provision a tenant">
-        {versionOptions.length === 0 ? (
-          <Empty>No published plan version — create one under Plans first.</Empty>
+        {versionOptions.length === 0 || businessTypeOptions.length === 0 ? (
+          <Empty>
+            {versionOptions.length === 0
+              ? 'No published plan version — create one under Plans first.'
+              : 'No Business-Type templates seeded — run the DB seed first.'}
+          </Empty>
         ) : (
           <ProvisionForm versionOptions={versionOptions}>
             <Field label="Workspace slug" name="slug" placeholder="acme-florist" required />
@@ -59,6 +74,8 @@ export default async function TenantsPage() {
                 { value: 'OM', label: 'Oman' },
               ]}
             />
+            {/* task 3.1 — REQUIRED; no blank option. "Custom / other" if nothing fits. */}
+            <Select label="Business Type" name="businessTypeKey" options={businessTypeOptions} />
             <Select label="Plan version" name="planVersionId" options={versionOptions} />
           </ProvisionForm>
         )}

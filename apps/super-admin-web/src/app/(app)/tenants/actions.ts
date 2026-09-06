@@ -18,6 +18,9 @@ export async function provisionTenant(
     // two happen to share the same option list today, but are never derived
     // from one another.
     companyCountryCode: String(formData.get('companyCountryCode') ?? 'AE'),
+    // task 3.1 — REQUIRED (owner §1). The API returns 422 BUSINESS_TYPE_REQUIRED
+    // if this is empty; the form select has no blank option.
+    businessTypeKey: String(formData.get('businessTypeKey') ?? ''),
     planVersionId: String(formData.get('planVersionId') ?? ''),
     ownerEmail: String(formData.get('ownerEmail') ?? ''),
   };

@@ -32,6 +32,18 @@ export const REQUIRES_POS_SCOPE_KEY = 'flower:requiresPosScope';
 export const RequiresPosScope = (): MethodDecorator => SetMetadata(REQUIRES_POS_SCOPE_KEY, true);
 
 /**
+ * Opts a route OUT of the step-up requirement its `@RequirePermission(...)` key
+ * would otherwise carry (`STEP_UP_PERMISSIONS`). Use ONLY on a plain read whose
+ * permission is normally a mutation key — task 3.1's
+ * `GET /v1/platform/tenants/:id/catalog-capabilities` uses
+ * `platform:catalog_capability:manage` (step-up-gated) but is a read (owner R-7).
+ * A forgotten `@NoStepUp()` on a future read just means an unnecessary step-up
+ * prompt — never a security hole (the default is fail-safe).
+ */
+export const NO_STEP_UP_KEY = 'flower:noStepUp';
+export const NoStepUp = (): MethodDecorator => SetMetadata(NO_STEP_UP_KEY, true);
+
+/**
  * Declares that a route is an auditable mutation (amendment 2). The audit
  * interceptor writes the record(s) in the same transaction as the mutation
  * (task 1.14). `resourceIdParam` names the route param holding the resource id.
