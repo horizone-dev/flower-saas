@@ -98,7 +98,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => /_outbox_dispatcher$/.test(n))).toBe(true);
     expect(names.some((n) => /_outbox_dispatcher_least_privilege$/.test(n))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_capability_foundation'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_core$/);
+    expect(names.some((n) => n.endsWith('_catalog_core'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_attributes$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -780,12 +781,10 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
       );
       const present = new Set(rows.map((r) => r.tablename));
-      // product / category / product_type are created by task 3.2 (below) — the
-      // rest stay forbidden through Phase 3a.
+      // product / category / product_type (task 3.2) + attribute_definition /
+      // attribute_option / product_attribute_value (task 3.3) are created below —
+      // the rest stay forbidden through Phase 3a.
       for (const forbidden of [
-        'attribute_definition',
-        'attribute_option',
-        'product_attribute_value',
         'variant',
         'option_group',
         'option_value',
@@ -1170,6 +1169,308 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         expect(r.realm).toBe('TENANT');
         expect(r.addedInPhase).toBe(3);
       }
+    });
+  });
+
+  // ── task 3.3 — typed attribute templates + values ────────────────────────
+  // docs/phase-3/PHASE-3-PLAN.md §C.4. Closed value-type set, exactly-one-value
+  // CHECK, at-most-one-scope CHECK, tenant-safe composite FKs incl. the ENUM
+  // "option belongs to the same definition" FK (data-integrity rule 1).
+  describe('typed attribute schema (task 3.3)', () => {
+    const AD_A = '0000aaaa-0000-7000-8000-0000000ada11';
+    const AD_B = '0000bbbb-0000-7000-8000-0000000adb22';
+
+    it('creates exactly attribute_definition / attribute_option / product_attribute_value', async () => {
+      const cols = async (t: string): Promise<Record<string, string>> => {
+        const { rows } = await pool.query<{ column_name: string; is_nullable: string }>(
+          `SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = $1`,
+          [t],
+        );
+        return Object.fromEntries(rows.map((r) => [r.column_name, r.is_nullable]));
+      };
+      const ad = await cols('attribute_definition');
+      expect(Object.keys(ad).sort()).toEqual(
+        [
+          'id',
+          'tenantId',
+          'key',
+          'nameEn',
+          'nameAr',
+          'valueType',
+          'appliesToCategoryId',
+          'appliesToProductTypeId',
+          'unitHint',
+          'isVariantOption',
+          'required',
+          'status',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      const pav = await cols('product_attribute_value');
+      expect(Object.keys(pav).sort()).toEqual(
+        [
+          'id',
+          'tenantId',
+          'productId',
+          'attributeDefinitionId',
+          'valueText',
+          'valueNumber',
+          'valueBool',
+          'valueDate',
+          'optionId',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      // no price / currency / company / branch / stock / uom / identifier column
+      for (const c of ['companyId', 'branchId', 'price', 'currency', 'uomCode', 'sku']) {
+        expect(pav[c], `product_attribute_value.${c} must not exist`).toBeUndefined();
+        expect(ad[c], `attribute_definition.${c} must not exist`).toBeUndefined();
+      }
+    });
+
+    it('every new table has RLS ENABLE + FORCE + a policy; no-GUC → zero rows; flower_app is NOBYPASSRLS', async () => {
+      const meta = await pool.query<{
+        relname: string;
+        rls: boolean;
+        force: boolean;
+        policies: number;
+      }>(
+        `SELECT c.relname, c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
+                (SELECT count(*) FROM pg_policies p WHERE p.tablename = c.relname) AS policies
+           FROM pg_class c WHERE c.relname = ANY($1)`,
+        [['attribute_definition', 'attribute_option', 'product_attribute_value']],
+      );
+      expect(meta.rows).toHaveLength(3);
+      for (const r of meta.rows) {
+        expect(r.rls, `${r.relname} RLS`).toBe(true);
+        expect(r.force, `${r.relname} FORCE`).toBe(true);
+        expect(Number(r.policies), `${r.relname} policy`).toBeGreaterThanOrEqual(1);
+      }
+      const app = await pool.query<{ rolbypassrls: boolean }>(
+        `SELECT rolbypassrls FROM pg_roles WHERE rolname = $1`,
+        [DB_ROLES.app],
+      );
+      expect(app.rows[0]?.rolbypassrls).toBe(false);
+
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        for (const t of ['attribute_definition', 'attribute_option', 'product_attribute_value']) {
+          const n = Number((await c.query(`SELECT count(*)::int AS n FROM "${t}"`)).rows[0].n);
+          expect(n, `${t} with no GUC`).toBe(0);
+        }
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+    });
+
+    it('CHECK constraints: value_type closed set, status, key, at-most-one-scope, exactly-one-value', async () => {
+      const { rows } = await pool.query<{ conname: string; def: string }>(
+        `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE contype = 'c' AND conrelid::regclass::text = ANY($1)`,
+        [['attribute_definition', 'product_attribute_value']],
+      );
+      const byName = Object.fromEntries(rows.map((r) => [r.conname, r.def]));
+      expect(byName['attribute_definition_value_type_chk']).toMatch(
+        /TEXT.*NUMBER.*ENUM.*BOOLEAN.*DATE/s,
+      );
+      expect(byName['attribute_definition_status_chk']).toMatch(/ACTIVE.*ARCHIVED/s);
+      expect(byName['attribute_definition_key_chk']).toBeTruthy();
+      expect(byName['attribute_definition_scope_chk']).toBeTruthy();
+      expect(byName['product_attribute_value_one_value_chk']).toBeTruthy();
+
+      await pool.query(
+        `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt")
+         VALUES ('0000cccc-0000-7000-8000-0000000adc33',$1,'ad-cat','C',now())
+         ON CONFLICT (id) DO NOTHING`,
+        [TENANT_A],
+      );
+      await pool.query(
+        `INSERT INTO "product_type" (id,"tenantId",key,"nameEn","updatedAt")
+         VALUES ('0000dddd-0000-7000-8000-0000000add44',$1,'AD_PT','PT',now())
+         ON CONFLICT (id) DO NOTHING`,
+        [TENANT_A],
+      );
+      // a 6th value type -> rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "attribute_definition" (id,"tenantId",key,"nameEn","valueType","updatedAt")
+           VALUES (uuidv7(),$1,'BAD','x','MULTISELECT',now())`,
+          [TENANT_A],
+        ),
+      ).rejects.toThrow(/value_type_chk/i);
+      // both scope refs set -> rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "attribute_definition"
+             (id,"tenantId",key,"nameEn","valueType","appliesToCategoryId","appliesToProductTypeId","updatedAt")
+           VALUES (uuidv7(),$1,'BOTH','x','TEXT','0000cccc-0000-7000-8000-0000000adc33','0000dddd-0000-7000-8000-0000000add44',now())`,
+          [TENANT_A],
+        ),
+      ).rejects.toThrow(/scope_chk/i);
+      // bad key shape -> rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "attribute_definition" (id,"tenantId",key,"nameEn","valueType","updatedAt")
+           VALUES (uuidv7(),$1,'lower key','x','TEXT',now())`,
+          [TENANT_A],
+        ),
+      ).rejects.toThrow(/key_chk/i);
+    });
+
+    it('TENANT-SAFE composite FKs + the ENUM "option belongs to the same definition" FK', async () => {
+      // one ACTIVE product per tenant + one definition per tenant
+      const catA = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'ad-fk-a','C',now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+      const catB = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'ad-fk-b','C',now()) RETURNING id`,
+          [TENANT_B],
+        )
+      ).rows[0].id as string;
+      const prodA = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,'ad-fk-pa','P','STOCKED',now()) RETURNING id`,
+          [TENANT_A, catA],
+        )
+      ).rows[0].id as string;
+
+      // definition A (tenant A, ENUM) + definition B (tenant B, ENUM)
+      await pool.query(
+        `INSERT INTO "attribute_definition" (id,"tenantId",key,"nameEn","valueType","updatedAt")
+         VALUES ($1,$2,'COLOUR','Colour','ENUM',now()), ($3,$4,'COLOUR','Colour','ENUM',now())`,
+        [AD_A, TENANT_A, AD_B, TENANT_B],
+      );
+      // A definition cannot be scoped to a B category
+      await expect(
+        pool.query(`UPDATE "attribute_definition" SET "appliesToCategoryId" = $1 WHERE id = $2`, [
+          catB,
+          AD_A,
+        ]),
+      ).rejects.toThrow(/attribute_definition_tenant_category_fkey|violates foreign key/i);
+
+      // an option under definition B
+      const optB = (
+        await pool.query(
+          `INSERT INTO "attribute_option" (id,"tenantId","attributeDefinitionId",value,"labelEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'RED','Red',now()) RETURNING id`,
+          [TENANT_B, AD_B],
+        )
+      ).rows[0].id as string;
+      const optA = (
+        await pool.query(
+          `INSERT INTO "attribute_option" (id,"tenantId","attributeDefinitionId",value,"labelEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'RED','Red',now()) RETURNING id`,
+          [TENANT_A, AD_A],
+        )
+      ).rows[0].id as string;
+
+      // a tenant-A product_attribute_value for definition A pointing at option B
+      // (belongs to definition B) → rejected by the ENUM composite FK
+      await expect(
+        pool.query(
+          `INSERT INTO "product_attribute_value"
+             (id,"tenantId","productId","attributeDefinitionId","optionId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,now())`,
+          [TENANT_A, prodA, AD_A, optB],
+        ),
+      ).rejects.toThrow(/product_attribute_value_enum_option_fkey|violates foreign key/i);
+
+      // the correct option (belongs to definition A) → accepted
+      await expect(
+        pool.query(
+          `INSERT INTO "product_attribute_value"
+             (id,"tenantId","productId","attributeDefinitionId","optionId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,now())`,
+          [TENANT_A, prodA, AD_A, optA],
+        ),
+      ).resolves.toBeTruthy();
+
+      // and a tenant-B product_attribute_value cannot reference tenant-A's product
+      await expect(
+        pool.query(
+          `INSERT INTO "product_attribute_value"
+             (id,"tenantId","productId","attributeDefinitionId","valueText","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'x',now())`,
+          [TENANT_B, prodA, AD_B],
+        ),
+      ).rejects.toThrow(/product_attribute_value_tenant_product_fkey|violates foreign key/i);
+
+      await pool.query(`DELETE FROM "product_attribute_value" WHERE "productId" = $1`, [prodA]);
+      await pool.query(`DELETE FROM "attribute_definition" WHERE id IN ($1,$2)`, [AD_A, AD_B]);
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [prodA]);
+      await pool.query(`DELETE FROM "category" WHERE id IN ($1,$2)`, [catA, catB]);
+    });
+
+    it('exactly-one-value CHECK: zero or two populated columns are rejected', async () => {
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'ad-one-val','C',now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,'ad-one-val-p','P','STOCKED',now()) RETURNING id`,
+          [TENANT_A, cat],
+        )
+      ).rows[0].id as string;
+      const def = (
+        await pool.query(
+          `INSERT INTO "attribute_definition" (id,"tenantId",key,"nameEn","valueType","updatedAt")
+           VALUES (uuidv7(),$1,'NOTE','Note','TEXT',now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+      await expect(
+        pool.query(
+          `INSERT INTO "product_attribute_value" (id,"tenantId","productId","attributeDefinitionId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now())`,
+          [TENANT_A, prod, def],
+        ),
+      ).rejects.toThrow(/one_value_chk/i);
+      await expect(
+        pool.query(
+          `INSERT INTO "product_attribute_value"
+             (id,"tenantId","productId","attributeDefinitionId","valueText","valueBool","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'x',true,now())`,
+          [TENANT_A, prod, def],
+        ),
+      ).rejects.toThrow(/one_value_chk/i);
+
+      await pool.query(`DELETE FROM "attribute_definition" WHERE id = $1`, [def]);
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [prod]);
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [cat]);
+    });
+
+    it('the additive UNIQUE (product.tenantId, id) index exists', async () => {
+      const idx = await pool.query(
+        `SELECT indexdef FROM pg_indexes WHERE tablename = 'product' AND indexname = 'product_tenantId_id_key'`,
+      );
+      expect(idx.rowCount).toBe(1);
+      expect(idx.rows[0]?.indexdef).toMatch(/UNIQUE/);
+    });
+
+    it('security_event view is UNCHANGED by task 3.3 (still exact catalog.template_applied)', async () => {
+      const { rows } = await pool.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
+      );
+      expect(rows[0]!.definition).not.toMatch(/catalog\.%/);
+      expect(rows[0]!.definition).not.toMatch(/attribute/i);
+      expect(rows[0]!.definition).toMatch(/catalog\.template_applied/);
     });
   });
 

@@ -165,4 +165,39 @@ describe('@flower/api-client', () => {
       'http://api.test/v1/catalog/products?status=ACTIVE&q=rose&limit=20',
     );
   });
+
+  it('catalog: attribute definition + product-attributes methods carry the right preconditions (task 3.3)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ id: 'ad1', version: 2 }));
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    await client.createAttributeDefinition(
+      { key: 'COLOUR', nameEn: 'Colour', valueType: 'ENUM' },
+      'idem-ad-1',
+    );
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({ 'idempotency-key': 'idem-ad-1' });
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://api.test/v1/catalog/attribute-definitions',
+    );
+
+    await client.setAttributeOptions('ad1', [{ value: 'RED', labelEn: 'Red' }], 3);
+    const opt = fetchMock.mock.calls[1]![1]!;
+    expect(opt.method).toBe('PUT');
+    expect(opt.headers).toMatchObject({ 'if-match': '"3"' });
+    expect(String(fetchMock.mock.calls[1]![0])).toBe(
+      'http://api.test/v1/catalog/attribute-definitions/ad1/options',
+    );
+
+    await client.setProductAttributes('p1', [{ attributeDefinitionId: 'ad1', valueText: 'x' }], 5);
+    const pa = fetchMock.mock.calls[2]![1]!;
+    expect(pa.method).toBe('PUT');
+    expect(pa.headers).toMatchObject({ 'if-match': '"5"' });
+    expect(pa.headers).not.toHaveProperty('idempotency-key');
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(
+      'http://api.test/v1/catalog/products/p1/attributes',
+    );
+  });
 });

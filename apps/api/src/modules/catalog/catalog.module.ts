@@ -9,16 +9,19 @@ import { ProductTypeController } from './product-type.controller.js';
 import { ProductRepository } from './product.repository.js';
 import { ProductService } from './product.service.js';
 import { ProductController } from './product.controller.js';
+import { AttributeDefinitionRepository } from './attribute-definition.repository.js';
+import { AttributeDefinitionController } from './attribute-definition.controller.js';
+import { ProductAttributeRepository } from './product-attribute.repository.js';
+import { ProductAttributeController } from './product-attribute.controller.js';
 
 /**
  * `catalog` module (Phase 3).
- *   - Task 3.1: the tenant-realm catalog-capability read + the runtime
- *     `CatalogCapabilityService` (consumed by 3.2+).
- *   - Task 3.2: the generic catalog core — Category / Product Type / Product
- *     CRUD + lifecycle. `ProductService` is the first consumer of
- *     `CatalogCapabilityService` (the `fulfilment_strategy` gate).
- * No variants / attributes / identifiers / UOM / pricing / tax / inventory —
- * those are later Task 3.x / Phase 5.
+ *   - Task 3.1: the tenant-realm catalog-capability read + `CatalogCapabilityService`.
+ *   - Task 3.2: the generic catalog core — Category / Product Type / Product.
+ *   - Task 3.3: typed attribute definitions + ENUM options + per-product typed
+ *     attribute values; the required-attribute completeness gate on product
+ *     activate lives in `ProductRepository` (atomic, owner K.2).
+ * No variants / identifiers / UOM / pricing / tax / inventory — later Task 3.x / Phase 5.
  */
 @Module({
   providers: [
@@ -28,12 +31,16 @@ import { ProductController } from './product.controller.js';
     ProductTypeRepository,
     ProductRepository,
     ProductService,
+    AttributeDefinitionRepository,
+    ProductAttributeRepository,
   ],
   controllers: [
     CatalogCapabilityController,
     CategoryController,
     ProductTypeController,
     ProductController,
+    AttributeDefinitionController,
+    ProductAttributeController,
   ],
   exports: [CatalogCapabilityService],
 })

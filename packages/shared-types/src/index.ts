@@ -201,6 +201,47 @@ export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
  *  create + re-parent. */
 export const MAX_CATEGORY_DEPTH = 5;
 
+// --- typed attributes (Phase 3 task 3.3) — docs/phase-3/PHASE-3-PLAN.md §C.4 ---
+
+/**
+ * The closed set of attribute value types (ADR-0018 risk 3 — no arbitrary JSON,
+ * no array-valued storage, NO `MULTISELECT`). `ENUM` = single-select against
+ * `attribute_option`. Mirrored by the `attribute_definition_value_type_chk` DB
+ * CHECK. Each type maps to exactly one populated column on
+ * `product_attribute_value` (`ATTRIBUTE_VALUE_COLUMN`).
+ */
+export const ATTRIBUTE_VALUE_TYPES = ['TEXT', 'NUMBER', 'ENUM', 'BOOLEAN', 'DATE'] as const;
+export type AttributeValueType = (typeof ATTRIBUTE_VALUE_TYPES)[number];
+export const attributeValueTypeSchema = z.enum(ATTRIBUTE_VALUE_TYPES);
+export function isAttributeValueType(value: string): value is AttributeValueType {
+  return (ATTRIBUTE_VALUE_TYPES as readonly string[]).includes(value);
+}
+
+/** The one `product_attribute_value` column a value type populates (data-integrity
+ *  rule 3 — the service enforces this match; the DB CHECK only enforces
+ *  "exactly one populated"). */
+export const ATTRIBUTE_VALUE_COLUMN: Readonly<
+  Record<AttributeValueType, 'valueText' | 'valueNumber' | 'valueBool' | 'valueDate' | 'optionId'>
+> = Object.freeze({
+  TEXT: 'valueText',
+  NUMBER: 'valueNumber',
+  BOOLEAN: 'valueBool',
+  DATE: 'valueDate',
+  ENUM: 'optionId',
+});
+
+/** `attribute_definition` / `attribute_option` lifecycle — `ACTIVE ↔ ARCHIVED`
+ *  only (owner K.1; no DRAFT — an attribute is usable on create). */
+export const ATTRIBUTE_DEFINITION_STATUSES = ['ACTIVE', 'ARCHIVED'] as const;
+export type AttributeDefinitionStatus = (typeof ATTRIBUTE_DEFINITION_STATUSES)[number];
+
+/** `^[A-Z][A-Z0-9_]{1,63}$` — a tenant-defined, immutable attribute key (mirrors
+ *  the DB CHECK). */
+export const ATTRIBUTE_KEY_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+/** `numeric(18,4)` — a NUMBER attribute value, as a decimal string. No JS float
+ *  arithmetic is ever authoritative (owner K.9). */
+export const ATTRIBUTE_NUMBER_RE = /^-?\d{1,14}(\.\d{1,4})?$/;
+
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
  * counts"). Enforced by `LimitService` on create / activate / login.

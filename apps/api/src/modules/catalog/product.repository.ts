@@ -6,6 +6,7 @@ import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { resolveSlug, SLUG_MAX, versionConflict } from './catalog-write.helpers.js';
+import { requiredAttributeGap } from './attribute-definition.repository.js';
 
 export interface ProductRow {
   id: string;
@@ -44,6 +45,28 @@ interface LockedProduct {
   status: string;
   fulfilmentStrategy: string;
   slug: string;
+  categoryId: string;
+  productTypeId: string | null;
+}
+
+/** Task 3.3 (owner K.2) — an ACTIVE, in-scope, `required` attribute definition
+ *  must have a value before a product can be ACTIVE. Catalog-definition
+ *  completeness only — never price / variant / stock / tax. Runs INSIDE the
+ *  transition/update transaction so a concurrent value removal cannot race it. */
+async function assertRequiredAttributesComplete(
+  tx: ScopedTx,
+  productId: string,
+  categoryId: string,
+  productTypeId: string | null,
+): Promise<void> {
+  const missing = await requiredAttributeGap(tx, productId, categoryId, productTypeId);
+  if (missing.length > 0) {
+    throw new DomainError(
+      'PRODUCT_REQUIRED_ATTRIBUTES_MISSING',
+      `required attribute(s) have no value: ${missing.join(', ')}`,
+      422,
+    );
+  }
 }
 
 export interface CreateProductInput {
@@ -199,6 +222,19 @@ export class ProductRepository extends ScopedRepository {
           : resolveSlug(input.slug, input.nameEn ?? '', SLUG_MAX.product);
       if (nextSlug !== current.slug) await this.assertSlugFree(tx, nextSlug, id);
 
+      // owner K.2 — an ACTIVE product cannot drift into an incomplete state by
+      // moving to a category / product type that has an unfilled required
+      // attribute. (Not retroactive: a DRAFT/ARCHIVED product is not gated here;
+      // flipping `required` on a definition never mutates products.)
+      const nextCategoryId = input.categoryId ?? current.categoryId;
+      const nextProductTypeId =
+        input.productTypeId === undefined ? current.productTypeId : (input.productTypeId ?? null);
+      const scopeChanging =
+        nextCategoryId !== current.categoryId || nextProductTypeId !== current.productTypeId;
+      if (current.status === 'ACTIVE' && scopeChanging) {
+        await assertRequiredAttributesComplete(tx, id, nextCategoryId, nextProductTypeId);
+      }
+
       const data: Prisma.ProductUncheckedUpdateInput = { version: { increment: 1 } };
       if (input.categoryId !== undefined) data.categoryId = input.categoryId;
       if (input.productTypeId !== undefined) data.productTypeId = input.productTypeId ?? null;
@@ -251,6 +287,11 @@ export class ProductRepository extends ScopedRepository {
       if (current.status === next) {
         const row = await tx.product.findUnique({ where: { id }, select: SELECT });
         return row!;
+      }
+      // owner K.2 — a product cannot become ACTIVE with a required in-scope
+      // attribute unfilled (catalog-definition completeness only).
+      if (next === 'ACTIVE') {
+        await assertRequiredAttributesComplete(tx, id, current.categoryId, current.productTypeId);
       }
       // ACTIVE → DRAFT is never allowed; this method only ever sets ACTIVE or
       // ARCHIVED so that transition is unreachable here.
@@ -311,7 +352,7 @@ export class ProductRepository extends ScopedRepository {
 
 async function lockProduct(tx: ScopedTx, id: string): Promise<LockedProduct> {
   const rows = await tx.$queryRaw<LockedProduct[]>`
-    SELECT "version", "status", "fulfilmentStrategy", "slug"
+    SELECT "version", "status", "fulfilmentStrategy", "slug", "categoryId", "productTypeId"
       FROM "product" WHERE "id" = ${id}::uuid FOR UPDATE`;
   if (rows.length === 0) throw new NotFoundError('product');
   return rows[0]!;

@@ -66,6 +66,20 @@ export const AUDITABLE_ACTIONS = {
   'catalog.product_status_changed': { resourceType: 'product', security: false },
   'catalog.product_deleted': { resourceType: 'product', security: false },
 
+  // ── typed attribute templates + values (task 3.3) ──────────────────────
+  // Ordinary tenant catalog configuration — business events, NOT security
+  // events; they do NOT surface in `security_event` (the view already matches
+  // only `= 'catalog.template_applied'`, task 3.2).
+  'catalog.attribute_definition_created': { resourceType: 'attribute_definition', security: false },
+  'catalog.attribute_definition_updated': { resourceType: 'attribute_definition', security: false },
+  'catalog.attribute_definition_status_changed': {
+    resourceType: 'attribute_definition',
+    security: false,
+  },
+  'catalog.attribute_definition_deleted': { resourceType: 'attribute_definition', security: false },
+  'catalog.attribute_option_set_changed': { resourceType: 'attribute_definition', security: false },
+  'catalog.product_attributes_changed': { resourceType: 'product', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

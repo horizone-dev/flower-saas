@@ -354,6 +354,84 @@ export interface ProductUpdateInput {
   fulfilmentStrategy?: FulfilmentStrategy;
 }
 
+// ── typed attributes (task 3.3) ─────────────────────────────────────────────
+export type AttributeValueType = 'TEXT' | 'NUMBER' | 'ENUM' | 'BOOLEAN' | 'DATE';
+
+export interface AttributeOptionRow {
+  id: string;
+  value: string;
+  labelEn: string;
+  labelAr: string | null;
+  sortOrder: number;
+}
+export interface AttributeDefinitionRow {
+  id: string;
+  key: string;
+  nameEn: string;
+  nameAr: string | null;
+  valueType: AttributeValueType;
+  appliesToCategoryId: string | null;
+  appliesToProductTypeId: string | null;
+  unitHint: string | null;
+  isVariantOption: boolean;
+  required: boolean;
+  status: 'ACTIVE' | 'ARCHIVED';
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface AttributeDefinitionWithOptions extends AttributeDefinitionRow {
+  options: AttributeOptionRow[];
+}
+export interface AttributeDefinitionCreateInput {
+  key: string;
+  nameEn: string;
+  nameAr?: string | null;
+  valueType: AttributeValueType;
+  appliesToCategoryId?: string | null;
+  appliesToProductTypeId?: string | null;
+  unitHint?: string | null;
+  isVariantOption?: boolean;
+  required?: boolean;
+}
+export interface AttributeDefinitionUpdateInput {
+  nameEn?: string;
+  nameAr?: string | null;
+  unitHint?: string | null;
+  isVariantOption?: boolean;
+  required?: boolean;
+  appliesToCategoryId?: string | null;
+  appliesToProductTypeId?: string | null;
+}
+export interface AttributeOptionInput {
+  value: string;
+  labelEn: string;
+  labelAr?: string | null;
+  sortOrder?: number;
+}
+export interface ProductAttributeValueRow {
+  attributeDefinitionId: string;
+  key: string;
+  valueType: AttributeValueType;
+  valueText: string | null;
+  valueNumber: string | null;
+  valueBool: boolean | null;
+  valueDate: string | null;
+  optionId: string | null;
+}
+export interface ProductAttributeSet {
+  productVersion: number;
+  values: ProductAttributeValueRow[];
+}
+export interface ProductAttributeInput {
+  attributeDefinitionId: string;
+  valueText?: string | null;
+  valueNumber?: string | null;
+  valueBool?: boolean | null;
+  valueDate?: string | null;
+  optionId?: string | null;
+}
+
 export interface ProvisionTenantResponse {
   tenantId: string;
   companyId: string;
@@ -740,6 +818,95 @@ export class ApiClient {
       `/v1/catalog/products/${id}`,
       { method: 'DELETE', ifMatch: `"${expectedVersion}"` },
       (raw) => raw as { status: 'deleted' },
+    );
+  }
+
+  // ── typed attributes (task 3.3) — catalog:view reads / catalog:manage writes ──
+  listAttributeDefinitions(query?: {
+    status?: 'ACTIVE' | 'ARCHIVED';
+    appliesToCategoryId?: string;
+    appliesToProductTypeId?: string;
+    valueType?: AttributeValueType;
+    isVariantOption?: boolean;
+    q?: string;
+  }): Promise<AttributeDefinitionRow[]> {
+    return this.get('/v1/catalog/attribute-definitions', query);
+  }
+  getAttributeDefinition(id: string): Promise<AttributeDefinitionWithOptions> {
+    return this.get(`/v1/catalog/attribute-definitions/${id}`);
+  }
+  createAttributeDefinition(
+    input: AttributeDefinitionCreateInput,
+    idempotencyKey: string,
+  ): Promise<AttributeDefinitionWithOptions> {
+    return this.send('POST', '/v1/catalog/attribute-definitions', input, idempotencyKey);
+  }
+  updateAttributeDefinition(
+    id: string,
+    input: AttributeDefinitionUpdateInput,
+    expectedVersion: number,
+  ): Promise<AttributeDefinitionWithOptions> {
+    return this.call(
+      `/v1/catalog/attribute-definitions/${id}`,
+      { method: 'PUT', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as AttributeDefinitionWithOptions,
+    );
+  }
+  /** replace the ENUM option-set (owner K.4); `If-Match` = the definition version */
+  setAttributeOptions(
+    id: string,
+    options: AttributeOptionInput[],
+    expectedVersion: number,
+  ): Promise<AttributeDefinitionWithOptions> {
+    return this.call(
+      `/v1/catalog/attribute-definitions/${id}/options`,
+      { method: 'PUT', body: { options }, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as AttributeDefinitionWithOptions,
+    );
+  }
+  archiveAttributeDefinition(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<AttributeDefinitionWithOptions> {
+    return this.call(
+      `/v1/catalog/attribute-definitions/${id}/archive`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as AttributeDefinitionWithOptions,
+    );
+  }
+  activateAttributeDefinition(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<AttributeDefinitionWithOptions> {
+    return this.call(
+      `/v1/catalog/attribute-definitions/${id}/activate`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as AttributeDefinitionWithOptions,
+    );
+  }
+  deleteAttributeDefinition(id: string, expectedVersion: number): Promise<{ status: 'deleted' }> {
+    return this.call(
+      `/v1/catalog/attribute-definitions/${id}`,
+      { method: 'DELETE', ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as { status: 'deleted' },
+    );
+  }
+
+  getProductAttributes(productId: string): Promise<ProductAttributeSet> {
+    return this.get(`/v1/catalog/products/${productId}/attributes`);
+  }
+  /** replace-set; `If-Match` = the parent `product.version` (owner K.3) */
+  setProductAttributes(
+    productId: string,
+    attributes: ProductAttributeInput[],
+    expectedProductVersion: number,
+  ): Promise<ProductAttributeSet> {
+    return this.call(
+      `/v1/catalog/products/${productId}/attributes`,
+      { method: 'PUT', body: { attributes }, ifMatch: `"${expectedProductVersion}"` },
+      (raw) => raw as ProductAttributeSet,
     );
   }
 

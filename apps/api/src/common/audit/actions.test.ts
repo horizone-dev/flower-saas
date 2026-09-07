@@ -36,6 +36,13 @@ describe('auditable-action registry', () => {
       'catalog.product_updated',
       'catalog.product_status_changed',
       'catalog.product_deleted',
+      // task 3.3 — typed attributes
+      'catalog.attribute_definition_created',
+      'catalog.attribute_definition_updated',
+      'catalog.attribute_definition_status_changed',
+      'catalog.attribute_definition_deleted',
+      'catalog.attribute_option_set_changed',
+      'catalog.product_attributes_changed',
     ]) {
       expect(isSecurityEventAction(a), a).toBe(false);
     }

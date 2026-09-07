@@ -18,6 +18,13 @@ import {
   MAX_CATEGORY_DEPTH,
   PRODUCT_STATUSES,
   CATALOG_NODE_STATUSES,
+  ATTRIBUTE_VALUE_TYPES,
+  attributeValueTypeSchema,
+  isAttributeValueType,
+  ATTRIBUTE_VALUE_COLUMN,
+  ATTRIBUTE_DEFINITION_STATUSES,
+  ATTRIBUTE_KEY_RE,
+  ATTRIBUTE_NUMBER_RE,
 } from './index.js';
 
 describe('@flower/shared-types schemas', () => {
@@ -146,5 +153,38 @@ describe('@flower/shared-types — generic catalog core (task 3.2)', () => {
     expect([...CATALOG_NODE_STATUSES]).toEqual(['ACTIVE', 'ARCHIVED']);
     // a category / product type is never a DRAFT (owner §12)
     expect(CATALOG_NODE_STATUSES).not.toContain('DRAFT');
+  });
+});
+
+describe('@flower/shared-types — typed attributes (task 3.3)', () => {
+  it('the closed value-type set is exactly TEXT / NUMBER / ENUM / BOOLEAN / DATE — no MULTISELECT', () => {
+    expect([...ATTRIBUTE_VALUE_TYPES]).toEqual(['TEXT', 'NUMBER', 'ENUM', 'BOOLEAN', 'DATE']);
+    expect(ATTRIBUTE_VALUE_TYPES).not.toContain('MULTISELECT');
+    expect(attributeValueTypeSchema.safeParse('ENUM').success).toBe(true);
+    expect(attributeValueTypeSchema.safeParse('MULTISELECT').success).toBe(false);
+    expect(isAttributeValueType('DATE')).toBe(true);
+    expect(isAttributeValueType('json')).toBe(false);
+  });
+
+  it('each value type maps to exactly one product_attribute_value column', () => {
+    expect(ATTRIBUTE_VALUE_COLUMN).toEqual({
+      TEXT: 'valueText',
+      NUMBER: 'valueNumber',
+      BOOLEAN: 'valueBool',
+      DATE: 'valueDate',
+      ENUM: 'optionId',
+    });
+    expect(new Set(Object.values(ATTRIBUTE_VALUE_COLUMN)).size).toBe(5);
+  });
+
+  it('attribute definitions are ACTIVE ↔ ARCHIVED only (no DRAFT); key + number regexes', () => {
+    expect([...ATTRIBUTE_DEFINITION_STATUSES]).toEqual(['ACTIVE', 'ARCHIVED']);
+    expect(ATTRIBUTE_KEY_RE.test('PERFUME_VOLUME')).toBe(true);
+    expect(ATTRIBUTE_KEY_RE.test('lower')).toBe(false);
+    expect(ATTRIBUTE_KEY_RE.test('X')).toBe(false);
+    expect(ATTRIBUTE_NUMBER_RE.test('100')).toBe(true);
+    expect(ATTRIBUTE_NUMBER_RE.test('-12.3456')).toBe(true);
+    expect(ATTRIBUTE_NUMBER_RE.test('1.23456')).toBe(false); // > 4 dp
+    expect(ATTRIBUTE_NUMBER_RE.test('1e5')).toBe(false);
   });
 });

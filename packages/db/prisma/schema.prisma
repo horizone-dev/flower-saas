@@ -1066,7 +1066,8 @@ model Category {
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  products Product[]
+  products             Product[]
+  attributeDefinitions AttributeDefinition[] @relation("AttrDefCategory")
 
   @@unique([tenantId, id])
   @@unique([tenantId, parentId, slug])
@@ -1092,7 +1093,8 @@ model ProductType {
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  products Product[]
+  products             Product[]
+  attributeDefinitions AttributeDefinition[] @relation("AttrDefProductType")
 
   @@unique([tenantId, id])
   @@unique([tenantId, key])
@@ -1130,9 +1132,123 @@ model Product {
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
+  attributeValues ProductAttributeValue[]
+
+  /// backs the task 3.3 `product_attribute_value` tenant-safe FK (additive)
+  @@unique([tenantId, id])
   @@unique([tenantId, slug])
   @@index([tenantId, categoryId])
   @@index([tenantId, productTypeId])
   @@index([tenantId, status])
   @@map("product")
+}
+
+// ═════════════ typed attribute templates + values (task 3.3) ══════════════════
+// docs/phase-3/PHASE-3-PLAN.md §C.4 / ADR-0018 §6 + risk 3. A tenant-defined,
+// STRONGLY-TYPED attribute layer on the product core — never a schemaless JSON
+// dump. Closed value-type set (TEXT | NUMBER | ENUM | BOOLEAN | DATE); ENUM
+// values are single-select against `attribute_option`. Tenant-scoped,
+// company/branch/price/stock-neutral. `is_variant_option` is STORED metadata
+// only — the variant model (Task 3.4) decides how to use it. Vertical variation
+// (perfume volume, flower colour, cake size) is Owner-created data here, never a
+// runtime code branch (HG3-NO-BT-BRANCH).
+
+/// A reusable typed attribute. Tenant-owned. `ACTIVE ↔ ARCHIVED` (no DRAFT —
+/// usable on create). `key` + `valueType` are immutable after create; a scope
+/// change is rejected once any value row exists (data-integrity rule 2).
+model AttributeDefinition {
+  id       String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId String  @db.Uuid
+  /// tenant-defined, immutable — `^[A-Z][A-Z0-9_]{1,63}$` (CHECK)
+  key   String
+  nameEn String
+  nameAr String?
+  /// TEXT | NUMBER | ENUM | BOOLEAN | DATE — closed set (CHECK). Immutable.
+  valueType String
+  /// scope: at most one of the two may be set (CHECK). Both null ⇒ tenant-global.
+  /// Category scope = EXACT match, no descendant inheritance (owner K.7).
+  appliesToCategoryId    String? @db.Uuid
+  appliesToCategory      Category?    @relation("AttrDefCategory", fields: [appliesToCategoryId], references: [id], onDelete: Restrict)
+  appliesToProductTypeId String? @db.Uuid
+  appliesToProductType   ProductType? @relation("AttrDefProductType", fields: [appliesToProductTypeId], references: [id], onDelete: Restrict)
+  /// display-only unit hint (e.g. "ml", "cm") — never enforced
+  unitHint String?
+  /// STORED metadata only — Task 3.4 decides variant interaction (owner K.8)
+  isVariantOption Boolean @default(false)
+  /// an ACTIVE, in-scope, required definition must have a value before a product
+  /// can be ACTIVE (owner K.2) — catalog-definition completeness only, never
+  /// changed retroactively.
+  required Boolean @default(false)
+  /// ACTIVE | ARCHIVED (CHECK)
+  status  String @default("ACTIVE")
+  version Int    @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  options AttributeOption[]
+  values  ProductAttributeValue[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, key])
+  @@index([tenantId, appliesToCategoryId])
+  @@index([tenantId, appliesToProductTypeId])
+  @@index([tenantId, status])
+  @@index([tenantId, isVariantOption])
+  @@map("attribute_definition")
+}
+
+/// One permitted value for a `valueType = ENUM` definition. A parent-controlled
+/// replace-set — no independent lifecycle / versioning (owner K.4). CASCADE-
+/// deletes with its definition; `product_attribute_value.optionId` RESTRICTs
+/// that, so an in-use option cannot be removed.
+model AttributeOption {
+  id                    String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId              String @db.Uuid
+  attributeDefinitionId String @db.Uuid
+  definition            AttributeDefinition @relation(fields: [attributeDefinitionId], references: [id], onDelete: Cascade)
+  /// stored token (e.g. "RED"); unique per definition
+  value   String
+  labelEn String
+  labelAr String?
+  sortOrder Int @default(0)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  values ProductAttributeValue[]
+
+  @@unique([tenantId, attributeDefinitionId, value])
+  /// target of the tenant-safe ENUM composite FK on product_attribute_value —
+  /// proves at the DB an ENUM value's option belongs to the SAME definition
+  /// (data-integrity rule 1)
+  @@unique([tenantId, attributeDefinitionId, id])
+  @@index([tenantId, attributeDefinitionId])
+  @@map("attribute_option")
+}
+
+/// A typed attribute value on ONE product. Exactly one typed column is populated
+/// (DB CHECK); the service enforces the column matches the definition's
+/// `valueType` and, for ENUM, that the option belongs to the same definition
+/// (data-integrity rule 3 + rule 1). Concurrency handle = the parent
+/// `product.version` (no own version).
+model ProductAttributeValue {
+  id                    String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId              String  @db.Uuid
+  productId             String  @db.Uuid
+  product               Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  attributeDefinitionId String  @db.Uuid
+  definition            AttributeDefinition @relation(fields: [attributeDefinitionId], references: [id], onDelete: Restrict)
+  valueText   String?
+  valueNumber Decimal?  @db.Decimal(18, 4)
+  valueBool   Boolean?
+  valueDate   DateTime? @db.Date
+  optionId    String?   @db.Uuid
+  option      AttributeOption? @relation(fields: [optionId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, productId, attributeDefinitionId])
+  @@index([tenantId, productId])
+  @@index([tenantId, attributeDefinitionId])
+  @@index([tenantId, optionId])
+  @@map("product_attribute_value")
 }

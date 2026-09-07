@@ -53,6 +53,7 @@ describe('cross-tenant isolation probe suite', () => {
     credId: '',
     categoryId: '',
     productId: '',
+    attributeDefinitionId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -200,6 +201,16 @@ describe('cross-tenant isolation probe suite', () => {
           fulfilmentStrategy: 'STOCKED',
         },
         { 'idempotency-key': 'probe-prod-a-0001' },
+      )
+    ).json().id;
+    // task 3.3 — an A-owned attribute definition to probe cross-tenant
+    A.attributeDefinitionId = (
+      await send(
+        'POST',
+        '/v1/catalog/attribute-definitions',
+        ownerATok,
+        { key: 'A_ONLY_ATTR_SECRET', nameEn: 'A only attr', valueType: 'TEXT' },
+        { 'idempotency-key': 'probe-attr-a-0001' },
       )
     ).json().id;
   }, 300_000);
@@ -477,6 +488,86 @@ describe('cross-tenant isolation probe suite', () => {
             leaked:
               [A.categoryId, A.productId].some((id) => blob.includes(id)) ||
               blob.includes('A-ONLY-PRODUCT-SECRET'),
+          };
+        },
+      },
+      // ── task 3.3: typed attribute definitions + per-product attribute values
+      // are tenant-scoped through RLS + tenant-safe composite FKs.
+      {
+        name: 'GET A attribute definition by id as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/catalog/attribute-definitions/${A.attributeDefinitionId}`,
+          ownerBTok,
+        ),
+      },
+      {
+        name: 'PUT A attribute definition as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/attribute-definitions/${A.attributeDefinitionId}`,
+          ownerBTok,
+          { nameEn: 'pwned-by-B' },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'PUT A attribute definition option-set as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/attribute-definitions/${A.attributeDefinitionId}/options`,
+          ownerBTok,
+          { options: [] },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'DELETE A attribute definition as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'DELETE',
+          `/v1/catalog/attribute-definitions/${A.attributeDefinitionId}`,
+          ownerBTok,
+          undefined,
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'GET / PUT A product attributes as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: async (): Promise<ProbeOutcome> => {
+          const g = await send('GET', `/v1/catalog/products/${A.productId}/attributes`, ownerBTok);
+          const p = await send(
+            'PUT',
+            `/v1/catalog/products/${A.productId}/attributes`,
+            ownerBTok,
+            { attributes: [] },
+            { 'if-match': '"1"' },
+          );
+          const denied = [403, 404].includes(g.statusCode) && [403, 404].includes(p.statusCode);
+          return { status: denied ? 404 : 200, leaked: !denied };
+        },
+      },
+      {
+        name: 'attribute-definition list + key search never contain A rows',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const [all, search] = await Promise.all([
+            send('GET', '/v1/catalog/attribute-definitions', ownerBTok),
+            send('GET', '/v1/catalog/attribute-definitions?q=A_ONLY_ATTR_SECRET', ownerBTok),
+          ]);
+          const blob = JSON.stringify([all.json(), search.json()]);
+          return {
+            status: 200,
+            leaked: blob.includes(A.attributeDefinitionId) || blob.includes('A_ONLY_ATTR_SECRET'),
           };
         },
       },

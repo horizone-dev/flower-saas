@@ -73,6 +73,12 @@ describe('@flower/permissions registry', () => {
     expect('platform:catalog_capability:manage').not.toBe('platform:entitlements:manage');
   });
 
+  it('task 3.3 (typed attributes) adds NO permission key — attributes reuse catalog:manage', () => {
+    // the whole registry is unchanged from task 3.2 for the tenant realm
+    expect(ALL_PERMISSIONS.filter((k) => k.includes('attribute'))).toEqual([]);
+    expect(PERMISSION_GROUP_OF['catalog:manage']).toBe('catalog');
+  });
+
   // ── task 3.2 — HG3-PERMISSION-STABILITY ─────────────────────────────────
   it('task 3.2 activates ONLY the existing catalog:view / catalog:manage keys', () => {
     expect([...PHASE_3_2_TENANT_PERMISSIONS]).toEqual(['catalog:view', 'catalog:manage']);

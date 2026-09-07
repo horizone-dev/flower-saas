@@ -48,6 +48,10 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   'category',
   'product_type',
   'product',
+  // Phase 3 (task 3.3) — typed attribute templates + values
+  'attribute_definition',
+  'attribute_option',
+  'product_attribute_value',
 ]);
 
 /**
