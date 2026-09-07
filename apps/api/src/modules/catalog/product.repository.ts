@@ -1,12 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma, ScopedTx } from '@flower/db';
-import type { FulfilmentStrategy } from '@flower/shared-types';
+import { type FulfilmentStrategy, usesFixedVariants } from '@flower/shared-types';
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { resolveSlug, SLUG_MAX, versionConflict } from './catalog-write.helpers.js';
 import { requiredAttributeGap } from './attribute-definition.repository.js';
+import {
+  createDefaultVariant,
+  nonArchivedVariantCount,
+  removeDefaultVariantForRestructure,
+} from './variant.repository.js';
 
 export interface ProductRow {
   id: string;
@@ -64,6 +69,30 @@ async function assertRequiredAttributesComplete(
     throw new DomainError(
       'PRODUCT_REQUIRED_ATTRIBUTES_MISSING',
       `required attribute(s) have no value: ${missing.join(', ')}`,
+      422,
+    );
+  }
+}
+
+/**
+ * Task 3.4 (owner L-10) — a non-CUSTOM product needs ≥ 1 NON-ARCHIVED variant
+ * before it can be ACTIVE (the auto default variant satisfies this for a simple
+ * product). The variant may still be DRAFT — gating on an ACTIVE variant would
+ * deadlock (a variant needs its product ACTIVE to activate, owner L-9). CUSTOM
+ * has no gate. Structural completeness of each variant is guaranteed at
+ * variant-create time and cannot drift (option groups are frozen once an
+ * explicit variant exists — owner L-11).
+ */
+async function assertHasNonArchivedVariant(
+  tx: ScopedTx,
+  productId: string,
+  strategy: string,
+): Promise<void> {
+  if (!usesFixedVariants(strategy as FulfilmentStrategy)) return;
+  if ((await nonArchivedVariantCount(tx, productId)) === 0) {
+    throw new DomainError(
+      'PRODUCT_HAS_NO_VARIANT',
+      'a non-CUSTOM product needs at least one non-archived variant before it can be ACTIVE',
       422,
     );
   }
@@ -186,6 +215,16 @@ export class ProductRepository extends ScopedRepository {
           status: created.status,
         },
       });
+      // task 3.4 (owner L-2) — a simple STOCKED/BOM product gets one internal
+      // default variant in the same transaction; no `variants` capability check
+      // (owner L-13). CUSTOM gets none.
+      if (usesFixedVariants(input.fulfilmentStrategy)) {
+        await createDefaultVariant(tx, {
+          id: created.id,
+          nameEn: created.nameEn,
+          nameAr: created.nameAr,
+        });
+      }
       return created;
     });
   }
@@ -248,6 +287,28 @@ export class ProductRepository extends ScopedRepository {
       }
 
       const updated = await tx.product.update({ where: { id }, data, select: SELECT });
+
+      // task 3.4 — keep the default-variant invariant consistent across a DRAFT
+      // strategy change (owner L-2). → CUSTOM: drop the auto default variant.
+      // → STOCKED/BOM from CUSTOM: create one if the product has no option
+      // groups and no variants yet. Explicit variants are never touched.
+      if (strategyChange && input.fulfilmentStrategy !== undefined) {
+        const nowFixed = usesFixedVariants(input.fulfilmentStrategy);
+        const wasFixed = usesFixedVariants(current.fulfilmentStrategy as FulfilmentStrategy);
+        if (wasFixed && !nowFixed) {
+          await removeDefaultVariantForRestructure(tx, id);
+        } else if (!wasFixed && nowFixed) {
+          const groups = await tx.optionGroup.count({ where: { productId: id } });
+          if (groups === 0 && (await nonArchivedVariantCount(tx, id)) === 0) {
+            await createDefaultVariant(tx, {
+              id,
+              nameEn: updated.nameEn,
+              nameAr: updated.nameAr,
+            });
+          }
+        }
+      }
+
       await this.audit.record(tx, {
         action: 'catalog.product_updated',
         resourceType: 'product',
@@ -290,8 +351,10 @@ export class ProductRepository extends ScopedRepository {
       }
       // owner K.2 — a product cannot become ACTIVE with a required in-scope
       // attribute unfilled (catalog-definition completeness only).
+      // owner L-10 — a non-CUSTOM product needs ≥ 1 non-archived variant.
       if (next === 'ACTIVE') {
         await assertRequiredAttributesComplete(tx, id, current.categoryId, current.productTypeId);
+        await assertHasNonArchivedVariant(tx, id, current.fulfilmentStrategy);
       }
       // ACTIVE → DRAFT is never allowed; this method only ever sets ACTIVE or
       // ARCHIVED so that transition is unreachable here.

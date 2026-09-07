@@ -192,6 +192,24 @@ export const PHASE_3_2_TENANT_PERMISSIONS = [
 export type Phase32TenantPermission = (typeof PHASE_3_2_TENANT_PERMISSIONS)[number];
 
 /**
+ * Phase 3 task 3.4 activates the ALREADY-RESERVED `variants:manage` key — it has
+ * existed in `PERMISSIONS.catalog` since Phase 0; task 3.4 registers it in
+ * `permission_registry` and assigns it to the built-in `owner` / `admin` system
+ * roles (`manager` does NOT get it — mirrors `catalog:manage`). No key is
+ * renamed, duplicated or invented (D2-6 / HG3-PERMISSION-STABILITY). It gates
+ * option-group configuration + explicit non-default variant lifecycle;
+ * `catalog:view` covers every variant/option-group read. Not in
+ * `MODULE_OF_PERMISSION` — the `variants` catalog capability (task 3.1) is the
+ * fine gate, checked in the service; `variants` requires no entitlement module.
+ * Not step-up — a variant edit is not money / permission / secret (owner L-16).
+ */
+export const PHASE_3_4_TENANT_PERMISSIONS = [
+  'variants:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase34TenantPermission = (typeof PHASE_3_4_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the

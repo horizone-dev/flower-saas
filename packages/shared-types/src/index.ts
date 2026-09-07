@@ -242,6 +242,70 @@ export const ATTRIBUTE_KEY_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
  *  arithmetic is ever authoritative (owner K.9). */
 export const ATTRIBUTE_NUMBER_RE = /^-?\d{1,14}(\.\d{1,4})?$/;
 
+// --- variants + option groups (Phase 3 task 3.4) — docs/phase-3/PHASE-3-PLAN.md §C.5 ---
+
+/**
+ * `variant` lifecycle — `DRAFT` → `ACTIVE` ↔ `ARCHIVED`; `ACTIVE` → `DRAFT` is
+ * never allowed (mirrors `product`). A variant is a stable catalog identity:
+ * once `ACTIVE`, its product link / `isDefault` / option combination are
+ * immutable (owner L-9 / "variant identity immutability"). `ACTIVE` means the
+ * variant definition is finished — never "sellable" (price / availability /
+ * stock are later tasks / Phase 5).
+ */
+export const VARIANT_STATUSES = ['DRAFT', 'ACTIVE', 'ARCHIVED'] as const;
+export type VariantStatus = (typeof VARIANT_STATUSES)[number];
+
+/** `^[A-Z][A-Z0-9_]{1,63}$` — a tenant-defined, immutable option-group key
+ *  (`SIZE`, `COLOUR`, `STYLE`…). Mirrors the DB CHECK + `product_type` / attribute
+ *  key shape. */
+export const OPTION_GROUP_KEY_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+/** `^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$` — a stored option-value token
+ *  (`RED`, `M`, `12-inch`). Immutable within a group's replace-set (owner L-11).
+ *  Mirrors the task 3.3 `attribute_option` value regex + the DB CHECK. */
+export const OPTION_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/;
+
+/**
+ * The fulfilment strategies whose products use FIXED variants — a `STOCKED` /
+ * `BOM` product with no option groups gets one internal default variant; the
+ * same set requires ≥ 1 non-archived structurally-valid variant before the
+ * product may become `ACTIVE` (owner L-2 / L-3 / L-10). A `CUSTOM` product uses
+ * neither: composition is captured at sale (Phase 6). This constant is the
+ * generic behaviour source — catalog code never compares the strategy string
+ * literally and never reads `tenant.businessTypeKey` (HG3-NO-BT-BRANCH).
+ */
+export const STRATEGIES_WITH_FIXED_VARIANTS: readonly FulfilmentStrategy[] = Object.freeze([
+  'STOCKED',
+  'BOM',
+]);
+export function usesFixedVariants(strategy: FulfilmentStrategy): boolean {
+  return STRATEGIES_WITH_FIXED_VARIANTS.includes(strategy);
+}
+
+/** One option selection on a variant — an internal `(optionGroupId, optionValueId)`
+ *  id pair, never a display label. */
+export interface VariantOptionSelection {
+  optionGroupId: string;
+  optionValueId: string;
+}
+
+/**
+ * The deterministic, insertion-order-independent canonical signature of a
+ * variant's option combination (owner L-7). Derived by the SERVER from the
+ * validated `variant_option_value` rows — never trusted from client input.
+ * Sorted by `optionGroupId`, each pair serialised `groupId=valueId`, joined with
+ * `|`. The default (no-option) variant's signature is the empty string.
+ *
+ *   `[Colour=RED, Size=M]` and `[Size=M, Colour=RED]` → the same string
+ *   (the ids are opaque UUIDs, so the ordering is stable regardless of labels).
+ */
+export function variantOptionSignature(selections: readonly VariantOptionSelection[]): string {
+  if (selections.length === 0) return '';
+  return [...selections]
+    .map((s) => `${s.optionGroupId}=${s.optionValueId}`)
+    .sort()
+    .join('|');
+}
+
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
  * counts"). Enforced by `LimitService` on create / activate / login.

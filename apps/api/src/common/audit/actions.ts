@@ -80,6 +80,21 @@ export const AUDITABLE_ACTIONS = {
   'catalog.attribute_option_set_changed': { resourceType: 'attribute_definition', security: false },
   'catalog.product_attributes_changed': { resourceType: 'product', security: false },
 
+  // ── variants + option groups (task 3.4) ───────────────────────────────────
+  // Ordinary tenant catalog configuration — business events, NOT security
+  // events; they do NOT surface in `security_event` (the view already matches
+  // only `= 'catalog.template_applied'`, task 3.2). ONE audit row per successful
+  // public mutation — a variant create/update that also writes child
+  // `variant_option_value` rows still emits exactly one row (owner "audit
+  // semantics").
+  'catalog.option_group_created': { resourceType: 'option_group', security: false },
+  'catalog.option_group_updated': { resourceType: 'option_group', security: false },
+  'catalog.option_group_deleted': { resourceType: 'option_group', security: false },
+  'catalog.option_value_set_changed': { resourceType: 'option_group', security: false },
+  'catalog.variant_created': { resourceType: 'variant', security: false },
+  'catalog.variant_updated': { resourceType: 'variant', security: false },
+  'catalog.variant_status_changed': { resourceType: 'variant', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

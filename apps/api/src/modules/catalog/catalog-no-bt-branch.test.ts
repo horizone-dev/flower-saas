@@ -4,13 +4,14 @@ import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 
 /**
- * HG3-NO-BT-BRANCH — structural proof (owner §21 / task 3.3 extension). No
- * catalog domain-logic file (tasks 3.2 + 3.3) may read `tenant.businessTypeKey` /
- * a business-type label to branch behaviour. Behaviour is
- * `product.fulfilmentStrategy` + enabled `tenant_catalog_capability` rows +
- * configured attribute DATA ONLY. (The behavioural half — two tenants with
+ * HG3-NO-BT-BRANCH — structural proof (owner §21 / tasks 3.3 + 3.4 extension).
+ * No catalog domain-logic file (tasks 3.2 + 3.3 + 3.4) may read
+ * `tenant.businessTypeKey` / a business-type label to branch behaviour.
+ * Behaviour is `product.fulfilmentStrategy` (via `usesFixedVariants`, never a
+ * string literal) + enabled `tenant_catalog_capability` rows + configured
+ * attribute / option-group DATA ONLY. (The behavioural half — two tenants with
  * different business types but identical data behave identically — is in the
- * `catalog-core` / `catalog-attributes` integration suites.)
+ * `catalog-core` / `catalog-attributes` / `catalog-variants` integration suites.)
  *
  * `catalog-capability.*` (task 3.1) is deliberately excluded: `ownView()` exposes
  * `businessTypeKey` as pure provenance in a read projection, never a branch.
@@ -32,6 +33,13 @@ const DOMAIN_FILES = [
   'product-attribute.repository.ts',
   'product-attribute.controller.ts',
   'attribute.helpers.ts',
+  // task 3.4
+  'option-group.repository.ts',
+  'option-group.controller.ts',
+  'variant.repository.ts',
+  'variant.controller.ts',
+  'variant.service.ts',
+  'variant.helpers.ts',
 ];
 
 /** strip `//` line comments and `/* *\/` block comments */

@@ -420,6 +420,14 @@ catalog **service** at write time (ADR-0018 §2).
 
 ### C.5 Task 3.4 — variants (tenant-scoped) — **price/currency-neutral (D2-2)**
 
+> **Correction (Task 3.4 implementation, owner L-1):** the `variant.sku` column +
+> `(tenant_id, sku)` unique in the sketch below are **superseded** — SKU is a
+> `code_type = SKU` row in Task 3.5's `item_identifier` (the single source of
+> truth); `variant` has **no `sku` column**. `variant.base_uom_code` remains
+> Task 3.6. Task 3.4's `variant` adds only `is_default` + `option_signature`
+> (owner-approved structural fields) and the partial unique indexes for
+> non-archived combination uniqueness + at-most-one-default.
+
 | Table                  | RLS          | Unique                                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ---------------------- | ------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `option_group`         | ENABLE+FORCE | `(tenant_id, product_id, key)`             | `SIZE`, `COLOUR`, `STYLE`, `OCCASION` …; `name_en`/`name_ar`, `sort_order`.                                                                                                                                                                                                                                                                                                                                           |

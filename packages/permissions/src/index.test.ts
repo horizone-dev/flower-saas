@@ -5,6 +5,7 @@ import {
   PERMISSION_GROUP_OF,
   PHASE_1_TENANT_PERMISSIONS,
   PHASE_3_2_TENANT_PERMISSIONS,
+  PHASE_3_4_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   MODULE_OF_PERMISSION,
   STEP_UP_PERMISSIONS,
@@ -77,6 +78,20 @@ describe('@flower/permissions registry', () => {
     // the whole registry is unchanged from task 3.2 for the tenant realm
     expect(ALL_PERMISSIONS.filter((k) => k.includes('attribute'))).toEqual([]);
     expect(PERMISSION_GROUP_OF['catalog:manage']).toBe('catalog');
+  });
+
+  it('task 3.4 activates the ALREADY-RESERVED variants:manage key — no new/duplicate key', () => {
+    expect([...PHASE_3_4_TENANT_PERMISSIONS]).toEqual(['variants:manage']);
+    // it is a real, well-formed, long-standing catalog-group key (not invented)
+    expect(isPermissionKey('variants:manage')).toBe(true);
+    expect(PERMISSION_GROUP_OF['variants:manage']).toBe('catalog');
+    // exactly one occurrence — no second semantically-equal variant permission
+    expect(ALL_PERMISSIONS.filter((k) => k === 'variants:manage')).toHaveLength(1);
+    expect(ALL_PERMISSIONS.filter((k) => k.includes('variant'))).toEqual(['variants:manage']);
+    // catalog capability (task 3.1) is the fine gate — not an entitlement module,
+    // and a variant edit is not money/permission/secret → no step-up
+    expect(MODULE_OF_PERMISSION['variants:manage']).toBeUndefined();
+    expect(requiresStepUp('variants:manage')).toBe(false);
   });
 
   // ── task 3.2 — HG3-PERMISSION-STABILITY ─────────────────────────────────

@@ -200,4 +200,45 @@ describe('@flower/api-client', () => {
       'http://api.test/v1/catalog/products/p1/attributes',
     );
   });
+
+  it('catalog: option-group + variant methods carry the right preconditions (task 3.4)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ id: 'x', version: 2 }));
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    await client.createOptionGroup('p1', { key: 'COLOUR', nameEn: 'Colour' }, 'idem-og-1');
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({ 'idempotency-key': 'idem-og-1' });
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://api.test/v1/catalog/products/p1/option-groups',
+    );
+
+    await client.setOptionValues('p1', 'g1', [{ value: 'RED', labelEn: 'Red' }], 4);
+    const ov = fetchMock.mock.calls[1]![1]!;
+    expect(ov.method).toBe('PUT');
+    expect(ov.headers).toMatchObject({ 'if-match': '"4"' });
+    expect(String(fetchMock.mock.calls[1]![0])).toBe(
+      'http://api.test/v1/catalog/products/p1/option-groups/g1/values',
+    );
+
+    await client.createVariant(
+      'p1',
+      { optionValues: [{ optionGroupId: 'g1', optionValueId: 'v1' }] },
+      'idem-var-1',
+    );
+    expect(fetchMock.mock.calls[2]![1]!.headers).toMatchObject({ 'idempotency-key': 'idem-var-1' });
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(
+      'http://api.test/v1/catalog/products/p1/variants',
+    );
+
+    await client.activateVariant('var1', 7, 'idem-var-act');
+    const act = fetchMock.mock.calls[3]![1]!;
+    expect(act.method).toBe('POST');
+    expect(act.headers).toMatchObject({ 'if-match': '"7"', 'idempotency-key': 'idem-var-act' });
+    expect(String(fetchMock.mock.calls[3]![0])).toBe(
+      'http://api.test/v1/catalog/variants/var1/activate',
+    );
+  });
 });

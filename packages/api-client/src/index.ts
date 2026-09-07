@@ -432,6 +432,86 @@ export interface ProductAttributeInput {
   optionId?: string | null;
 }
 
+// ── variants + option groups (task 3.4) ─────────────────────────────────────
+export type VariantStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+
+export interface OptionValueRow {
+  id: string;
+  value: string;
+  labelEn: string;
+  labelAr: string | null;
+  sortOrder: number;
+}
+export interface OptionGroupRow {
+  id: string;
+  productId: string;
+  key: string;
+  nameEn: string;
+  nameAr: string | null;
+  sortOrder: number;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface OptionGroupWithValues extends OptionGroupRow {
+  values: OptionValueRow[];
+}
+export interface OptionGroupCreateInput {
+  key: string;
+  nameEn: string;
+  nameAr?: string | null;
+  sortOrder?: number;
+}
+export interface OptionGroupUpdateInput {
+  nameEn?: string;
+  nameAr?: string | null;
+  sortOrder?: number;
+}
+export interface OptionValueInput {
+  value: string;
+  labelEn: string;
+  labelAr?: string | null;
+  sortOrder?: number;
+}
+export interface VariantOptionSelectionInput {
+  optionGroupId: string;
+  optionValueId: string;
+}
+export interface VariantOptionValueRow {
+  optionGroupId: string;
+  optionGroupKey: string;
+  optionValueId: string;
+  optionValue: string;
+}
+export interface VariantRow {
+  id: string;
+  productId: string;
+  nameEn: string;
+  nameAr: string | null;
+  sortOrder: number;
+  isDefault: boolean;
+  optionSignature: string;
+  status: VariantStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface VariantWithOptions extends VariantRow {
+  options: VariantOptionValueRow[];
+}
+export interface VariantCreateInput {
+  optionValues: VariantOptionSelectionInput[];
+  nameEn?: string;
+  nameAr?: string | null;
+  sortOrder?: number;
+}
+export interface VariantUpdateInput {
+  nameEn?: string;
+  nameAr?: string | null;
+  sortOrder?: number;
+  optionValues?: VariantOptionSelectionInput[];
+}
+
 export interface ProvisionTenantResponse {
   tenantId: string;
   companyId: string;
@@ -907,6 +987,106 @@ export class ApiClient {
       `/v1/catalog/products/${productId}/attributes`,
       { method: 'PUT', body: { attributes }, ifMatch: `"${expectedProductVersion}"` },
       (raw) => raw as ProductAttributeSet,
+    );
+  }
+
+  // ── variants + option groups (task 3.4) — catalog:view reads / variants:manage writes ──
+  listOptionGroups(productId: string): Promise<OptionGroupWithValues[]> {
+    return this.get(`/v1/catalog/products/${productId}/option-groups`);
+  }
+  createOptionGroup(
+    productId: string,
+    input: OptionGroupCreateInput,
+    idempotencyKey: string,
+  ): Promise<OptionGroupWithValues> {
+    return this.send(
+      'POST',
+      `/v1/catalog/products/${productId}/option-groups`,
+      input,
+      idempotencyKey,
+    );
+  }
+  updateOptionGroup(
+    productId: string,
+    groupId: string,
+    input: OptionGroupUpdateInput,
+    expectedVersion: number,
+  ): Promise<OptionGroupWithValues> {
+    return this.call(
+      `/v1/catalog/products/${productId}/option-groups/${groupId}`,
+      { method: 'PUT', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as OptionGroupWithValues,
+    );
+  }
+  /** replace the value-set; `If-Match` = the option-group version (owner L-11) */
+  setOptionValues(
+    productId: string,
+    groupId: string,
+    values: OptionValueInput[],
+    expectedVersion: number,
+  ): Promise<OptionGroupWithValues> {
+    return this.call(
+      `/v1/catalog/products/${productId}/option-groups/${groupId}/values`,
+      { method: 'PUT', body: { values }, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as OptionGroupWithValues,
+    );
+  }
+  deleteOptionGroup(
+    productId: string,
+    groupId: string,
+    expectedVersion: number,
+  ): Promise<{ status: 'deleted'; recreatedDefaultVariant: boolean }> {
+    return this.call(
+      `/v1/catalog/products/${productId}/option-groups/${groupId}`,
+      { method: 'DELETE', ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as { status: 'deleted'; recreatedDefaultVariant: boolean },
+    );
+  }
+
+  listVariants(productId: string): Promise<VariantRow[]> {
+    return this.get(`/v1/catalog/products/${productId}/variants`);
+  }
+  getVariant(id: string): Promise<VariantWithOptions> {
+    return this.get(`/v1/catalog/variants/${id}`);
+  }
+  createVariant(
+    productId: string,
+    input: VariantCreateInput,
+    idempotencyKey: string,
+  ): Promise<VariantWithOptions> {
+    return this.send('POST', `/v1/catalog/products/${productId}/variants`, input, idempotencyKey);
+  }
+  updateVariant(
+    id: string,
+    input: VariantUpdateInput,
+    expectedVersion: number,
+  ): Promise<VariantWithOptions> {
+    return this.call(
+      `/v1/catalog/variants/${id}`,
+      { method: 'PUT', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as VariantWithOptions,
+    );
+  }
+  activateVariant(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<VariantWithOptions> {
+    return this.call(
+      `/v1/catalog/variants/${id}/activate`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as VariantWithOptions,
+    );
+  }
+  archiveVariant(
+    id: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<VariantWithOptions> {
+    return this.call(
+      `/v1/catalog/variants/${id}/archive`,
+      { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as VariantWithOptions,
     );
   }
 

@@ -1133,8 +1133,11 @@ model Product {
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
   attributeValues ProductAttributeValue[]
+  optionGroups    OptionGroup[]
+  variants        Variant[]
 
-  /// backs the task 3.3 `product_attribute_value` tenant-safe FK (additive)
+  /// backs the task 3.3 `product_attribute_value` + task 3.4 `variant` /
+  /// `option_group` tenant-safe FKs (additive)
   @@unique([tenantId, id])
   @@unique([tenantId, slug])
   @@index([tenantId, categoryId])
@@ -1251,4 +1254,138 @@ model ProductAttributeValue {
   @@index([tenantId, attributeDefinitionId])
   @@index([tenantId, optionId])
   @@map("product_attribute_value")
+}
+
+// ═════════════════ variants + option groups (task 3.4) ═══════════════════════
+// docs/phase-3/PHASE-3-PLAN.md §C.5 / ADR-0018 §1·3·5. A tenant-scoped,
+// company/branch/currency-neutral variant layer on the product core. `variant`
+// carries NO price / currency / SKU / base UOM / stock column — ever (D2-2;
+// SKU is Task 3.5 `item_identifier`, base UOM is Task 3.6). Behaviour is driven
+// only by `product.fulfilmentStrategy` + the `variants` capability + configured
+// data — `tenant.businessTypeKey` is never read (HG3-NO-BT-BRANCH).
+//
+// `option_group` is INDEPENDENT (owner L-5): no FK to / copy from
+// `attribute_definition`; `AttributeDefinition.isVariantOption` stays advisory
+// metadata only. Variant selection truth is exclusively
+// option_group → option_value → variant_option_value.
+//
+// Tenant-safe + same-product composite FKs (owner §9 / "DB same-product
+// invariant"): every reference is ALSO a composite `(tenantId[, productId], xId)
+// → x(...)` FK in the migration, so the DB itself rejects a tenant-A row that
+// points at a tenant-B row AND a variant_option_value whose option group belongs
+// to a different product than its variant. Prisma models the single-column
+// relations; the migration adds the composites + the partial unique indexes it
+// cannot express (non-archived combination uniqueness; at-most-one default).
+
+/// A per-product variant dimension (`SIZE`, `COLOUR`, `STYLE`, `OCCASION`…).
+/// `key` is immutable; structural membership changes only while the product is
+/// DRAFT and has no explicit variants (owner L-11). Values are a
+/// parent-controlled replace-set guarded by `option_group.version` (owner L-12).
+model OptionGroup {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// tenant-defined, immutable — `^[A-Z][A-Z0-9_]{1,63}$` (CHECK)
+  key       String
+  nameEn    String
+  nameAr    String?
+  sortOrder Int      @default(0)
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  values            OptionValue[]
+  variantSelections VariantOptionValue[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, productId, id])
+  @@unique([tenantId, productId, key])
+  @@index([tenantId, productId])
+  @@map("option_group")
+}
+
+/// One ordered permitted value of an option group. A parent-controlled
+/// replace-set — no independent lifecycle / versioning (owner L-11). CASCADE-
+/// deletes with its group; `variant_option_value.optionValueId` is NO ACTION so
+/// an in-use value cannot be orphaned (the service returns 409 first).
+model OptionValue {
+  id            String      @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String      @db.Uuid
+  optionGroupId String      @db.Uuid
+  group         OptionGroup @relation(fields: [optionGroupId], references: [id], onDelete: Cascade)
+  /// stored token (e.g. "RED"); unique per group; immutable within the replace-set
+  value     String
+  labelEn   String
+  labelAr   String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  variantSelections VariantOptionValue[]
+
+  @@unique([tenantId, optionGroupId, value])
+  /// target of the "value belongs to the stated group" composite FK
+  @@unique([tenantId, optionGroupId, id])
+  @@index([tenantId, optionGroupId])
+  @@map("option_value")
+}
+
+/// A concrete selectable unit of a product. `DRAFT → ACTIVE ↔ ARCHIVED` (never
+/// ACTIVE → DRAFT). Once ACTIVE the product link / `isDefault` / option
+/// combination are immutable ("variant identity immutability"); option
+/// selections change only while DRAFT. `isDefault = true` ⇒ `optionSignature`
+/// is '' and there are zero `variant_option_value` rows (CHECK + service +
+/// tests). No price / currency / sku / baseUom / stock column — ever.
+model Variant {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// denormalised display label (derived from the product + option labels)
+  nameEn    String
+  nameAr    String?
+  sortOrder Int     @default(0)
+  /// the auto-created internal default variant for a simple STOCKED/BOM product
+  isDefault Boolean @default(false)
+  /// deterministic, insertion-order-independent canonical id-pair signature
+  /// (server-derived, never client-supplied). '' for the default variant.
+  optionSignature String   @default("")
+  /// DRAFT | ACTIVE | ARCHIVED (CHECK)
+  status          String   @default("DRAFT")
+  version         Int      @default(1)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+
+  optionValues VariantOptionValue[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, productId, id])
+  @@index([tenantId, productId])
+  @@index([tenantId, status])
+  @@map("variant")
+}
+
+/// One concrete option selection of a variant — one row per option group.
+/// `productId` is server-populated from the locked variant/product context
+/// (never client input) so the migration's composite FKs can prove BOTH that
+/// the value belongs to the stated group AND that the group belongs to the same
+/// product as the variant. Concurrency handle = the parent `variant.version`.
+model VariantOptionValue {
+  id            String      @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String      @db.Uuid
+  productId     String      @db.Uuid
+  variantId     String      @db.Uuid
+  variant       Variant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  optionGroupId String      @db.Uuid
+  group         OptionGroup @relation(fields: [optionGroupId], references: [id], onDelete: NoAction)
+  optionValueId String      @db.Uuid
+  value         OptionValue @relation(fields: [optionValueId], references: [id], onDelete: NoAction)
+  createdAt     DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, variantId, optionGroupId])
+  @@index([tenantId, variantId])
+  @@index([tenantId, optionValueId])
+  @@map("variant_option_value")
 }

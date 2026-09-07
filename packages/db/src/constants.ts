@@ -52,6 +52,11 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   'attribute_definition',
   'attribute_option',
   'product_attribute_value',
+  // Phase 3 (task 3.4) — variants + option groups (price/currency-neutral)
+  'option_group',
+  'option_value',
+  'variant',
+  'variant_option_value',
 ]);
 
 /**

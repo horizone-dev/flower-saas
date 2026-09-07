@@ -25,6 +25,12 @@ import {
   ATTRIBUTE_DEFINITION_STATUSES,
   ATTRIBUTE_KEY_RE,
   ATTRIBUTE_NUMBER_RE,
+  VARIANT_STATUSES,
+  OPTION_GROUP_KEY_RE,
+  OPTION_VALUE_RE,
+  STRATEGIES_WITH_FIXED_VARIANTS,
+  usesFixedVariants,
+  variantOptionSignature,
 } from './index.js';
 
 describe('@flower/shared-types schemas', () => {
@@ -186,5 +192,47 @@ describe('@flower/shared-types — typed attributes (task 3.3)', () => {
     expect(ATTRIBUTE_NUMBER_RE.test('-12.3456')).toBe(true);
     expect(ATTRIBUTE_NUMBER_RE.test('1.23456')).toBe(false); // > 4 dp
     expect(ATTRIBUTE_NUMBER_RE.test('1e5')).toBe(false);
+  });
+});
+
+describe('@flower/shared-types — variants + option groups (task 3.4)', () => {
+  it('variant lifecycle is DRAFT → ACTIVE ↔ ARCHIVED; key + value token regexes', () => {
+    expect([...VARIANT_STATUSES]).toEqual(['DRAFT', 'ACTIVE', 'ARCHIVED']);
+    expect(OPTION_GROUP_KEY_RE.test('COLOUR')).toBe(true);
+    expect(OPTION_GROUP_KEY_RE.test('SIZE_2')).toBe(true);
+    expect(OPTION_GROUP_KEY_RE.test('lower')).toBe(false);
+    expect(OPTION_GROUP_KEY_RE.test('X')).toBe(false);
+    expect(OPTION_VALUE_RE.test('RED')).toBe(true);
+    expect(OPTION_VALUE_RE.test('12-inch')).toBe(true);
+    expect(OPTION_VALUE_RE.test('_bad')).toBe(false);
+    expect(OPTION_VALUE_RE.test('a b')).toBe(false);
+  });
+
+  it('STOCKED / BOM use fixed variants; CUSTOM does not (no literal branch on the string)', () => {
+    expect([...STRATEGIES_WITH_FIXED_VARIANTS].sort()).toEqual(['BOM', 'STOCKED']);
+    expect(usesFixedVariants('STOCKED')).toBe(true);
+    expect(usesFixedVariants('BOM')).toBe(true);
+    expect(usesFixedVariants('CUSTOM')).toBe(false);
+  });
+
+  it('variantOptionSignature is deterministic and insertion-order-independent (owner L-7)', () => {
+    expect(variantOptionSignature([])).toBe('');
+    const a = variantOptionSignature([
+      { optionGroupId: 'g-colour', optionValueId: 'v-red' },
+      { optionGroupId: 'g-size', optionValueId: 'v-m' },
+    ]);
+    const b = variantOptionSignature([
+      { optionGroupId: 'g-size', optionValueId: 'v-m' },
+      { optionGroupId: 'g-colour', optionValueId: 'v-red' },
+    ]);
+    expect(a).toBe(b);
+    expect(a).toBe('g-colour=v-red|g-size=v-m');
+    // a different value → a different signature
+    expect(
+      variantOptionSignature([
+        { optionGroupId: 'g-colour', optionValueId: 'v-blue' },
+        { optionGroupId: 'g-size', optionValueId: 'v-m' },
+      ]),
+    ).not.toBe(a);
   });
 });

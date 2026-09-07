@@ -13,6 +13,11 @@ import { AttributeDefinitionRepository } from './attribute-definition.repository
 import { AttributeDefinitionController } from './attribute-definition.controller.js';
 import { ProductAttributeRepository } from './product-attribute.repository.js';
 import { ProductAttributeController } from './product-attribute.controller.js';
+import { OptionGroupRepository } from './option-group.repository.js';
+import { VariantRepository } from './variant.repository.js';
+import { OptionGroupService, VariantService } from './variant.service.js';
+import { OptionGroupController } from './option-group.controller.js';
+import { ProductVariantController, VariantController } from './variant.controller.js';
 
 /**
  * `catalog` module (Phase 3).
@@ -21,7 +26,11 @@ import { ProductAttributeController } from './product-attribute.controller.js';
  *   - Task 3.3: typed attribute definitions + ENUM options + per-product typed
  *     attribute values; the required-attribute completeness gate on product
  *     activate lives in `ProductRepository` (atomic, owner K.2).
- * No variants / identifiers / UOM / pricing / tax / inventory — later Task 3.x / Phase 5.
+ *   - Task 3.4: variants + option groups (price/currency/SKU/UOM-neutral). The
+ *     auto default-variant creation + the "≥1 non-archived variant" gate for a
+ *     non-CUSTOM product activation live in `ProductRepository`; explicit
+ *     variant / option-group writes gate on the `variants` capability.
+ * No identifiers / UOM / pricing / tax / inventory — later Task 3.x / Phase 5.
  */
 @Module({
   providers: [
@@ -33,6 +42,10 @@ import { ProductAttributeController } from './product-attribute.controller.js';
     ProductService,
     AttributeDefinitionRepository,
     ProductAttributeRepository,
+    OptionGroupRepository,
+    VariantRepository,
+    OptionGroupService,
+    VariantService,
   ],
   controllers: [
     CatalogCapabilityController,
@@ -41,6 +54,9 @@ import { ProductAttributeController } from './product-attribute.controller.js';
     ProductController,
     AttributeDefinitionController,
     ProductAttributeController,
+    OptionGroupController,
+    ProductVariantController,
+    VariantController,
   ],
   exports: [CatalogCapabilityService],
 })

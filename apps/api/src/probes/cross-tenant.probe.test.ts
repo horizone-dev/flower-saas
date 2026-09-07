@@ -12,6 +12,7 @@ import {
 import {
   PHASE_1_TENANT_PERMISSIONS,
   PHASE_3_2_TENANT_PERMISSIONS,
+  PHASE_3_4_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -54,6 +55,8 @@ describe('cross-tenant isolation probe suite', () => {
     categoryId: '',
     productId: '',
     attributeDefinitionId: '',
+    variantId: '',
+    optionGroupId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -153,14 +156,22 @@ describe('cross-tenant isolation probe suite', () => {
       tenantId: A.tenantId,
       userId: A.ownerId,
       accountType: 'OWNER',
-      permissions: [...PHASE_1_TENANT_PERMISSIONS, ...PHASE_3_2_TENANT_PERMISSIONS],
+      permissions: [
+        ...PHASE_1_TENANT_PERMISSIONS,
+        ...PHASE_3_2_TENANT_PERMISSIONS,
+        ...PHASE_3_4_TENANT_PERMISSIONS,
+      ],
     });
     ownerBTok = await mint('probe-owner-b', {
       realm: 'tenant',
       tenantId: B.tenantId,
       userId: B.ownerId,
       accountType: 'OWNER',
-      permissions: [...PHASE_1_TENANT_PERMISSIONS, ...PHASE_3_2_TENANT_PERMISSIONS],
+      permissions: [
+        ...PHASE_1_TENANT_PERMISSIONS,
+        ...PHASE_3_2_TENANT_PERMISSIONS,
+        ...PHASE_3_4_TENANT_PERMISSIONS,
+      ],
     });
 
     // seed a couple of A-owned resources to probe for
@@ -213,6 +224,31 @@ describe('cross-tenant isolation probe suite', () => {
         { 'idempotency-key': 'probe-attr-a-0001' },
       )
     ).json().id;
+
+    // task 3.4 — A's auto-created default variant + a raw option group to probe
+    // cross-tenant (the row need not be internally consistent — the probe only
+    // needs an id it must not be able to reach as tenant B).
+    {
+      const c2 = new pg.Client({ connectionString: stack.postgres.url });
+      await c2.connect();
+      try {
+        A.variantId = (
+          await c2.query(`SELECT id FROM variant WHERE "tenantId"=$1 AND "productId"=$2`, [
+            A.tenantId,
+            A.productId,
+          ])
+        ).rows[0].id;
+        A.optionGroupId = (
+          await c2.query(
+            `INSERT INTO option_group (id,"tenantId","productId","key","nameEn","updatedAt")
+             VALUES (uuidv7(),$1,$2,'A_ONLY_GROUP','A only group',now()) RETURNING id`,
+            [A.tenantId, A.productId],
+          )
+        ).rows[0].id;
+      } finally {
+        await c2.end();
+      }
+    }
   }, 300_000);
 
   afterAll(async () => {
@@ -571,6 +607,95 @@ describe('cross-tenant isolation probe suite', () => {
           };
         },
       },
+      // ── task 3.4: variants + option groups are tenant-scoped through RLS +
+      // tenant-safe / same-product composite FKs. B cannot read, mutate or
+      // configure A's variants / option groups, and lists never leak them.
+      {
+        name: 'GET A variant by id as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus('GET', `/v1/catalog/variants/${A.variantId}`, ownerBTok),
+      },
+      {
+        name: 'PUT A variant as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/variants/${A.variantId}`,
+          ownerBTok,
+          { nameEn: 'pwned-by-B' },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'POST A variant activate as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/catalog/variants/${A.variantId}/activate`,
+          ownerBTok,
+          undefined,
+          { 'idempotency-key': 'probe-b-var-act-0001', 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'GET / list A product variants + option groups as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const v = await send('GET', `/v1/catalog/products/${A.productId}/variants`, ownerBTok);
+          const g = await send(
+            'GET',
+            `/v1/catalog/products/${A.productId}/option-groups`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(v.statusCode) && [403, 404].includes(g.statusCode);
+          const blob = JSON.stringify([v.json(), g.json()]);
+          return {
+            status: denied ? 404 : v.statusCode,
+            leaked:
+              !denied &&
+              [A.variantId, A.optionGroupId, 'A_ONLY_GROUP'].some((s) => blob.includes(s)),
+          };
+        },
+      },
+      {
+        name: 'POST an option group on A product as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/catalog/products/${A.productId}/option-groups`,
+          ownerBTok,
+          { key: 'B_INJECT', nameEn: 'x' },
+          { 'idempotency-key': 'probe-b-og-inject-0001' },
+        ),
+      },
+      {
+        name: 'POST a variant on A product as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/catalog/products/${A.productId}/variants`,
+          ownerBTok,
+          { optionValues: [{ optionGroupId: A.optionGroupId, optionValueId: A.optionGroupId }] },
+          { 'idempotency-key': 'probe-b-var-inject-0001' },
+        ),
+      },
+      {
+        name: 'PUT A option group as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/products/${A.productId}/option-groups/${A.optionGroupId}`,
+          ownerBTok,
+          { nameEn: 'pwned-by-B' },
+          { 'if-match': '"1"' },
+        ),
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -856,7 +981,8 @@ async function seed(url: string): Promise<void> {
       INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
       VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
       INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt")
-      VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),('CUSTOM','channel.pos',true,now());
+      VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),
+             ('CUSTOM','channel.pos',true,now()),('CUSTOM','variants',true,now());
     `);
   } finally {
     await c.end();

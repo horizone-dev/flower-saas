@@ -1003,16 +1003,12 @@ describe('typed attributes (task 3.3, integration)', () => {
   });
 
   // ══════════════════ no premature domain ════════════════════════════════
-  it('no Task 3.4 / later-domain table exists', async () => {
+  it('no Task 3.5 / later-domain table exists', async () => {
     const rows = await sql<{ tablename: string }>(
       `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
     );
     const present = new Set(rows.map((r) => r.tablename));
     for (const forbidden of [
-      'option_group',
-      'option_value',
-      'variant',
-      'variant_option_value',
       'item_identifier',
       'uom',
       'uom_conversion',

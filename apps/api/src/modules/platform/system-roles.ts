@@ -1,4 +1,8 @@
-import { PHASE_1_TENANT_PERMISSIONS, PHASE_3_2_TENANT_PERMISSIONS } from '@flower/permissions';
+import {
+  PHASE_1_TENANT_PERMISSIONS,
+  PHASE_3_2_TENANT_PERMISSIONS,
+  PHASE_3_4_TENANT_PERMISSIONS,
+} from '@flower/permissions';
 
 /**
  * The 13 system role templates seeded into every tenant at provisioning
@@ -12,11 +16,15 @@ import { PHASE_1_TENANT_PERMISSIONS, PHASE_3_2_TENANT_PERMISSIONS } from '@flowe
  * Phase 3 task 3.2 (owner R-1): `owner` + `admin` gain `catalog:view` +
  * `catalog:manage`; `manager` gains `catalog:view` only. Existing tenants get
  * the identical backfill in the task 3.2 migration.
+ *
+ * Phase 3 task 3.4 (owner L-17): `owner` + `admin` also gain the ALREADY-RESERVED
+ * `variants:manage`; `manager` does NOT (mirrors `catalog:manage`). Existing
+ * tenants get the identical backfill in the task 3.4 migration.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
-/** catalog:view + catalog:manage */
-const CATALOG = PHASE_3_2_TENANT_PERMISSIONS;
+/** catalog:view + catalog:manage (task 3.2) + variants:manage (task 3.4) */
+const CATALOG = [...PHASE_3_2_TENANT_PERMISSIONS, ...PHASE_3_4_TENANT_PERMISSIONS];
 const CATALOG_VIEW = 'catalog:view';
 
 export interface SystemRoleTemplate {

@@ -43,6 +43,14 @@ describe('auditable-action registry', () => {
       'catalog.attribute_definition_deleted',
       'catalog.attribute_option_set_changed',
       'catalog.product_attributes_changed',
+      // task 3.4 — variants + option groups
+      'catalog.option_group_created',
+      'catalog.option_group_updated',
+      'catalog.option_group_deleted',
+      'catalog.option_value_set_changed',
+      'catalog.variant_created',
+      'catalog.variant_updated',
+      'catalog.variant_status_changed',
     ]) {
       expect(isSecurityEventAction(a), a).toBe(false);
     }

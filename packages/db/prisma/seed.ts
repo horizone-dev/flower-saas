@@ -16,6 +16,7 @@ import 'dotenv/config';
 import {
   PHASE_1_TENANT_PERMISSIONS,
   PHASE_3_2_TENANT_PERMISSIONS,
+  PHASE_3_4_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   PERMISSION_GROUP_OF,
 } from '@flower/permissions';
@@ -64,6 +65,9 @@ async function main(): Promise<void> {
       // task 3.2 — the two foundational catalog keys (owner R-1). Existing DBs
       // also get these via the task 3.2 migration; this covers a fresh platform.
       ...PHASE_3_2_TENANT_PERMISSIONS.map((key) => ({ key, phase: 3 })),
+      // task 3.4 — the reserved `variants:manage` key (owner L-16). Existing DBs
+      // also get it via the task 3.4 migration.
+      ...PHASE_3_4_TENANT_PERMISSIONS.map((key) => ({ key, phase: 3 })),
     ];
     for (const { key, phase } of TENANT_REGISTRY) {
       await prisma.permissionRegistry.upsert({

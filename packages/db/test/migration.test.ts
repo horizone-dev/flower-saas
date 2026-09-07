@@ -99,7 +99,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => /_outbox_dispatcher_least_privilege$/.test(n))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_capability_foundation'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_core'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_attributes$/);
+    expect(names.some((n) => n.endsWith('_catalog_attributes'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_variants$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -776,19 +777,16 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       for (const r of rls.rows) expect(r.rls, `${r.relname} must be RLS-exempt`).toBe(false);
     });
 
-    it('no Variant / UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
+    it('no Identifier / UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
       const { rows } = await pool.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
       );
       const present = new Set(rows.map((r) => r.tablename));
       // product / category / product_type (task 3.2) + attribute_definition /
-      // attribute_option / product_attribute_value (task 3.3) are created below —
-      // the rest stay forbidden through Phase 3a.
+      // attribute_option / product_attribute_value (task 3.3) + option_group /
+      // option_value / variant / variant_option_value (task 3.4) are created
+      // below — the rest stay forbidden through Phase 3a.
       for (const forbidden of [
-        'variant',
-        'option_group',
-        'option_value',
-        'variant_option_value',
         'item_identifier',
         'uom',
         'uom_conversion',
@@ -1471,6 +1469,544 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       expect(rows[0]!.definition).not.toMatch(/catalog\.%/);
       expect(rows[0]!.definition).not.toMatch(/attribute/i);
       expect(rows[0]!.definition).toMatch(/catalog\.template_applied/);
+    });
+  });
+
+  // ── task 3.4 — variants + option groups ─────────────────────────────────────
+  // docs/phase-3/PHASE-3-PLAN.md §C.5. Exactly four new tables; no price /
+  // currency / sku / base-UOM / stock column; RLS ENABLE + FORCE; tenant-safe +
+  // same-product composite FKs; the "value belongs to the stated group" FK;
+  // partial unique indexes (non-archived combination uniqueness; one default
+  // variant); the default-variant CHECK; the deterministic default-variant
+  // backfill for existing STOCKED/BOM products.
+  describe('variants + option-group schema (task 3.4)', () => {
+    it('creates exactly option_group / option_value / variant / variant_option_value', async () => {
+      const cols = async (t: string): Promise<string[]> => {
+        const { rows } = await pool.query<{ column_name: string }>(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+          [t],
+        );
+        return rows.map((r) => r.column_name).sort();
+      };
+      expect(await cols('option_group')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'productId',
+          'key',
+          'nameEn',
+          'nameAr',
+          'sortOrder',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      expect(await cols('option_value')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'optionGroupId',
+          'value',
+          'labelEn',
+          'labelAr',
+          'sortOrder',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      const v = await cols('variant');
+      expect(v).toEqual(
+        [
+          'id',
+          'tenantId',
+          'productId',
+          'nameEn',
+          'nameAr',
+          'sortOrder',
+          'isDefault',
+          'optionSignature',
+          'status',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      // no price / currency / sku / base-UOM / stock / availability column — ever
+      for (const c of [
+        'price',
+        'sellPrice',
+        'currency',
+        'currencyCode',
+        'sku',
+        'baseUomCode',
+        'uomCode',
+        'stock',
+        'onHand',
+        'available',
+        'companyId',
+        'branchId',
+      ]) {
+        expect(v, `variant.${c} must not exist`).not.toContain(c);
+      }
+      expect(await cols('variant_option_value')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'productId',
+          'variantId',
+          'optionGroupId',
+          'optionValueId',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+    });
+
+    it('every new table has RLS ENABLE + FORCE + a policy; no-GUC → zero rows; flower_app is NOBYPASSRLS', async () => {
+      const T4 = ['option_group', 'option_value', 'variant', 'variant_option_value'];
+      const meta = await pool.query<{
+        relname: string;
+        rls: boolean;
+        force: boolean;
+        policies: number;
+      }>(
+        `SELECT c.relname, c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
+                (SELECT count(*) FROM pg_policies p WHERE p.tablename = c.relname) AS policies
+           FROM pg_class c WHERE c.relname = ANY($1)`,
+        [T4],
+      );
+      expect(meta.rows).toHaveLength(4);
+      for (const r of meta.rows) {
+        expect(r.rls, `${r.relname} RLS`).toBe(true);
+        expect(r.force, `${r.relname} FORCE`).toBe(true);
+        expect(Number(r.policies), `${r.relname} policy`).toBeGreaterThanOrEqual(1);
+      }
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        for (const t of T4) {
+          const n = Number((await c.query(`SELECT count(*)::int AS n FROM "${t}"`)).rows[0].n);
+          expect(n, `${t} with no GUC`).toBe(0);
+        }
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+    });
+
+    it('CHECK constraints: variant status, option-group key, option-value token, default→empty signature', async () => {
+      const { rows } = await pool.query<{ conname: string; def: string }>(
+        `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE contype = 'c' AND conrelid::regclass::text = ANY($1)`,
+        [['option_group', 'option_value', 'variant']],
+      );
+      const byName = Object.fromEntries(rows.map((r) => [r.conname, r.def]));
+      expect(byName['variant_status_chk']).toMatch(/DRAFT.*ACTIVE.*ARCHIVED/s);
+      expect(byName['option_group_key_chk']).toBeTruthy();
+      expect(byName['option_value_value_chk']).toBeTruthy();
+      expect(byName['variant_default_signature_chk']).toBeTruthy();
+
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'v-chk','C',now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,'v-chk-p','P','CUSTOM',now()) RETURNING id`,
+          [TENANT_A, cat],
+        )
+      ).rows[0].id as string;
+      // default variant with a non-empty signature → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","isDefault","optionSignature","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V',true,'g=v',now())`,
+          [TENANT_A, prod],
+        ),
+      ).rejects.toThrow(/variant_default_signature_chk/i);
+      // bad variant status
+      await expect(
+        pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','LIVE',now())`,
+          [TENANT_A, prod],
+        ),
+      ).rejects.toThrow(/variant_status_chk/i);
+      // bad option-group key
+      await expect(
+        pool.query(
+          `INSERT INTO "option_group" (id,"tenantId","productId","key","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'bad key','G',now())`,
+          [TENANT_A, prod],
+        ),
+      ).rejects.toThrow(/option_group_key_chk/i);
+
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [prod]);
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [cat]);
+    });
+
+    it('partial unique indexes: one non-archived combination + one non-archived default per product', async () => {
+      const { rows } = await pool.query<{ indexdef: string; indexname: string }>(
+        `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'variant'`,
+      );
+      const byName = Object.fromEntries(rows.map((r) => [r.indexname, r.indexdef]));
+      expect(byName['variant_tenant_product_signature_key']).toMatch(/UNIQUE/);
+      expect(byName['variant_tenant_product_signature_key']).toMatch(
+        /WHERE .*status.*<>.*ARCHIVED/is,
+      );
+      expect(byName['variant_one_default_key']).toMatch(/UNIQUE/);
+      expect(byName['variant_one_default_key']).toMatch(/isDefault/);
+    });
+
+    it('TENANT-SAFE + SAME-PRODUCT + value-belongs-to-group composite FKs', async () => {
+      const mk = async (tenant: string, slug: string, strategy = 'CUSTOM') => {
+        const cat = (
+          await pool.query(
+            `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,$2,'C',now()) RETURNING id`,
+            [tenant, `${slug}-c`],
+          )
+        ).rows[0].id as string;
+        const prod = (
+          await pool.query(
+            `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","updatedAt")
+             VALUES (uuidv7(),$1,$2,$3,'P',$4,now()) RETURNING id`,
+            [tenant, cat, `${slug}-p`, strategy],
+          )
+        ).rows[0].id as string;
+        return { cat, prod };
+      };
+      const A1 = await mk(TENANT_A, 'vfk-a1');
+      const A2 = await mk(TENANT_A, 'vfk-a2');
+      const B1 = await mk(TENANT_B, 'vfk-b1');
+
+      // a tenant-A option group cannot point at a tenant-B product
+      await expect(
+        pool.query(
+          `INSERT INTO "option_group" (id,"tenantId","productId","key","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'COLOUR','C',now())`,
+          [TENANT_A, B1.prod],
+        ),
+      ).rejects.toThrow(/option_group_tenant_product_fkey|violates foreign key/i);
+
+      // real groups + values on A1 and A2
+      const gA1 = (
+        await pool.query(
+          `INSERT INTO "option_group" (id,"tenantId","productId","key","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'COLOUR','C',now()) RETURNING id`,
+          [TENANT_A, A1.prod],
+        )
+      ).rows[0].id as string;
+      const gA2 = (
+        await pool.query(
+          `INSERT INTO "option_group" (id,"tenantId","productId","key","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'SIZE','S',now()) RETURNING id`,
+          [TENANT_A, A2.prod],
+        )
+      ).rows[0].id as string;
+      const vA1 = (
+        await pool.query(
+          `INSERT INTO "option_value" (id,"tenantId","optionGroupId","value","labelEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'RED','Red',now()) RETURNING id`,
+          [TENANT_A, gA1],
+        )
+      ).rows[0].id as string;
+      const vA2 = (
+        await pool.query(
+          `INSERT INTO "option_value" (id,"tenantId","optionGroupId","value","labelEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'M','M',now()) RETURNING id`,
+          [TENANT_A, gA2],
+        )
+      ).rows[0].id as string;
+      const varA1 = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","optionSignature","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','sig',now()) RETURNING id`,
+          [TENANT_A, A1.prod],
+        )
+      ).rows[0].id as string;
+
+      // SAME-PRODUCT invariant: variant on product A1, option group from product A2 → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "variant_option_value" (id,"tenantId","productId","variantId","optionGroupId","optionValueId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,now())`,
+          [TENANT_A, A1.prod, varA1, gA2, vA2],
+        ),
+      ).rejects.toThrow(/variant_option_value_tenant_product_group_fkey|violates foreign key/i);
+
+      // value-belongs-to-group: group gA1, value vA2 (belongs to gA2) → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "variant_option_value" (id,"tenantId","productId","variantId","optionGroupId","optionValueId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,now())`,
+          [TENANT_A, A1.prod, varA1, gA1, vA2],
+        ),
+      ).rejects.toThrow(/variant_option_value_group_value_fkey|violates foreign key/i);
+
+      // the correct selection (group gA1, value vA1, same product) → accepted
+      await expect(
+        pool.query(
+          `INSERT INTO "variant_option_value" (id,"tenantId","productId","variantId","optionGroupId","optionValueId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,now())`,
+          [TENANT_A, A1.prod, varA1, gA1, vA1],
+        ),
+      ).resolves.toBeTruthy();
+
+      // a tenant-B variant cannot reference tenant-A's product
+      await expect(
+        pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V',now())`,
+          [TENANT_B, A1.prod],
+        ),
+      ).rejects.toThrow(/variant_tenant_product_fkey|violates foreign key/i);
+
+      // one value per group per variant
+      await expect(
+        pool.query(
+          `INSERT INTO "variant_option_value" (id,"tenantId","productId","variantId","optionGroupId","optionValueId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,now())`,
+          [TENANT_A, A1.prod, varA1, gA1, vA1],
+        ),
+      ).rejects.toThrow(/variant_option_value_tenantId_variantId_optionGroupId_key|duplicate key/i);
+
+      for (const p of [A1.prod, A2.prod, B1.prod])
+        await pool.query(`DELETE FROM "product" WHERE id = $1`, [p]);
+      for (const cc of [A1.cat, A2.cat, B1.cat])
+        await pool.query(`DELETE FROM "category" WHERE id = $1`, [cc]);
+    });
+
+    it('archiving a variant frees its combination for a new non-archived variant (owner L-7)', async () => {
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,'v-arch-c','C',now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,'v-arch-p','P','CUSTOM',now()) RETURNING id`,
+          [TENANT_A, cat],
+        )
+      ).rows[0].id as string;
+      const v1 = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","optionSignature","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V1','sig-x','ACTIVE',now()) RETURNING id`,
+          [TENANT_A, prod],
+        )
+      ).rows[0].id as string;
+      // a second non-archived variant with the same signature → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","optionSignature","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V2','sig-x','DRAFT',now())`,
+          [TENANT_A, prod],
+        ),
+      ).rejects.toThrow(/variant_tenant_product_signature_key|duplicate key/i);
+      // archive v1 → the combination is free again; the signature is PRESERVED
+      await pool.query(`UPDATE "variant" SET status = 'ARCHIVED' WHERE id = $1`, [v1]);
+      expect(
+        (await pool.query(`SELECT "optionSignature" FROM "variant" WHERE id = $1`, [v1])).rows[0]
+          .optionSignature,
+      ).toBe('sig-x');
+      await expect(
+        pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","optionSignature","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V2','sig-x','DRAFT',now())`,
+          [TENANT_A, prod],
+        ),
+      ).resolves.toBeTruthy();
+
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [prod]);
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [cat]);
+    });
+
+    it('deterministic default-variant backfill: STOCKED/BOM get one, CUSTOM gets none, idempotent', async () => {
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,'bf-c','C',now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+      const mkProd = async (slug: string, strategy: string): Promise<string> =>
+        (
+          await pool.query(
+            `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","updatedAt")
+             VALUES (uuidv7(),$1,$2,$3,$3,$4,now()) RETURNING id`,
+            [TENANT_A, cat, slug, strategy],
+          )
+        ).rows[0].id as string;
+      const pStocked = await mkProd('bf-stocked', 'STOCKED');
+      const pBom = await mkProd('bf-bom', 'BOM');
+      const pCustom = await mkProd('bf-custom', 'CUSTOM');
+
+      // the exact production backfill statement (idempotent NOT EXISTS guard)
+      const backfill = `
+        INSERT INTO "variant"
+          ("id","tenantId","productId","nameEn","nameAr","isDefault","optionSignature","status","updatedAt")
+        SELECT uuidv7(), p."tenantId", p."id", p."nameEn", p."nameAr", true, '', 'DRAFT', now()
+          FROM "product" p
+         WHERE p."fulfilmentStrategy" IN ('STOCKED', 'BOM')
+           AND NOT EXISTS (SELECT 1 FROM "variant" v WHERE v."productId" = p."id");`;
+      await pool.query(backfill);
+      await pool.query(backfill); // idempotent — a re-run inserts nothing
+
+      const defCount = async (productId: string): Promise<number> =>
+        Number(
+          (
+            await pool.query(
+              `SELECT count(*)::int AS n FROM "variant" WHERE "productId" = $1 AND "isDefault" = true AND "optionSignature" = ''`,
+              [productId],
+            )
+          ).rows[0].n,
+        );
+      expect(await defCount(pStocked)).toBe(1);
+      expect(await defCount(pBom)).toBe(1);
+      expect(await defCount(pCustom)).toBe(0);
+
+      for (const p of [pStocked, pBom, pCustom])
+        await pool.query(`DELETE FROM "product" WHERE id = $1`, [p]);
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [cat]);
+    });
+
+    it('deleting a DRAFT product cascades its variants / option groups / selections', async () => {
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,'v-casc-c','C',now()) RETURNING id`,
+          [TENANT_A],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'v-casc-p','P','CUSTOM','DRAFT',now()) RETURNING id`,
+          [TENANT_A, cat],
+        )
+      ).rows[0].id as string;
+      const g = (
+        await pool.query(
+          `INSERT INTO "option_group" (id,"tenantId","productId","key","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'COLOUR','C',now()) RETURNING id`,
+          [TENANT_A, prod],
+        )
+      ).rows[0].id as string;
+      const val = (
+        await pool.query(
+          `INSERT INTO "option_value" (id,"tenantId","optionGroupId","value","labelEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'RED','Red',now()) RETURNING id`,
+          [TENANT_A, g],
+        )
+      ).rows[0].id as string;
+      const vr = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","optionSignature","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','sig',now()) RETURNING id`,
+          [TENANT_A, prod],
+        )
+      ).rows[0].id as string;
+      await pool.query(
+        `INSERT INTO "variant_option_value" (id,"tenantId","productId","variantId","optionGroupId","optionValueId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,$4,$5,now())`,
+        [TENANT_A, prod, vr, g, val],
+      );
+
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [prod]);
+      const gone = async (table: string, id: string): Promise<number> =>
+        Number(
+          (await pool.query(`SELECT count(*)::int AS n FROM "${table}" WHERE id = $1`, [id]))
+            .rows[0].n,
+        );
+      expect(await gone('option_group', g)).toBe(0);
+      expect(await gone('option_value', val)).toBe(0);
+      expect(await gone('variant', vr)).toBe(0);
+      expect(
+        Number(
+          (
+            await pool.query(
+              `SELECT count(*)::int AS n FROM "variant_option_value" WHERE "variantId" = $1`,
+              [vr],
+            )
+          ).rows[0].n,
+        ),
+      ).toBe(0);
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [cat]);
+    });
+
+    it('security_event view is UNCHANGED by task 3.4', async () => {
+      const { rows } = await pool.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
+      );
+      expect(rows[0]!.definition).not.toMatch(/catalog\.%/);
+      expect(rows[0]!.definition).not.toMatch(/variant/i);
+      expect(rows[0]!.definition).not.toMatch(/option_group/i);
+      expect(rows[0]!.definition).toMatch(/catalog\.template_applied/);
+    });
+
+    it('variants:manage is registered + backfilled to owner/admin only (owner L-17)', async () => {
+      const reg = await pool.query<{ key: string; realm: string; addedInPhase: number }>(
+        `SELECT key, realm, "addedInPhase" FROM permission_registry WHERE key = 'variants:manage'`,
+      );
+      expect(reg.rows).toHaveLength(1);
+      expect(reg.rows[0]!.realm).toBe('TENANT');
+      expect(reg.rows[0]!.addedInPhase).toBe(3);
+
+      // seed a tenant with owner/admin/manager/custom + re-run the migration's
+      // exact backfill; owner/admin get it, manager + custom do not; idempotent.
+      const T = '0000dddd-0000-7000-8000-000000340433';
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1,'vbf','vbf','AE','ACTIVE','00000000-0000-7000-8000-000000000002', now())
+         ON CONFLICT (id) DO NOTHING`,
+        [T],
+      );
+      const roleIds: Record<string, string> = {};
+      for (const [key, isSystem] of [
+        ['owner', true],
+        ['admin', true],
+        ['manager', true],
+        ['custom_role', false],
+      ] as const) {
+        const r = await pool.query(
+          `INSERT INTO role (id,"tenantId",key,name,"isSystem","updatedAt")
+           VALUES (uuidv7(),$1,$2,$2,$3, now()) RETURNING id`,
+          [T, key, isSystem],
+        );
+        roleIds[key] = r.rows[0].id;
+      }
+      const backfill = `
+        ALTER TABLE "role"            NO FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", 'variants:manage'
+          FROM "role" r WHERE r."isSystem" = true AND r."key" IN ('owner','admin')
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        ALTER TABLE "role"            FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`;
+      await pool.query(backfill);
+      await pool.query(backfill);
+
+      const perms = async (roleId: string): Promise<string[]> =>
+        (
+          await pool.query<{ permissionKey: string }>(
+            `SELECT "permissionKey" FROM "role_permission" WHERE "roleId" = $1 ORDER BY "permissionKey"`,
+            [roleId],
+          )
+        ).rows.map((r) => r.permissionKey);
+      expect(await perms(roleIds['owner']!)).toEqual(['variants:manage']);
+      expect(await perms(roleIds['admin']!)).toEqual(['variants:manage']);
+      expect(await perms(roleIds['manager']!)).toEqual([]);
+      expect(await perms(roleIds['custom_role']!)).toEqual([]);
+
+      await pool.query(`DELETE FROM "role_permission" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "role" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "tenant" WHERE id = $1`, [T]);
     });
   });
 
