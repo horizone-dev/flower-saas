@@ -77,22 +77,23 @@ CONSUMED, RELEASED, EXPIRED}, fulfilment_date?, expires_at?, created_at)`.
 
 ## Financial concepts — proper accounting boundaries (not one table per noun)
 
-| Concept                              | Modelled as                                                                                                                                            | Why this boundary                                                                 |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
-| Chart of Accounts / Account          | `account` (per company, typed, hierarchical, keyed for the posting engine)                                                                             | one extensible CoA per legal entity; posting engine resolves stable keys, not ids |
-| Journal / JournalEntry / JournalLine | `journal_entry` (balanced, immutable, `source_kind+source_id` unique) 1─* `journal_line` (account, debit/credit, dimensions: company/branch/pos/shift) | no separate "Journal" header table — the entry _is_ the unit                      |
-| AccountingPeriod                     | `accounting_period` (company, period, OPEN/SOFT_CLOSED/LOCKED)                                                                                         | period control without freezing operational data                                  |
-| Expense / ExpenseCategory            | `expense` + `expense_category` (category → account, approval rules)                                                                                    | operational capture + workflow; posts to GL on approve/pay                        |
-| Income / OtherIncome                 | `other_income` (manual only) — sales revenue stays on order+payment                                                                                    | keeps system revenue linked to its source                                         |
-| CashRegister                         | `cash_register` (POS-terminal-scoped)                                                                                                                  | physical cash is terminal-specific even though order data is branch-shared        |
-| RegisterSession / POSShift           | `register_session` (open float → movements → count → close → Z)                                                                                        | one entity for register session and shift; no duplication                         |
-| CashMovement                         | `cash_movement` (append-only, typed, source-referenced, session-scoped)                                                                                | the drawer's ledger; balance is derived, never edited                             |
-| XReport                              | _computed_, optional `x_report_log` only                                                                                                               | interim & repeatable — nothing to freeze                                          |
-| ZReport                              | `z_report` + `z_report_line` (immutable snapshot, hash-chained, gapless `z_number`) + optional `business_day_close`                                    | finalized financial truth — frozen, never rebuilt                                 |
-| CustomerReceivable                   | _balance_ = AR control account; detail in `ar_transaction` subledger (in `receivables`)                                                                | a standalone table would drift from the GL; subledger reconciles to control       |
-| CustomerAdvance                      | Customer Advances liability account + `advance_transaction` subledger                                                                                  | advance is a liability, not revenue, until applied                                |
-| SupplierPayable                      | AP control account + `supplier_balance` / bill detail in `procurement`                                                                                 | procurement owns supplier detail; it reconciles to AP                             |
-| Tax / VAT configuration              | `country_tax_config` + `tax_category` + `tax_rate` (in `localization`/`tax`); VAT Output / VAT Input accounts in the GL                                | config drives calculation; GL drives the return                                   |
+| Concept                              | Modelled as                                                                                                                                                                                                                                                     | Why this boundary                                                                                                                              |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chart of Accounts / Account          | `account` (per company, typed, hierarchical, keyed for the posting engine)                                                                                                                                                                                      | one extensible CoA per legal entity; posting engine resolves stable keys, not ids                                                              |
+| Journal / JournalEntry / JournalLine | `journal_entry` (balanced, immutable, `source_kind+source_id` unique) 1─* `journal_line` (account, debit/credit, dimensions: company/branch/pos/shift)                                                                                                          | no separate "Journal" header table — the entry _is_ the unit                                                                                   |
+| AccountingPeriod                     | `accounting_period` (company, period, OPEN/SOFT_CLOSED/LOCKED)                                                                                                                                                                                                  | period control without freezing operational data                                                                                               |
+| Expense / ExpenseCategory            | `expense` + `expense_category` (category → account, approval rules)                                                                                                                                                                                             | operational capture + workflow; posts to GL on approve/pay                                                                                     |
+| Income / OtherIncome                 | `other_income` (manual only) — sales revenue stays on order+payment                                                                                                                                                                                             | keeps system revenue linked to its source                                                                                                      |
+| CashRegister                         | `cash_register` (POS-terminal-scoped)                                                                                                                                                                                                                           | physical cash is terminal-specific even though order data is branch-shared                                                                     |
+| RegisterSession / POSShift           | `register_session` (open float → movements → count → close → Z)                                                                                                                                                                                                 | one entity for register session and shift; no duplication                                                                                      |
+| CashMovement                         | `cash_movement` (append-only, typed, source-referenced, session-scoped)                                                                                                                                                                                         | the drawer's ledger; balance is derived, never edited                                                                                          |
+| XReport                              | _computed_, optional `x_report_log` only                                                                                                                                                                                                                        | interim & repeatable — nothing to freeze                                                                                                       |
+| ZReport                              | `z_report` + `z_report_line` (immutable snapshot, hash-chained, gapless `z_number`) + optional `business_day_close`                                                                                                                                             | finalized financial truth — frozen, never rebuilt                                                                                              |
+| CustomerReceivable                   | _balance_ = AR control account; detail in `ar_transaction` subledger (in `receivables`)                                                                                                                                                                         | a standalone table would drift from the GL; subledger reconciles to control                                                                    |
+| CustomerAdvance                      | Customer Advances liability account + `advance_transaction` subledger                                                                                                                                                                                           | advance is a liability, not revenue, until applied                                                                                             |
+| SupplierPayable                      | AP control account + `supplier_balance` / bill detail in `procurement`                                                                                                                                                                                          | procurement owns supplier detail; it reconciles to AP                                                                                          |
+| SupplierCredit (ADR-0020)            | value owed _by_ the supplier — an append-only `supplier_credit` subledger, one balance per `(company, supplier)`; `PurchaseReturn` / `PurchaseReturnLine` (branch-scoped) + `SupplierCreditNote` + `SupplierCreditAllocation`; distinct from `supplier_advance` | a claim, not a payable and not an advance — reconciles from its own event stream, never destructively netted against AP or the advance balance |
+| Tax / VAT configuration              | `country_tax_config` + `tax_category` + `tax_rate` (in `localization`/`tax`); VAT Output / VAT Input accounts in the GL                                                                                                                                         | config drives calculation; GL drives the return                                                                                                |
 
 ### Posting flow
 
@@ -252,6 +253,49 @@ state` is provable by additionally subtracting valid cancellation reversals
   and applying cancellation charges, refunds, and account-credit
   creation/application, signed per their direction — still never a manually
   edited balance.
+
+## Supplier returns & supplier credit (ADR-0020 — the AP mirror of the above)
+
+Design/documentation only; Phase 5+ (Inventory + Purchasing + Accounts Payable).
+The supplier-side **operational** counterpart of the customer receivables/credit
+model. **Deferred, not decided by ADR-0020:** the inventory costing method, the
+tax / input-tax rules, the jurisdiction fiscal-document system, the exact journal
+entries, and the final schema enum sets.
+
+- **A supplier return is an inventory-out event, never a sale** — `PurchaseReturn`
+  1─* `PurchaseReturnLine`; dispatch → `SUPPLIER_RETURN` `inventory_movement`
+  (branch-scoped, signed); recognizes no revenue and no fake revenue. Dispatching
+  stock does not by itself create financial credit — the supplier's confirmation
+  does. Cost-basis follows the future costing policy, not fixed here.
+- **`SupplierCredit`** — value owed by the supplier; an append-only, reversible
+  `supplier_credit` subledger, one balance per `(company, supplier)`. Conceptual
+  entry kinds `CREDIT_NOTE_CREATED · CREDIT_APPLIED · CREDIT_REVERSAL ·
+CREDIT_ADJUSTMENT` (+ a distinct difference kind); reasons (purchase return,
+  expired/damaged-stock return, overbilling correction, shortage adjustment,
+  commercial credit note, approved supplier adjustment) are configuration — the
+  final enum/reference-table sets are a Phase 5 detail. **Separate from
+  `supplier_advance`** — opposite origin, never netted destructively.
+- **Expected vs confirmed** — `PurchaseReturnLine` carries an expected value; the
+  `SupplierCreditNote` carries the confirmed value; `expected − confirmed` is a
+  recorded difference that stays explicit until resolved through an approved
+  process (pending claim / dispute / authorized adjustment / inventory
+  loss-wastage / other approved — final set a Phase 5 detail), permissioned +
+  audited — never silently discarded or folded into the confirmed number.
+- **`SupplierCreditAllocation`** applies a `SupplierCreditNote` to a future
+  purchase invoice (partial / full / many-to-one / one-to-many / carry-forward);
+  the credit-note amount is never mutated to represent usage —
+  `remaining = issued − Σ allocations`.
+- **Reconciliation invariant**: `supplier_credit_remaining = Σ credit notes
+created/authorized − Σ credit applied − Σ credit refunded in cash +
+Σ reversals/adjustments (signed)` — provable from the subledger stream, mirrors
+  `branch_inventory_balance` ↔ `inventory_movement`.
+- **Accounting is conceptual only** — ADR-0020 freezes no journal entries. Later
+  integration must keep four things distinct: inventory return / value movement,
+  supplier credit / AP reduction, unresolved supplier claim / difference, and
+  inventory loss/wastage — with no cash movement unless the supplier actually
+  refunds cash. Tax and statutory-document treatment follow the jurisdiction and
+  the localization / e-invoicing architecture, not this ADR. See
+  [ADR-0020](../decisions/ADR-0020.md).
 
 ## Partitioning (from migration #1)
 

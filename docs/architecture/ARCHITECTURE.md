@@ -882,6 +882,33 @@ transactionally; supplier AP posts to the ledger. **No duplicate receiving**: a
 receipt is keyed to its purchase line + an idempotency key; re-submitting is a
 no-op. Barcode receiving (§19) can create receipts directly without a formal PO.
 
+> **ADR-0020 note (2026-09-07, additive):** the `purchase_return` /
+> `supplier_credit_note` flow above is extended with the supplier-return /
+> supplier-credit / accounts-payable-reduction **operational** model — the
+> supplier/AP mirror of ADR-0019's customer/AR architecture. A supplier return is
+> an inventory-out event (`SUPPLIER_RETURN` movement), **never a sale or
+> revenue**; **dispatching stock does not by itself create financial credit** —
+> the supplier's confirmation does; **supplier credit** is its own append-only,
+> reversible subledger balance, structurally separate from a supplier **advance**
+> and never income/payment/discount; **expected vs confirmed** credit is three
+> recorded figures (expected / confirmed / difference) with the difference kept
+> explicit until resolved through an approved process, never silently discarded;
+> supplier credit reduces AP through **`SupplierCreditAllocation`** records
+> (partial / full / many-to-one / one-to-many / unapplied balance carried
+> forward), the original credit-note amount never mutated; the physical return
+> originates at a **branch** while the financial credit defaults to
+> **`(company, supplier)`** scope with exact branch-source and return-document
+> traceability. Later accounting integration must keep four things distinct —
+> inventory return, AP reduction, unresolved supplier claim/difference, and
+> inventory loss/wastage — with no cash movement unless the supplier actually
+> refunds cash and **no fake revenue**. **Deferred to the future
+> Inventory/Accounting/fiscal work:** the inventory costing method used to value
+> a supplier return, the tax / input-tax treatment, the jurisdiction
+> fiscal-document system, and the exact journal entries. See
+> [ADR-0020](../decisions/ADR-0020.md) and §F.15 — this section's existing
+> receiving postings and rules are unchanged. Implementation is Phase 5+
+> (Inventory + Purchasing + Accounts Payable), not Phase 3.
+
 **Documents / attachments.** Generic `documents` domain — not purchase-specific.
 `document(owner_type, owner_id, doc_type_key, status, …)` + `document_version(storage_key,
 mime, size, checksum, scan_status, …)`. `owner_type` is an open string
@@ -1318,6 +1345,100 @@ Account Credit as revenue or cash leaving the business. Fiscal-document
 implications (credit note / debit note / refund document, per jurisdiction)
 route through the same existing `EInvoicingProvider` adapter and KSA/ZATCA
 gate — no new fiscal gate.
+
+### F.15 Supplier returns, supplier credit & accounts-payable reduction (ADR-0020)
+
+**Added 2026-09-07, additive — see [ADR-0020](../decisions/ADR-0020.md) for the
+full decision.** The supplier / AP **operational** mirror of F.13/F.14.
+Implementation is Phase 5+ (Inventory + Purchasing + Accounts Payable); nothing
+here is built in Phase 3. **Deferred, not decided by ADR-0020:** the inventory
+costing method used to value a supplier return, the tax / input-tax treatment,
+the jurisdiction fiscal-document system, and the exact journal entries.
+
+**A supplier return is an inventory-out event, never a sale**: dispatching
+expired / damaged / rejected / quarantined branch stock back to a supplier
+generates a `SUPPLIER_RETURN` `inventory_movement` (branch-scoped, signed
+negative, `ref_kind = PURCHASE_RETURN`, idempotent) — it recognizes **no
+revenue** and **no fake revenue**, reduces the inventory asset, and creates a
+claim on the supplier where the supplier accepts the return. **Dispatching stock
+does not by itself create financial credit** — the supplier's confirmation does.
+The cost-basis used to value the movement follows the future inventory /
+accounting policy and the company's selected costing method — ADR-0020 chooses
+none.
+
+**Supplier credit is its own append-only, reversible subledger balance**, one per
+`(company, supplier)`, structurally separate from a **supplier advance** (money
+the business paid the supplier ahead of a bill — opposite origin) and never
+income, a payment, or a discount. Credit reasons (purchase return, expired- /
+damaged-stock return, overbilling correction, shortage adjustment, commercial
+credit note, approved supplier adjustment) are **configuration, not a fixed code
+enum**; the reference-table contents and the ledger entry-kind enum set are a
+Phase 5 implementation detail. Conceptual ledger entry kinds:
+`CREDIT_NOTE_CREATED · CREDIT_APPLIED · CREDIT_REVERSAL · CREDIT_ADJUSTMENT` plus
+a distinct kind for the expected-vs-confirmed difference and its resolution.
+
+**Expected vs confirmed credit**: the model records three figures —
+**expected** (the business's valuation at dispatch; the valuation basis follows
+the future costing policy, not fixed here), **confirmed** (what the supplier
+acknowledges on its credit note), and **difference** (`expected − confirmed`, a
+first-class amount). The difference stays open and visible until resolved through
+an approved process (a pending supplier claim, a dispute, an authorized
+adjustment, an inventory loss/wastage where applicable, or another approved
+resolution — the final set is a Phase 5 detail) — permissioned, audited (reason /
+resolved-by / approved-by / timestamp), **never silently discarded or folded into
+the confirmed number**.
+
+**Lifecycle**: `Expired/Damaged/Quarantine stock → Purchase Return (draft) →
+Dispatch (SUPPLIER_RETURN movements; no financial credit yet) → Supplier
+Confirmation (difference opened) → Supplier Credit Note (creates/authorizes the
+credit) → Supplier Credit Ledger entry → apply to a future Purchase Invoice
+(SupplierCreditAllocation) → net supplier payable reduced`. Each stage is a
+transition or an append-only entry — never a destructive edit once a financial
+effect exists (§F correction discipline).
+
+**Applying credit — allocations, never mutation**: `SupplierCreditAllocation`
+records apply some or all of one `SupplierCreditNote` to one purchase invoice —
+supporting partial application, full application, many credit notes against one
+invoice, one credit note across many invoices, and an unapplied balance carried
+forward. The issued credit-note amount is **never mutated** to represent usage;
+its remaining balance is `issued − Σ allocations`, derived. Worked example:
+invoice 1,000; available credit 200; applied 200; **net payable 800**.
+
+**Reconciliation invariant (supplier credit)**: `supplier_credit_remaining =
+Σ credit notes created/authorized − Σ credit applied to purchase invoices −
+Σ credit refunded in cash by the supplier + Σ reversals/adjustments (signed)` —
+always provable from the append-only subledger stream, never a stored balance; a
+reconciliation job recomputes it and alerts on drift, like the existing
+Inventory-control and AR reconciliations (F.10).
+
+**Scope**: the physical return (`PurchaseReturn`, `PurchaseReturnLine`, the
+movements) originates from and is scoped to a **branch**; the financial supplier
+credit defaults to **`(company, supplier)`** scope, with every entry retaining
+exact source-branch and return-document traceability — source branch, return
+reference, batch/lot, expiry, item, normalized quantity (base UOM), expected
+value, confirmed value, actor, timestamp, audit.
+
+**Accounting, tax and fiscal — conceptual only**: ADR-0020 freezes **no**
+debit/credit journal entries. Later accounting integration must keep four things
+distinct — never blurred into one amount: (1) the **inventory return / value
+movement** (goods going back, not destroyed — distinct from a wastage
+write-off); (2) the **supplier credit / AP reduction** (confirmed credit +
+allocation — distinct from a supplier cash payment; **no cash moves** unless the
+supplier actually refunds cash); (3) the **unresolved supplier claim /
+expected-vs-confirmed difference** (held distinctly until resolved); (4)
+**inventory loss / wastage where applicable** (a real expense, distinct from a
+claim). Tax treatment of supplier credit notes / purchase returns follows the
+applicable jurisdiction, the original purchase tax treatment, the supplier tax
+document, and the applicable fiscal posting rules — ADR-0020 does **not** state
+that a supplier return necessarily performs an input-tax reversal and hardcodes
+**no** GCC-country behaviour (§45). Where a jurisdiction requires statutory
+credit-note / e-invoicing documents, the workflow integrates with the applicable
+fiscal-document provider / gate defined by the localization and e-invoicing
+architecture (the `EInvoicingProvider` port family); a specific national system
+(e.g. KSA ZATCA / Fatoora) may be **one later implementation** of that generic
+gate — not a generic core dependency. Transactional integrity reuses the
+existing one-transaction stock+GL+subledger pattern (rule 25 / rule 29) — no new
+mechanism.
 
 ---
 

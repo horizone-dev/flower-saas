@@ -204,6 +204,27 @@ Full breakdown: [`../phase-0/PHASE-0-PLAN.md`](../phase-0/PHASE-0-PLAN.md).
   mechanism; disposition is decided from physical state, never from a
   cancellation-charge amount — see
   [`../decisions/ADR-0019.md`](../decisions/ADR-0019.md) §29/§30.
+- **ADR-0020 (additive, 2026-09-07)**: this phase's `procurement` /
+  accounts-payable scope also designs the **supplier return + supplier credit**
+  **operational** model — the supplier/AP mirror of ADR-0019. A supplier return
+  is a `SUPPLIER_RETURN` inventory-out movement, **never a sale and no fake
+  revenue**; dispatching stock does not by itself create financial credit — the
+  supplier's confirmation does. `PurchaseReturn` / `PurchaseReturnLine`
+  (branch-scoped) → supplier confirmation → `SupplierCreditNote` → append-only,
+  reversible `supplier_credit` subledger (one balance per `(company, supplier)`,
+  separate from `supplier_advance`) → `SupplierCreditAllocation` against future
+  purchase invoices (partial / full / many-to-one / one-to-many / carry-forward,
+  credit-note amount never mutated). **Expected vs confirmed** credit is recorded
+  as three figures with the difference kept explicit until resolved through an
+  approved process. Later accounting integration must keep inventory return / AP
+  reduction / unresolved supplier claim-difference / inventory loss distinct; no
+  cash moves unless the supplier refunds cash. **ADR-0020 deliberately does not
+  decide** the inventory costing method, the tax / input-tax rules, the
+  jurisdiction fiscal-document system, or the exact journal entries — those are
+  this phase's (and the localization / e-invoicing architecture's) own concern.
+  No change to this phase's dependency order or exit criteria — concrete
+  operational detail on the already-planned `procurement` module. See
+  [`../decisions/ADR-0020.md`](../decisions/ADR-0020.md).
 
 ## Phase 6 — Recipes/BOM, custom bouquet builder, production / work orders _(florist core)_
 
