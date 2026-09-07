@@ -201,6 +201,30 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
   }
   const count = async (text: string, params: unknown[] = []): Promise<number> =>
     Number((await sql<{ n: string }>(text, params))[0]!.n);
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  /**
+   * Open a dedicated client, `BEGIN`, run `setup` (which typically takes a row
+   * lock), then run `whileHeld` (the concurrent request, parked on that lock),
+   * `COMMIT`, and return `whileHeld`'s result — for deterministic interleaving
+   * tests. The client is always closed even if an assertion throws.
+   */
+  async function withHeldTxn<T>(
+    setup: (c: pg.Client) => Promise<void>,
+    whileHeld: () => Promise<T>,
+  ): Promise<T> {
+    const c = new pg.Client({ connectionString: stack.postgres.url });
+    await c.connect();
+    try {
+      await c.query('BEGIN');
+      await setup(c);
+      const pending = whileHeld();
+      await sleep(400); // let the concurrent request park on the lock
+      await c.query('COMMIT');
+      return await pending;
+    } finally {
+      await c.end();
+    }
+  }
   async function setCap(tenantId: string, key: string, enabled: boolean): Promise<void> {
     await sql(
       `INSERT INTO tenant_catalog_capability ("tenantId","capabilityKey",enabled,"sourceKind","updatedAt")
@@ -666,6 +690,213 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
           })
         ).statusCode,
       ).toBe(200);
+    });
+  });
+
+  // ══════════════════ concurrency / TOCTOU (task 3.5 remediation) ═══════════
+  describe('concurrency', () => {
+    /** an ACTIVE product whose DRAFT default variant carries one SKU identifier */
+    async function activeProductWithDraftDefaultAndSku(slug: string): Promise<{
+      productId: string;
+      variantId: string;
+      identifierId: string;
+      variantVersion: number;
+    }> {
+      const cat = await makeCategory(ownerA, `${slug}-c`);
+      const p = await makeProduct(ownerA, cat, `${slug}-p`, 'STOCKED');
+      const v0 = (await listVariants(ownerA, p.id))[0]!;
+      const created = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v0.id,
+        codeType: 'SKU',
+        value: `${slug}-SKU`.toUpperCase(),
+      });
+      expect(created.statusCode).toBe(201);
+      const act = await req('POST', `/catalog/products/${p.id}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${p.version}"`,
+      });
+      expect(act.statusCode, act.payload).toBe(200);
+      const v1 = (await listVariants(ownerA, p.id))[0]!;
+      return {
+        productId: p.id,
+        variantId: v1.id,
+        identifierId: (created.json() as { id: string }).id,
+        variantVersion: v1.version,
+      };
+    }
+
+    // ── FIX 1 — identifier DELETE vs Variant activation ────────────────────
+    it('DELETE blocked on the variant lock while the variant turns ACTIVE → non-destructive INACTIVE (owner FIX 1 / outcome B)', async () => {
+      const f = await activeProductWithDraftDefaultAndSku('race1b');
+      const delAuditBefore = await auditRows(tenantA, 'catalog.identifier_deleted');
+
+      const del = await withHeldTxn(
+        async (c) => {
+          // hold the variant row FOR UPDATE and flip it ACTIVE inside the held txn
+          await c.query(`SELECT "id" FROM "variant" WHERE "id" = $1 FOR UPDATE`, [f.variantId]);
+          await c.query(
+            `UPDATE "variant" SET "status" = 'ACTIVE', "version" = "version" + 1 WHERE "id" = $1`,
+            [f.variantId],
+          );
+        },
+        () => req('DELETE', `/catalog/identifiers/${f.identifierId}`, ownerA),
+      );
+
+      // the DELETE acquired the variant lock AFTER the commit → sees ACTIVE →
+      // the approved non-destructive lifecycle rule, NOT a stale-DRAFT hard delete
+      expect(del.statusCode, del.payload).toBe(200);
+      expect((del.json() as { status: string }).status).toBe('deactivated');
+      const row = await sql<{ status: string }>(
+        `SELECT status FROM item_identifier WHERE id = $1`,
+        [f.identifierId],
+      );
+      expect(row[0]?.status).toBe('INACTIVE'); // row + value preserved, not physically deleted
+      expect(await auditRows(tenantA, 'catalog.identifier_deleted')).toBe(delAuditBefore); // no hard-delete audit
+    });
+
+    it('concurrent identifier DELETE vs variant activate always settles to a safe, self-consistent state', async () => {
+      for (let i = 0; i < 4; i++) {
+        const f = await activeProductWithDraftDefaultAndSku(`race1r${i}`);
+        const [del, act] = await Promise.all([
+          req('DELETE', `/catalog/identifiers/${f.identifierId}`, ownerA),
+          req('POST', `/catalog/variants/${f.variantId}/activate`, ownerA, undefined, {
+            'idempotency-key': ik(),
+            'if-match': `"${f.variantVersion}"`,
+          }),
+        ]);
+        expect(del.statusCode, del.payload).toBe(200);
+        const status = (del.json() as { status: string }).status;
+        expect(['deleted', 'deactivated']).toContain(status);
+        const rows = await sql<{ status: string }>(
+          `SELECT status FROM item_identifier WHERE id = $1`,
+          [f.identifierId],
+        );
+        const deletedAudit = await count(
+          `SELECT count(*)::int AS n FROM audit_log WHERE action='catalog.identifier_deleted' AND "resourceId"=$1`,
+          [f.identifierId],
+        );
+        const deactAudit = await count(
+          `SELECT count(*)::int AS n FROM audit_log WHERE action='catalog.identifier_deactivated' AND "resourceId"=$1`,
+          [f.identifierId],
+        );
+        if (status === 'deleted') {
+          expect(rows).toHaveLength(0); // physically gone
+          expect(deletedAudit).toBe(1);
+          expect(deactAudit).toBe(0);
+        } else {
+          expect(rows[0]?.status).toBe('INACTIVE'); // preserved
+          expect(deactAudit).toBe(1);
+          expect(deletedAudit).toBe(0);
+        }
+        // `activate` either succeeded (200) or lost the If-Match race (409) —
+        // never a raw 500
+        expect([200, 409, 428]).toContain(act.statusCode);
+        expect(act.statusCode).not.toBe(500);
+      }
+    });
+
+    // ── FIX 2 — Product hard delete vs identifier create ──────────────────
+    it('an identifier created in the product-hard-delete race window → 409, never a raw FK 500 (owner FIX 2)', async () => {
+      const cat = await makeCategory(ownerA, 'race2-c');
+      const p = await makeProduct(ownerA, cat, 'race2-p', 'STOCKED');
+      const variantId = (await listVariants(ownerA, p.id))[0]!.id;
+      const productDeletedBefore = await auditRows(tenantA, 'catalog.product_deleted');
+      const pv = (await req('GET', `/catalog/products/${p.id}`, ownerA)).headers['etag'];
+
+      const del = await withHeldTxn(
+        async (c) => {
+          // an identifier row that exists but is NOT yet committed — the delete's
+          // `count` pre-check will not see it, so the delete proceeds to
+          // `product.delete` and hits the RESTRICT FK
+          await c.query(
+            `INSERT INTO item_identifier (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+             VALUES (uuidv7(),$1,'VARIANT',$2,'SKU','RACE2-INFLIGHT',now())`,
+            [tenantA, variantId],
+          );
+        },
+        () =>
+          req('DELETE', `/catalog/products/${p.id}`, ownerA, undefined, { 'if-match': String(pv) }),
+      );
+
+      expect(del.statusCode, del.payload).toBe(409);
+      expect(errCode(del)).toBe('PRODUCT_HAS_VARIANT_IDENTIFIERS');
+      expect(del.statusCode).not.toBe(500);
+      // nothing was destroyed
+      expect(await count(`SELECT count(*)::int AS n FROM product WHERE id = $1`, [p.id])).toBe(1);
+      expect(
+        await count(
+          `SELECT count(*)::int AS n FROM item_identifier WHERE value = 'RACE2-INFLIGHT'`,
+        ),
+      ).toBe(1);
+      expect(await auditRows(tenantA, 'catalog.product_deleted')).toBe(productDeletedBefore);
+    });
+
+    it('concurrent product hard-delete vs identifier create → one deterministic domain outcome, no 500', async () => {
+      for (let i = 0; i < 4; i++) {
+        const cat = await makeCategory(ownerA, `race2r${i}-c`);
+        const p = await makeProduct(ownerA, cat, `race2r${i}-p`, 'STOCKED');
+        const variantId = (await listVariants(ownerA, p.id))[0]!.id;
+        const pv = (await req('GET', `/catalog/products/${p.id}`, ownerA)).headers['etag'];
+        const [del, cre] = await Promise.all([
+          req('DELETE', `/catalog/products/${p.id}`, ownerA, undefined, { 'if-match': String(pv) }),
+          createId(ownerA, {
+            targetKind: 'VARIANT',
+            targetId: variantId,
+            codeType: 'SKU',
+            value: `RACE2R${i}`,
+          }),
+        ]);
+        expect(del.statusCode).not.toBe(500);
+        expect(cre.statusCode).not.toBe(500);
+        const productGone =
+          (await count(`SELECT count(*)::int AS n FROM product WHERE id = $1`, [p.id])) === 0;
+        if (productGone) {
+          // product delete won — the identifier create must have cleanly lost
+          expect(del.statusCode).toBe(200);
+          expect([404, 409]).toContain(cre.statusCode);
+        } else {
+          // identifier create won — the product delete must be a clean domain 409
+          expect(del.statusCode).toBe(409);
+          expect(errCode(del)).toBe('PRODUCT_HAS_VARIANT_IDENTIFIERS');
+          expect(cre.statusCode).toBe(201);
+        }
+      }
+    });
+
+    // ── the check-then-insert `(tenantId, value)` race → deterministic 409 ──
+    it('two concurrent creates of the same value on different variants → one 201, one 409 IDENTIFIER_VALUE_TAKEN', async () => {
+      for (let i = 0; i < 3; i++) {
+        const v1 = await makeVariant(ownerA, `raceval${i}a`);
+        const v2 = await makeVariant(ownerA, `raceval${i}b`);
+        const value = `RACEVAL-${i}`;
+        const [a, b] = await Promise.all([
+          createId(ownerA, {
+            targetKind: 'VARIANT',
+            targetId: v1.variantId,
+            codeType: 'BARCODE',
+            value,
+          }),
+          createId(ownerA, {
+            targetKind: 'VARIANT',
+            targetId: v2.variantId,
+            codeType: 'BARCODE',
+            value,
+          }),
+        ]);
+        const codes = [a.statusCode, b.statusCode].sort();
+        expect(codes).toEqual([201, 409]);
+        const loser = a.statusCode === 409 ? a : b;
+        expect(errCode(loser)).toBe('IDENTIFIER_VALUE_TAKEN');
+        expect(a.statusCode).not.toBe(500);
+        expect(b.statusCode).not.toBe(500);
+        expect(
+          await count(
+            `SELECT count(*)::int AS n FROM item_identifier WHERE "tenantId"=$1 AND value=$2`,
+            [tenantA, value],
+          ),
+        ).toBe(1); // exactly one row survived
+      }
     });
   });
 

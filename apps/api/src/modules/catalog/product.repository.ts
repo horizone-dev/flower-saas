@@ -7,7 +7,10 @@ import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { resolveSlug, SLUG_MAX, versionConflict } from './catalog-write.helpers.js';
 import { requiredAttributeGap } from './attribute-definition.repository.js';
-import { assertProductVariantsHaveNoIdentifiers } from './identifier.repository.js';
+import {
+  assertProductVariantsHaveNoIdentifiers,
+  rethrowProductVariantIdentifierFkError,
+} from './identifier.repository.js';
 import {
   createDefaultVariant,
   nonArchivedVariantCount,
@@ -390,11 +393,17 @@ export class ProductRepository extends ScopedRepository {
         );
       }
       // task 3.5 — a variant with an `item_identifier` cannot be cascade-deleted
-      // (the FK is ON DELETE RESTRICT). Refuse with a clean 409 instead of a raw
-      // FK error; the owner deletes the identifiers first (a DRAFT-target
-      // identifier delete is a hard delete).
+      // (the FK is ON DELETE RESTRICT). The `count` pre-check gives a clean 409
+      // in the common case; an identifier created in the race window between the
+      // check and the delete is caught by translating the RESTRICT-FK conflict
+      // to the SAME 409 (owner FIX 2 — no `product → variant` lock is added, so
+      // no inversion against `variant.update`'s `variant → product` order).
       await assertProductVariantsHaveNoIdentifiers(tx, id);
-      await tx.product.delete({ where: { id } });
+      try {
+        await tx.product.delete({ where: { id } });
+      } catch (e) {
+        rethrowProductVariantIdentifierFkError(e);
+      }
       await this.audit.record(tx, {
         action: 'catalog.product_deleted',
         resourceType: 'product',

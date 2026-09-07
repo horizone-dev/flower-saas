@@ -64,6 +64,32 @@ interface LockedIdentifier {
  * idempotency (owner "CONCURRENCY"). `tenant.businessTypeKey` is NEVER read
  * (HG3-NO-BT-BRANCH) — behaviour comes only from `codeType` + the configured
  * data. All audit rows are ordinary catalog events (`security: false`).
+ *
+ * ── Lock order (owner "LOCKING REVIEW", task 3.5 remediation) ────────────────
+ * Every identifier lifecycle method acquires `FOR UPDATE` row locks in the
+ * documented order **`item_identifier` → `variant`**:
+ *   - `create`             locks the target `variant`, then INSERTs a NEW
+ *                          `item_identifier` row (the new row's lock is
+ *                          uncontended — this is `variant → (new row)`, not
+ *                          `variant → existing item_identifier`).
+ *   - `deactivateOrDelete` locks the `item_identifier` row, then the target
+ *                          `variant` — the hard-delete-vs-keep decision is made
+ *                          while HOLDING the variant lock, so a concurrent
+ *                          `variant` activate/archive cannot flip the status
+ *                          out from under a stale read.
+ *   - `reactivate`         same order: `item_identifier` then target `variant`.
+ * The Task-3.4 restructure paths (`option-group.create` /
+ * `product.update` strategy change → `removeDefaultVariantForRestructure`;
+ * `product.remove`) lock `product` → `variant`. An identifier path (I→V) and a
+ * restructure path (P→V) contend only on the `variant` row — never in a cycle:
+ * an identifier path never holds a `product` lock, and a restructure path never
+ * `FOR UPDATE`-locks an existing `item_identifier` row (it only `count`s them,
+ * then bails with `VARIANT_HAS_IDENTIFIERS` before any child lock). `product`
+ * hard-delete keeps its fast `count` pre-check but ALSO translates the DB
+ * `item_identifier → variant` RESTRICT-FK conflict into `409
+ * PRODUCT_HAS_VARIANT_IDENTIFIERS` (via `rethrowProductVariantIdentifierFkError`)
+ * rather than adding a `product → variant` lock that would invert against
+ * `variant.update`'s combination-edit `variant → product` order.
  */
 @Injectable()
 export class IdentifierRepository extends ScopedRepository {
@@ -166,7 +192,7 @@ export class IdentifierRepository extends ScopedRepository {
           select: ID_SELECT,
         })) as ItemIdentifierRow;
       } catch (e) {
-        rethrowUniqueViolation(e, value);
+        rethrowUniqueViolation(e, value, input.codeType);
       }
 
       await this.audit.record(tx, {
@@ -187,16 +213,20 @@ export class IdentifierRepository extends ScopedRepository {
    * path that also lets the owner clear an identifier before a Task-3.4
    * default-variant restructure. Never an automatic side effect of a
    * variant/product change (owner decision 5).
+   *
+   * The target `variant` is locked `FOR UPDATE` and its status re-read **while
+   * holding that lock** (task 3.5 remediation, owner FIX 1): a concurrent
+   * `variant` activation cannot flip DRAFT → ACTIVE between the check and the
+   * hard-delete, so an identifier is never physically removed on a stale DRAFT
+   * read. Lock order: `item_identifier` → `variant`.
    */
   deactivateOrDelete(id: string): Promise<{ status: 'deactivated' | 'deleted' }> {
     return this.scoped(async (tx) => {
       const row = await lockIdentifier(tx, id);
       if (!row) throw new NotFoundError('identifier');
 
-      const target = await tx.variant.findUnique({
-        where: { id: row.targetId },
-        select: { status: true },
-      });
+      // lock the target variant, THEN decide — no stale-read hard delete
+      const target = await lockVariant(tx, row.targetId);
 
       if (target && target.status === 'DRAFT') {
         await tx.itemIdentifier.delete({ where: { id } });
@@ -245,10 +275,9 @@ export class IdentifierRepository extends ScopedRepository {
       if (!row) throw new NotFoundError('identifier');
       if (row.status === 'ACTIVE') return this.getInTx(tx, id); // idempotent no-op
 
-      const target = await tx.variant.findUnique({
-        where: { id: row.targetId },
-        select: { status: true },
-      });
+      // lock order `item_identifier` → `variant`: hold the variant lock while
+      // re-checking its lifecycle so a concurrent archive can't slip past.
+      const target = await lockVariant(tx, row.targetId);
       if (!target || target.status === 'ARCHIVED') {
         throw new DomainError(
           'IDENTIFIER_TARGET_UNAVAILABLE',
@@ -261,7 +290,7 @@ export class IdentifierRepository extends ScopedRepository {
       try {
         await tx.itemIdentifier.update({ where: { id }, data: { status: 'ACTIVE' } });
       } catch (e) {
-        rethrowUniqueViolation(e, row.value);
+        rethrowUniqueViolation(e, row.value, row.codeType);
       }
       await this.audit.record(tx, {
         action: 'catalog.identifier_reactivated',
@@ -354,8 +383,18 @@ export async function assertVariantHasNoIdentifiers(
   }
 }
 
-/** Product-level guard for a DRAFT-product hard-delete — a clean 409 instead of
- *  a raw `item_identifier → variant` RESTRICT FK error. */
+/**
+ * Fast pre-check for a DRAFT-product hard-delete — a clean 409 in the common
+ * (non-racing) case. It is a plain `count`, NOT a locking read: taking
+ * `FOR UPDATE` on the product's variant rows here would establish a
+ * `product → variant` order that inverts against `variant.update`'s
+ * combination-edit `variant → product` order (deadlock). The race window
+ * between this check and `product.delete` is instead closed by
+ * `rethrowProductVariantIdentifierFkError` around the delete itself — the DB
+ * `item_identifier → variant` RESTRICT FK is the integrity backstop and its
+ * conflict is translated to the same `409 PRODUCT_HAS_VARIANT_IDENTIFIERS`
+ * (owner FIX 2 / "LOCKING REVIEW").
+ */
 export async function assertProductVariantsHaveNoIdentifiers(
   tx: ScopedTx,
   productId: string,
@@ -374,6 +413,34 @@ export async function assertProductVariantsHaveNoIdentifiers(
   }
 }
 
+/**
+ * Translate an `item_identifier → variant` RESTRICT foreign-key conflict raised
+ * by a `product.delete` cascade (an identifier that was created after
+ * `assertProductVariantsHaveNoIdentifiers` ran and before the delete) into the
+ * documented `409 PRODUCT_HAS_VARIANT_IDENTIFIERS` — never a raw FK 500. Any
+ * other error (including an unrelated RESTRICT FK, e.g. `product_attribute_value`
+ * from task 3.3) is re-thrown unchanged.
+ */
+export function rethrowProductVariantIdentifierFkError(e: unknown): never {
+  const err = e as { code?: string; meta?: Record<string, unknown>; message?: string } | null;
+  // The `item_identifier → variant` RESTRICT FK fires on the `product.delete`
+  // cascade for an identifier created in the race window. Recognise it by the
+  // constraint name / FK column, regardless of how the driver surfaces it —
+  // Prisma `P2003` (`meta.constraint` + message), a raw pg `23503`, or (belt &
+  // braces) any error whose text says "foreign key". A `product_attribute_value`
+  // RESTRICT (task 3.3) or anything else is re-thrown unchanged.
+  const blob = `${err?.code ?? ''} ${JSON.stringify(err?.meta ?? {})} ${err?.message ?? ''}`;
+  const looksLikeFk = err?.code === 'P2003' || err?.code === '23503' || /foreign key/i.test(blob);
+  if (looksLikeFk && /item_identifier(_tenant_variant_fkey)?|targetVariantId/i.test(blob)) {
+    throw new DomainError(
+      'PRODUCT_HAS_VARIANT_IDENTIFIERS',
+      'delete this product’s variant identifiers before hard-deleting the product',
+      409,
+    );
+  }
+  throw e as Error;
+}
+
 function assertVariantTargetKind(targetKind: string): void {
   if (!(ACTIVE_IDENTIFIER_TARGET_KINDS as readonly string[]).includes(targetKind)) {
     throw new DomainError(
@@ -385,6 +452,11 @@ function assertVariantTargetKind(targetKind: string): void {
   }
 }
 
+/** `FOR UPDATE` lock + status read of one variant — the shared primitive for
+ *  every identifier lifecycle path (`create` / `deactivateOrDelete` /
+ *  `reactivate`). Held for the rest of the transaction so a concurrent variant
+ *  activate/archive serialises behind it. `null` if the variant does not exist
+ *  in the request tenant (RLS-scoped). */
 async function lockVariant(tx: ScopedTx, id: string): Promise<{ status: string } | null> {
   const rows = await tx.$queryRaw<{ status: string }[]>`
     SELECT "status" FROM "variant" WHERE "id" = ${id}::uuid FOR UPDATE`;
@@ -398,20 +470,28 @@ async function lockIdentifier(tx: ScopedTx, id: string): Promise<LockedIdentifie
   return rows[0] ?? null;
 }
 
-/** Map a partial-unique-index race (a check-then-insert that lost) to a clean
- *  409; anything else is re-thrown unchanged. */
-function rethrowUniqueViolation(e: unknown, value: string): never {
+/**
+ * Map a partial-unique-index race (a check-then-insert that lost) to a clean,
+ * DETERMINISTIC 409; anything else is re-thrown unchanged. The winning index is
+ * read from `meta.target` when Prisma provides it, but the partial indexes are
+ * not in `schema.prisma`, so `meta.target` can be absent — `codeType` is the
+ * fallback (only `SKU` / `QR` have a one-ACTIVE-per-target index; a `BARCODE`
+ * P2002 can only be the `(tenantId, value)` unique).
+ */
+function rethrowUniqueViolation(e: unknown, value: string, codeType: IdentifierCodeType): never {
   const code = (e as { code?: string } | null)?.code;
   if (code === 'P2002') {
     const target = String((e as { meta?: { target?: unknown } })?.meta?.target ?? '');
-    if (target.includes('one_active_sku')) {
+    const isSkuIdx = target.includes('one_active_sku') || (target === '' && codeType === 'SKU');
+    const isQrIdx = target.includes('one_active_qr') || (target === '' && codeType === 'QR');
+    if (isSkuIdx) {
       throw new DomainError(
         'IDENTIFIER_ACTIVE_SKU_EXISTS',
         'this variant already has an active SKU',
         409,
       );
     }
-    if (target.includes('one_active_qr')) {
+    if (isQrIdx) {
       throw new DomainError(
         'IDENTIFIER_ACTIVE_QR_EXISTS',
         'this variant already has an active QR',
