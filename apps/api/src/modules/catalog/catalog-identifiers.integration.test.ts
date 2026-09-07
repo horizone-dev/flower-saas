@@ -597,6 +597,128 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
       expect(list.statusCode).toBe(200);
       expect((list.json() as { value: string }[]).some((r) => r.value === 'ARCH-SCAN')).toBe(true);
     });
+
+    // ── B — SKU canonical resolve fallback (bare-scanner determinism kept) ──
+    it('a stored canonical SKU resolves from BOTH its canonical and a lowercase form (owner B)', async () => {
+      const v = await makeVariant(ownerA, 'sku-resolve');
+      const created = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'SKU',
+        value: '  resolve-sku.7 ',
+      });
+      expect(created.statusCode, created.payload).toBe(201);
+      expect((created.json() as { value: string }).value).toBe('RESOLVE-SKU.7');
+
+      // exact (canonical) form → resolves
+      const exact = await resolveId(ownerA, 'RESOLVE-SKU.7');
+      expect(exact.statusCode, exact.payload).toBe(200);
+      expect((exact.json() as { target: { id: string } }).target.id).toBe(v.variantId);
+      // lowercase manual entry → canonical SKU fallback → resolves to the SAME row
+      const lower = await resolveId(ownerA, 'resolve-sku.7');
+      expect(lower.statusCode, lower.payload).toBe(200);
+      expect((lower.json() as { identifier: { id: string } }).identifier.id).toBe(
+        (created.json() as { id: string }).id,
+      );
+    });
+
+    it('the SKU canonical fallback never uppercase-folds a lowercase input into a BARCODE / QR (owner B)', async () => {
+      const v = await makeVariant(ownerA, 'bc-exact');
+      // a BARCODE that happens to be all upper-case
+      await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'BARCODE',
+        value: 'ABC-XYZ',
+      });
+      expect((await resolveId(ownerA, 'ABC-XYZ')).statusCode).toBe(200); // exact BARCODE
+      // lowercase input must NOT fall back onto the upper-case BARCODE (fallback
+      // is `codeType = 'SKU'` only) — and there is no SKU 'ABC-XYZ'
+      expect((await resolveId(ownerA, 'abc-xyz')).statusCode).toBe(404);
+
+      // a QR is opaque upper-hex; a lowercased QR string never resolves
+      const qr = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'QR',
+      });
+      const qrValue = (qr.json() as { value: string }).value;
+      expect((await resolveId(ownerA, qrValue)).statusCode).toBe(200); // exact
+      expect((await resolveId(ownerA, qrValue.toLowerCase())).statusCode).toBe(404);
+    });
+
+    it('the SKU fallback is tenant-scoped — tenant C cannot resolve tenant A’s lowercase SKU (owner B)', async () => {
+      const v = await makeVariant(ownerA, 'sku-tenant');
+      await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'SKU',
+        value: 'TENANT-A-SKU',
+      });
+      expect((await resolveId(ownerA, 'tenant-a-sku')).statusCode).toBe(200);
+      expect((await resolveId(ownerC, 'tenant-a-sku')).statusCode).toBe(404);
+      expect((await resolveId(ownerC, 'TENANT-A-SKU')).statusCode).toBe(404);
+    });
+
+    // ── C — an ARCHIVED parent product is not a usable scan target ──────────
+    it('an ACTIVE identifier on an ACTIVE variant whose PRODUCT is ARCHIVED → 404; identifier untouched; product reactivation restores it (owner C)', async () => {
+      const cat = await makeCategory(ownerA, 'arch-prod-c');
+      const p = await makeProduct(ownerA, cat, 'arch-prod-p', 'STOCKED');
+      const v0 = (await listVariants(ownerA, p.id))[0]!;
+      const created = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v0.id,
+        codeType: 'BARCODE',
+        value: 'ARCHPROD-BC',
+      });
+      // activate product + variant
+      await req('POST', `/catalog/products/${p.id}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${p.version}"`,
+      });
+      const v1 = (await listVariants(ownerA, p.id))[0]!;
+      await req('POST', `/catalog/variants/${v1.id}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${v1.version}"`,
+      });
+
+      // both ACTIVE → resolves
+      expect((await resolveId(ownerA, 'ARCHPROD-BC')).statusCode).toBe(200);
+
+      // archive the PRODUCT (variant stays ACTIVE — product archive does not cascade)
+      const pv = (await req('GET', `/catalog/products/${p.id}`, ownerA)).headers['etag'];
+      const arch = await req('POST', `/catalog/products/${p.id}/archive`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': String(pv),
+      });
+      expect(arch.statusCode, arch.payload).toBe(200);
+      const vAfter = (await listVariants(ownerA, p.id))[0]!;
+      expect(vAfter.status).toBe('ACTIVE'); // variant untouched
+
+      // ARCHIVED product → not a usable scan target
+      const res = await resolveId(ownerA, 'ARCHPROD-BC');
+      expect(res.statusCode).toBe(404);
+      expect(errCode(res)).toBe('IDENTIFIER_TARGET_UNAVAILABLE');
+      // identifier row still ACTIVE, still in the management list
+      const row = await sql<{ status: string }>(
+        `SELECT status FROM item_identifier WHERE id = $1`,
+        [(created.json() as { id: string }).id],
+      );
+      expect(row[0]?.status).toBe('ACTIVE');
+      const list = await listIds(ownerA, v1.id);
+      expect((list.json() as { value: string }[]).some((r) => r.value === 'ARCHPROD-BC')).toBe(
+        true,
+      );
+
+      // reactivate the product → resolution restored
+      const pv2 = (await req('GET', `/catalog/products/${p.id}`, ownerA)).headers['etag'];
+      const react = await req('POST', `/catalog/products/${p.id}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': String(pv2),
+      });
+      expect(react.statusCode, react.payload).toBe(200);
+      expect((await resolveId(ownerA, 'ARCHPROD-BC')).statusCode).toBe(200);
+    });
   });
 
   // ══════════════════ default variant + restructure guard (proofs 25, 27–28) ═
@@ -1024,6 +1146,71 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
       });
       expect(dup.statusCode).toBe(409);
       expect(await auditRows(tenantA, 'catalog.identifier_created')).toBe(before + 1);
+    });
+
+    // ── E — the created-audit payload records the persisted value ──────────
+    it('catalog.identifier_created audit `after` carries the canonical / generated value (owner E)', async () => {
+      const afterFor = async (resourceId: string): Promise<Record<string, unknown>> => {
+        const rows = await sql<{ after: Record<string, unknown> }>(
+          `SELECT "after" FROM audit_log
+            WHERE action='catalog.identifier_created' AND "resourceId"=$1`,
+          [resourceId],
+        );
+        expect(rows).toHaveLength(1); // exactly one success audit row
+        return rows[0]!.after;
+      };
+
+      const v = await makeVariant(ownerA, 'audit-val');
+      // SKU — canonical value
+      const sku = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'SKU',
+        value: '  audit-val.sku ',
+      });
+      expect(sku.statusCode).toBe(201);
+      expect(await afterFor((sku.json() as { id: string }).id)).toMatchObject({
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'SKU',
+        value: 'AUDIT-VAL.SKU',
+      });
+
+      // BARCODE — verbatim (trimmed) value
+      const bc = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'BARCODE',
+        value: 'Audit-Val-BC',
+      });
+      expect((await afterFor((bc.json() as { id: string }).id))['value']).toBe('Audit-Val-BC');
+
+      // QR — the server-generated opaque value that was actually persisted
+      const qr = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'QR',
+      });
+      const qrValue = (qr.json() as { value: string }).value;
+      expect(qrValue).toMatch(/^[0-9A-F]{40}$/);
+      const auditedQr = (await afterFor((qr.json() as { id: string }).id))['value'];
+      expect(auditedQr).toBe(qrValue);
+      const persisted = await sql<{ value: string }>(
+        `SELECT value FROM item_identifier WHERE id = $1`,
+        [(qr.json() as { id: string }).id],
+      );
+      expect(auditedQr).toBe(persisted[0]!.value);
+
+      // a failed (duplicate) create → zero additional success audit rows
+      const before = await auditRows(tenantA, 'catalog.identifier_created');
+      const fail = await createId(ownerA, {
+        targetKind: 'VARIANT',
+        targetId: v.variantId,
+        codeType: 'BARCODE',
+        value: 'Audit-Val-BC',
+      });
+      expect(fail.statusCode).toBe(409);
+      expect(await auditRows(tenantA, 'catalog.identifier_created')).toBe(before);
     });
   });
 

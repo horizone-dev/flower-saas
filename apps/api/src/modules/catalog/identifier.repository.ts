@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { ScopedTx } from '@flower/db';
 import {
   ACTIVE_IDENTIFIER_TARGET_KINDS,
+  canonicalizeSku,
   type IdentifierCodeType,
   type IdentifierStatus,
 } from '@flower/shared-types';
@@ -100,17 +101,38 @@ export class IdentifierRepository extends ScopedRepository {
     super(db);
   }
 
-  /** Bare-value scan resolution (owner "SCAN RESOLUTION"): at most one ACTIVE
-   *  identifier per value (owner decision 3). An ARCHIVED target variant is NOT
-   *  a currently usable scan target — 404 (the identifier row + history stay
-   *  intact; a later variant reactivation makes the still-ACTIVE identifier
-   *  resolvable again). */
+  /**
+   * Bare-value scan resolution (owner "SCAN RESOLUTION" / "B" / "C"):
+   *   1. an EXACT ACTIVE lookup on the supplied value (bare-scanner determinism —
+   *      a printed BARCODE / QR / canonical SKU resolves verbatim);
+   *   2. only if the exact lookup MISSES, a fallback restricted to
+   *      `codeType = 'SKU' AND value = canonicalizeSku(input)` — so a manually
+   *      typed lowercase SKU still resolves, while a lowercase string can NEVER
+   *      uppercase-fold into a BARCODE / QR (those stay exact / case-sensitive).
+   *
+   * A target that is not currently usable → 404 `IDENTIFIER_TARGET_UNAVAILABLE`:
+   * the identifier is not ACTIVE, the target `variant` is ARCHIVED, or the
+   * target `product` is ARCHIVED. `identifier.status` / `variant.status` are
+   * NEVER mutated here — the row stays visible in the management / list-by-target
+   * view, and product/variant reactivation restores resolution (subject to the
+   * later sellability gates, which are NOT applied here).
+   */
   resolveByValue(value: string): Promise<IdentifierResolution> {
     return this.scoped(async (tx) => {
-      const row = (await tx.itemIdentifier.findFirst({
+      let row = (await tx.itemIdentifier.findFirst({
         where: { value, status: 'ACTIVE' },
         select: ID_SELECT,
       })) as ItemIdentifierRow | null;
+
+      if (!row) {
+        const canonicalSku = canonicalizeSku(value);
+        if (canonicalSku !== value) {
+          row = (await tx.itemIdentifier.findFirst({
+            where: { value: canonicalSku, codeType: 'SKU', status: 'ACTIVE' },
+            select: ID_SELECT,
+          })) as ItemIdentifierRow | null;
+        }
+      }
       if (!row) throw new NotFoundError('identifier', 'IDENTIFIER_NOT_FOUND');
 
       const variant = await tx.variant.findUnique({
@@ -125,6 +147,9 @@ export class IdentifierRepository extends ScopedRepository {
         select: { id: true, slug: true, nameEn: true, status: true },
       });
       if (!product) throw new NotFoundError('identifier target');
+      if (product.status === 'ARCHIVED') {
+        throw new NotFoundError('identifier target', 'IDENTIFIER_TARGET_UNAVAILABLE');
+      }
       return {
         identifier: row,
         target: { kind: 'VARIANT', id: row.targetId },
@@ -199,7 +224,15 @@ export class IdentifierRepository extends ScopedRepository {
         action: 'catalog.identifier_created',
         resourceType: 'item_identifier',
         resourceId: created.id,
-        after: { targetKind: 'VARIANT', targetId: input.targetId, codeType: input.codeType },
+        // owner "E" — record the immutable value that was actually persisted
+        // (canonical SKU / verbatim barcode / server-generated opaque QR). A
+        // catalog identifier is a printed code, not secret material.
+        after: {
+          targetKind: 'VARIANT',
+          targetId: input.targetId,
+          codeType: input.codeType,
+          value: created.value,
+        },
       });
       return created;
     });

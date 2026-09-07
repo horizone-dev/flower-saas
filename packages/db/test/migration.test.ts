@@ -2017,9 +2017,11 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
   // NO pack UOM / price / currency / stock / inventory / company / branch /
   // version column; targetKind VARIANT-only (INVENTORY_ITEM reserved, no table);
   // RLS ENABLE + FORCE; the server-derived `targetVariantId` GENERATED column +
-  // tenant-safe composite FK ON DELETE RESTRICT; UNIQUE(tenantId,value) spanning
-  // every code type + status; partial uniques (one ACTIVE SKU / one ACTIVE QR per
-  // target; many ACTIVE BARCODE allowed); NO identifier-value backfill.
+  // tenant-safe composite FK ON DELETE NO ACTION (blocks a direct variant delete
+  // at end-of-statement; does NOT abort a single-statement whole-tenant cascade);
+  // UNIQUE(tenantId,value) spanning every code type + status; partial uniques
+  // (one ACTIVE SKU / one ACTIVE QR per target; many ACTIVE BARCODE allowed);
+  // NO identifier-value backfill.
   describe('identifiers schema (task 3.5)', () => {
     const mkVariant = async (
       tenant: string,
@@ -2175,14 +2177,24 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     });
 
     it('tenant-safe composite FK on the generated targetVariantId; cross-tenant + missing variant rejected', async () => {
-      const fks = await pool.query<{ def: string }>(
-        `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
-          WHERE conname = 'item_identifier_tenant_variant_fkey'`,
+      const fks = await pool.query<{
+        def: string;
+        confdeltype: string;
+        condeferrable: boolean;
+        condeferred: boolean;
+      }>(
+        `SELECT pg_get_constraintdef(oid) AS def, confdeltype, condeferrable, condeferred
+           FROM pg_constraint WHERE conname = 'item_identifier_tenant_variant_fkey'`,
       );
       expect(fks.rows[0]!.def).toMatch(/FOREIGN KEY \("tenantId", "targetVariantId"\)/);
       expect(fks.rows[0]!.def).toMatch(/REFERENCES "?variant"?\("tenantId", "?id"?\)/);
-      expect(fks.rows[0]!.def).toMatch(/ON DELETE RESTRICT/);
+      // owner "A — FK DELETE SEMANTICS": NO ACTION ('a'), non-deferrable — NOT
+      // CASCADE ('c'), NOT RESTRICT ('r'), NOT DEFERRABLE.
+      expect(fks.rows[0]!.confdeltype).toBe('a');
+      expect(fks.rows[0]!.condeferrable).toBe(false);
+      expect(fks.rows[0]!.condeferred).toBe(false);
       expect(fks.rows[0]!.def).not.toMatch(/ON DELETE CASCADE/);
+      expect(fks.rows[0]!.def).not.toMatch(/ON DELETE RESTRICT/);
 
       const a = await mkVariant(TENANT_A, 'ii-fk-a');
       const b = await mkVariant(TENANT_B, 'ii-fk-b');
@@ -2206,21 +2218,105 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       await cleanup(b);
     });
 
-    it('identifier → variant FK is RESTRICT, not CASCADE — a variant with an identifier cannot be deleted', async () => {
-      const t = await mkVariant(TENANT_A, 'ii-restrict');
+    it('identifier → variant FK: NO ACTION — a direct variant / product delete is still rejected (owner A1/A2)', async () => {
+      const t = await mkVariant(TENANT_A, 'ii-noaction');
       await pool.query(
         `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
-         VALUES (uuidv7(),$1,'VARIANT',$2,'SKU','II-RESTRICT',now())`,
+         VALUES (uuidv7(),$1,'VARIANT',$2,'SKU','II-NOACTION',now())`,
         [TENANT_A, t.variant],
       );
+      // A1 — a direct DELETE of the variant is rejected at end-of-statement
       await expect(pool.query(`DELETE FROM "variant" WHERE id = $1`, [t.variant])).rejects.toThrow(
         /item_identifier_tenant_variant_fkey|violates foreign key|still referenced/i,
       );
-      // and a DRAFT-product hard-delete is likewise blocked by the same FK
+      // A2 — a non-tenant-purge product hard-delete is likewise blocked (its
+      // cascade to `variant` trips the same FK at end-of-statement)
       await expect(pool.query(`DELETE FROM "product" WHERE id = $1`, [t.prod])).rejects.toThrow(
         /foreign key|still referenced/i,
       );
+      // both survived
+      expect(
+        Number(
+          (await pool.query(`SELECT count(*)::int AS n FROM "variant" WHERE id = $1`, [t.variant]))
+            .rows[0].n,
+        ),
+      ).toBe(1);
+      expect(
+        Number(
+          (
+            await pool.query(
+              `SELECT count(*)::int AS n FROM "item_identifier" WHERE "targetId" = $1`,
+              [t.variant],
+            )
+          ).rows[0].n,
+        ),
+      ).toBe(1);
       await cleanup(t);
+    });
+
+    it('a whole-tenant cascade DELETE removes tenant/product/variant/item_identifier with no transient FK-order failure (owner A3/A4)', async () => {
+      const T = '0000eeee-0000-7000-8000-000000350a3c';
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1,'ii-purge','ii-purge','AE','ACTIVE','00000000-0000-7000-8000-000000000002', now())`,
+        [T],
+      );
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,'iip-c','C',now()) RETURNING id`,
+          [T],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'iip-p','P','STOCKED','ACTIVE',now()) RETURNING id`,
+          [T, cat],
+        )
+      ).rows[0].id as string;
+      const variant = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','ACTIVE',now()) RETURNING id`,
+          [T, prod],
+        )
+      ).rows[0].id as string;
+      const identifier = (
+        await pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,'BARCODE','IIP-BC-1',now()) RETURNING id`,
+          [T, variant],
+        )
+      ).rows[0].id as string;
+
+      // A3 — one statement; every FK cascade + the NO ACTION check resolve inside it
+      await expect(pool.query(`DELETE FROM tenant WHERE id = $1`, [T])).resolves.toBeTruthy();
+
+      // A4 — nothing left, no orphan identifier
+      for (const [table, id] of [
+        ['tenant', T],
+        ['product', prod],
+        ['variant', variant],
+        ['item_identifier', identifier],
+      ] as const) {
+        const n = Number(
+          (await pool.query(`SELECT count(*)::int AS n FROM "${table}" WHERE id = $1`, [id]))
+            .rows[0].n,
+        );
+        expect(n, `${table} row must be gone`).toBe(0);
+      }
+      expect(
+        Number(
+          (
+            await pool.query(
+              `SELECT count(*)::int AS n FROM "item_identifier" WHERE "tenantId" = $1`,
+              [T],
+            )
+          ).rows[0].n,
+        ),
+        'no orphan identifier for the purged tenant',
+      ).toBe(0);
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [cat]).catch(() => {});
     });
 
     it('UNIQUE(tenantId, value) spans every code type AND both statuses — a value is never reused', async () => {

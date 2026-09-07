@@ -14,10 +14,13 @@
 --   * DB-enforced tenant-safe VARIANT target integrity (owner decision 6): a
 --     server-derived `targetVariantId` GENERATED ALWAYS ... STORED column (the
 --     client can never set it independently) + a composite FK
---     `(tenantId, targetVariantId) → variant(tenantId, id)` ON DELETE RESTRICT.
---     RESTRICT (never CASCADE): once a variant has an identifier it cannot be
+--     `(tenantId, targetVariantId) → variant(tenantId, id)` ON DELETE NO ACTION.
+--     NO ACTION (never CASCADE): once a variant has an identifier it cannot be
 --     deleted / restructured away — the DB is the final backstop behind the
---     service's `VARIANT_HAS_IDENTIFIERS` 409.
+--     service's `VARIANT_HAS_IDENTIFIERS` 409. NO ACTION (not RESTRICT) so a
+--     single-statement whole-tenant cascade is not aborted by transient
+--     cascade-ordering (see the FK block below — owner "A — FK DELETE
+--     SEMANTICS").
 --   * Uniqueness (owner decisions 2 / 3):
 --       - UNIQUE (tenantId, value) — spans EVERY code type AND both statuses; a
 --         deactivated value is reserved to its historical row forever and is
@@ -103,16 +106,33 @@ ALTER TABLE "item_identifier"
 
 -- tenant-safe existence RI for the VARIANT target (owner §9 / decision 6). The
 -- reference is ALSO tenant-keyed, so the DB rejects a tenant-A identifier that
--- points at a tenant-B variant. ON DELETE RESTRICT — NOT CASCADE: deleting or
--- restructuring a variant that still has an identifier must not silently erase
--- printed-code history (owner "TASK 3.4 DEFAULT-VARIANT RESTRUCTURE GUARD").
+-- points at a tenant-B variant.
+--
+-- ON DELETE NO ACTION — NOT CASCADE (deleting / restructuring a variant that
+-- still owns an identifier must not silently erase printed-code history) and NOT
+-- RESTRICT. `NO ACTION` (non-deferrable — the default) checks at END OF
+-- STATEMENT, unlike `RESTRICT` which checks IMMEDIATELY during a cascade:
+--   * a direct `DELETE FROM variant` that still has an identifier is rejected at
+--     end-of-statement (owner A1) — the migration test proves this;
+--   * a single-statement whole-tenant cascade (`DELETE FROM tenant …`) removes
+--     `variant` AND `item_identifier` (each via its own `tenantId` CASCADE)
+--     within the one statement, so the end-of-statement check sees no dangling
+--     reference and passes (owner A3) — `RESTRICT` would abort the instant the
+--     `variant` cascade fired, before `item_identifier`'s cascade ran.
+-- This mirrors task 3.4's `variant_option_value` composite FKs, which use
+-- `NO ACTION` for exactly this transient-cascade-ordering reason. It is NOT
+-- `DEFERRABLE INITIALLY DEFERRED`: deferring to COMMIT would move a
+-- product-hard-delete's RESTRICT-style conflict past the app's
+-- `rethrowProductVariantIdentifierFkError` catch (which wraps the `DELETE`
+-- statement, not the commit) and back into a raw 500.
+--
 -- ON UPDATE NO ACTION — Postgres forbids a cascading ON UPDATE on a FK whose
 -- referencing column is GENERATED, and `variant(tenantId, id)` (uuidv7 PK +
 -- tenant FK) is never updated in practice anyway.
 ALTER TABLE "item_identifier"
   ADD CONSTRAINT "item_identifier_tenant_variant_fkey"
   FOREIGN KEY ("tenantId", "targetVariantId") REFERENCES "variant"("tenantId", "id")
-  ON UPDATE NO ACTION ON DELETE RESTRICT;
+  ON UPDATE NO ACTION ON DELETE NO ACTION;
 
 -- ── grants for the DB roles ─────────────────────────────────────────────────
 GRANT ALL ON "item_identifier" TO flower_migrate;

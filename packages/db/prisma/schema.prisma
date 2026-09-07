@@ -1416,11 +1416,14 @@ model VariantOptionValue {
 //      SAME row (reactivate never creates a new row).
 //   6. DB-enforced tenant-safe VARIANT target integrity via the server-derived
 //      `targetVariantId` GENERATED column + composite FK `(tenantId,
-//      targetVariantId) → variant(tenantId, id)` **ON DELETE RESTRICT** — once a
-//      variant has an identifier it cannot be deleted / restructured away; the
-//      DB is the final backstop behind the service's `VARIANT_HAS_IDENTIFIERS`
-//      409. Prisma models the scalar columns only (the generated column + the
-//      composite FK + the partial unique indexes live in the migration).
+//      targetVariantId) → variant(tenantId, id)` **ON DELETE NO ACTION** (never
+//      CASCADE; not RESTRICT) — once a variant has an identifier it cannot be
+//      deleted / restructured away, yet a single-statement whole-tenant cascade
+//      still resolves (NO ACTION checks at end-of-statement, by which point
+//      `item_identifier` is gone via its own `tenantId` CASCADE). The DB is the
+//      final backstop behind the service's `VARIANT_HAS_IDENTIFIERS` 409. Prisma
+//      models the scalar columns only (the generated column + the composite FK +
+//      the partial unique indexes live in the migration).
 //
 // `tenant.businessTypeKey` is NEVER read (HG3-NO-BT-BRANCH) — an identifier's
 // behaviour comes only from `codeType` + the `identifiers.barcode_qr` capability
