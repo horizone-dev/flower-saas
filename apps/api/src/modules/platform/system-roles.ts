@@ -2,6 +2,7 @@ import {
   PHASE_1_TENANT_PERMISSIONS,
   PHASE_3_2_TENANT_PERMISSIONS,
   PHASE_3_4_TENANT_PERMISSIONS,
+  PHASE_3_5_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -20,11 +21,20 @@ import {
  * Phase 3 task 3.4 (owner L-17): `owner` + `admin` also gain the ALREADY-RESERVED
  * `variants:manage`; `manager` does NOT (mirrors `catalog:manage`). Existing
  * tenants get the identical backfill in the task 3.4 migration.
+ *
+ * Phase 3 task 3.5 (owner "PERMISSIONS"): `owner` + `admin` also gain the
+ * ALREADY-RESERVED `identifiers:manage`; `manager` does NOT (mirrors
+ * `catalog:manage` / `variants:manage`). Existing tenants get the identical
+ * backfill in the task 3.5 migration. The key stays in its `inventory` group.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
-/** catalog:view + catalog:manage (task 3.2) + variants:manage (task 3.4) */
-const CATALOG = [...PHASE_3_2_TENANT_PERMISSIONS, ...PHASE_3_4_TENANT_PERMISSIONS];
+/** catalog:view + catalog:manage (3.2) + variants:manage (3.4) + identifiers:manage (3.5) */
+const CATALOG = [
+  ...PHASE_3_2_TENANT_PERMISSIONS,
+  ...PHASE_3_4_TENANT_PERMISSIONS,
+  ...PHASE_3_5_TENANT_PERMISSIONS,
+];
 const CATALOG_VIEW = 'catalog:view';
 
 export interface SystemRoleTemplate {

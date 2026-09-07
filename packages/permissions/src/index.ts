@@ -210,6 +210,26 @@ export const PHASE_3_4_TENANT_PERMISSIONS = [
 export type Phase34TenantPermission = (typeof PHASE_3_4_TENANT_PERMISSIONS)[number];
 
 /**
+ * Phase 3 task 3.5 activates the ALREADY-RESERVED `identifiers:manage` key — it
+ * has existed in `PERMISSIONS.inventory` since Phase 0; task 3.5 registers it in
+ * `permission_registry` and assigns it to the built-in `owner` / `admin` system
+ * roles (`manager` does NOT get it — mirrors `catalog:manage` / `variants:manage`).
+ * No key is renamed, duplicated, invented, or moved out of its `inventory` group
+ * (D2-6 / HG3-PERMISSION-STABILITY / owner I.5 — the group is display metadata,
+ * unrelated to which routes use the key). It gates every `item_identifier` write
+ * (create / deactivate / reactivate / DRAFT-correction delete); `catalog:view`
+ * covers every identifier read + scan-resolve. Not in `MODULE_OF_PERMISSION` —
+ * the `identifiers.barcode_qr` catalog capability (task 3.1) is the fine gate for
+ * BARCODE / QR writes, checked in the service; it requires no entitlement module.
+ * Not step-up — an identifier is not money / permission / secret / attribution.
+ */
+export const PHASE_3_5_TENANT_PERMISSIONS = [
+  'identifiers:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase35TenantPermission = (typeof PHASE_3_5_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the

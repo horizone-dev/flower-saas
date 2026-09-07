@@ -7,6 +7,7 @@ import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { resolveSlug, SLUG_MAX, versionConflict } from './catalog-write.helpers.js';
 import { requiredAttributeGap } from './attribute-definition.repository.js';
+import { assertProductVariantsHaveNoIdentifiers } from './identifier.repository.js';
 import {
   createDefaultVariant,
   nonArchivedVariantCount,
@@ -388,6 +389,11 @@ export class ProductRepository extends ScopedRepository {
           409,
         );
       }
+      // task 3.5 — a variant with an `item_identifier` cannot be cascade-deleted
+      // (the FK is ON DELETE RESTRICT). Refuse with a clean 409 instead of a raw
+      // FK error; the owner deletes the identifiers first (a DRAFT-target
+      // identifier delete is a hard delete).
+      await assertProductVariantsHaveNoIdentifiers(tx, id);
       await tx.product.delete({ where: { id } });
       await this.audit.record(tx, {
         action: 'catalog.product_deleted',

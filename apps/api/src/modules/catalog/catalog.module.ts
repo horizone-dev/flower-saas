@@ -18,6 +18,9 @@ import { VariantRepository } from './variant.repository.js';
 import { OptionGroupService, VariantService } from './variant.service.js';
 import { OptionGroupController } from './option-group.controller.js';
 import { ProductVariantController, VariantController } from './variant.controller.js';
+import { IdentifierRepository } from './identifier.repository.js';
+import { IdentifierService } from './identifier.service.js';
+import { IdentifierController } from './identifier.controller.js';
 
 /**
  * `catalog` module (Phase 3).
@@ -30,7 +33,12 @@ import { ProductVariantController, VariantController } from './variant.controlle
  *     auto default-variant creation + the "≥1 non-archived variant" gate for a
  *     non-CUSTOM product activation live in `ProductRepository`; explicit
  *     variant / option-group writes gate on the `variants` capability.
- * No identifiers / UOM / pricing / tax / inventory — later Task 3.x / Phase 5.
+ *   - Task 3.5: the scannable-code registry — `item_identifier` (SKU / BARCODE /
+ *     QR), VARIANT-only target, tenant-scoped, company/branch/price/stock-neutral.
+ *     BARCODE / QR writes gate on `identifiers.barcode_qr`; SKU writes do not.
+ *     The Task-3.4 default-variant restructure guard (`VARIANT_HAS_IDENTIFIERS`)
+ *     lives in `variant.repository` / `product.repository`.
+ * No UOM / pricing / tax / inventory — later Task 3.x / Phase 5.
  */
 @Module({
   providers: [
@@ -46,6 +54,8 @@ import { ProductVariantController, VariantController } from './variant.controlle
     VariantRepository,
     OptionGroupService,
     VariantService,
+    IdentifierRepository,
+    IdentifierService,
   ],
   controllers: [
     CatalogCapabilityController,
@@ -57,6 +67,7 @@ import { ProductVariantController, VariantController } from './variant.controlle
     OptionGroupController,
     ProductVariantController,
     VariantController,
+    IdentifierController,
   ],
   exports: [CatalogCapabilityService],
 })

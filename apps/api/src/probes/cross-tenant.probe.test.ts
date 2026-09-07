@@ -13,6 +13,7 @@ import {
   PHASE_1_TENANT_PERMISSIONS,
   PHASE_3_2_TENANT_PERMISSIONS,
   PHASE_3_4_TENANT_PERMISSIONS,
+  PHASE_3_5_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -57,6 +58,8 @@ describe('cross-tenant isolation probe suite', () => {
     attributeDefinitionId: '',
     variantId: '',
     optionGroupId: '',
+    identifierId: '',
+    identifierValue: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -160,6 +163,7 @@ describe('cross-tenant isolation probe suite', () => {
         ...PHASE_1_TENANT_PERMISSIONS,
         ...PHASE_3_2_TENANT_PERMISSIONS,
         ...PHASE_3_4_TENANT_PERMISSIONS,
+        ...PHASE_3_5_TENANT_PERMISSIONS,
       ],
     });
     ownerBTok = await mint('probe-owner-b', {
@@ -171,6 +175,7 @@ describe('cross-tenant isolation probe suite', () => {
         ...PHASE_1_TENANT_PERMISSIONS,
         ...PHASE_3_2_TENANT_PERMISSIONS,
         ...PHASE_3_4_TENANT_PERMISSIONS,
+        ...PHASE_3_5_TENANT_PERMISSIONS,
       ],
     });
 
@@ -243,6 +248,15 @@ describe('cross-tenant isolation probe suite', () => {
             `INSERT INTO option_group (id,"tenantId","productId","key","nameEn","updatedAt")
              VALUES (uuidv7(),$1,$2,'A_ONLY_GROUP','A only group',now()) RETURNING id`,
             [A.tenantId, A.productId],
+          )
+        ).rows[0].id;
+        // task 3.5 — an A-owned identifier on A's default variant to probe
+        A.identifierValue = 'A-ONLY-BARCODE-SECRET';
+        A.identifierId = (
+          await c2.query(
+            `INSERT INTO item_identifier (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+             VALUES (uuidv7(),$1,'VARIANT',$2,'BARCODE',$3,now()) RETURNING id`,
+            [A.tenantId, A.variantId, A.identifierValue],
           )
         ).rows[0].id;
       } finally {
@@ -696,6 +710,79 @@ describe('cross-tenant isolation probe suite', () => {
           { 'if-match': '"1"' },
         ),
       },
+      // ── task 3.5: item_identifier is tenant-scoped through RLS + the
+      // tenant-safe composite FK on the generated targetVariantId column. B
+      // cannot scan-resolve, list, create, delete or reactivate A's identifiers,
+      // and a scan-resolve never leaks A's value / target ids.
+      {
+        name: 'GET (scan-resolve) A identifier value as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/identifiers?value=${encodeURIComponent(A.identifierValue)}`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked:
+              !denied && [A.identifierId, A.variantId, A.productId].some((s) => blob.includes(s)),
+          };
+        },
+      },
+      {
+        name: 'GET / list A variant identifiers as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/identifiers?targetKind=VARIANT&targetId=${A.variantId}`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked:
+              !denied &&
+              [A.identifierId, A.identifierValue, 'A-ONLY-BARCODE-SECRET'].some((s) =>
+                blob.includes(s),
+              ),
+          };
+        },
+      },
+      {
+        name: 'POST an identifier on A variant as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          '/v1/catalog/identifiers',
+          ownerBTok,
+          { targetKind: 'VARIANT', targetId: A.variantId, codeType: 'SKU', value: 'B-INJECT' },
+          { 'idempotency-key': 'probe-b-id-inject-0001' },
+        ),
+      },
+      {
+        name: 'DELETE A identifier by id as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus('DELETE', `/v1/catalog/identifiers/${A.identifierId}`, ownerBTok),
+      },
+      {
+        name: 'POST reactivate A identifier as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/catalog/identifiers/${A.identifierId}/reactivate`,
+          ownerBTok,
+          undefined,
+          { 'idempotency-key': 'probe-b-id-react-0001' },
+        ),
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -959,11 +1046,13 @@ async function seed(url: string): Promise<void> {
              ('${PLAN_V}', 'max_pos_terminals', 5), ('${PLAN_V}', 'max_sessions_per_user', 20);
       INSERT INTO platform_user (id, email, name, "updatedAt")
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
-      -- catalog:view / catalog:manage are registered by the task 3.2 migration.
+      -- catalog:view / catalog:manage / variants:manage / identifiers:manage are
+      -- registered by the task 3.2 / 3.4 / 3.5 migrations.
       INSERT INTO permission_registry (key, realm, "groupKey", description, "addedInPhase")
       VALUES ('users:view','TENANT','admin','v',1),('users:manage','TENANT','admin','v',1),
              ('roles:manage','TENANT','admin','v',1),('audit:view','TENANT','admin','v',1),
-             ('settings:branch:manage','TENANT','admin','v',1),('settings:tenant:manage','TENANT','admin','v',1)
+             ('settings:branch:manage','TENANT','admin','v',1),('settings:tenant:manage','TENANT','admin','v',1),
+             ('identifiers:manage','TENANT','inventory','v',3)
       ON CONFLICT (key) DO NOTHING;
       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
       VALUES ('AED', 2, 'AED', 'UAE Dirham', 'درهم إماراتي');

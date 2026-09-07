@@ -57,6 +57,9 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   'option_value',
   'variant',
   'variant_option_value',
+  // Phase 3 (task 3.5) — the scannable-code registry (SKU / barcode / QR),
+  // tenant-scoped, company/branch/price/stock-neutral
+  'item_identifier',
 ]);
 
 /**

@@ -512,6 +512,39 @@ export interface VariantUpdateInput {
   optionValues?: VariantOptionSelectionInput[];
 }
 
+// ── identifiers — SKU / barcode / QR (task 3.5) ─────────────────────────────
+export type IdentifierCodeType = 'SKU' | 'BARCODE' | 'QR';
+export type IdentifierStatus = 'ACTIVE' | 'INACTIVE';
+
+export interface ItemIdentifierRow {
+  id: string;
+  /** VARIANT only in Phase 3a (INVENTORY_ITEM reserved for Phase 5) */
+  targetKind: 'VARIANT';
+  targetId: string;
+  codeType: IdentifierCodeType;
+  value: string;
+  status: IdentifierStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IdentifierCreateInput {
+  targetKind: 'VARIANT';
+  targetId: string;
+  codeType: IdentifierCodeType;
+  /** required for SKU / BARCODE; omit for QR (the server generates an opaque
+   *  value and rejects a client-supplied one) */
+  value?: string;
+}
+
+/** the scan-resolve projection — one ACTIVE identifier + its target summary */
+export interface IdentifierResolution {
+  identifier: ItemIdentifierRow;
+  target: { kind: 'VARIANT'; id: string };
+  variant: { id: string; productId: string; nameEn: string; status: VariantStatus };
+  product: { id: string; slug: string; nameEn: string; status: string };
+}
+
 export interface ProvisionTenantResponse {
   tenantId: string;
   companyId: string;
@@ -1088,6 +1121,38 @@ export class ApiClient {
       { method: 'POST', ifMatch: `"${expectedVersion}"`, idempotencyKey },
       (raw) => raw as VariantWithOptions,
     );
+  }
+
+  // ── identifiers — SKU / barcode / QR (task 3.5) ───────────────────────────
+  //   catalog:view reads / scan-resolve · identifiers:manage writes. No If-Match
+  //   (identity is immutable — no version column); create + reactivate carry an
+  //   Idempotency-Key; DELETE is plain (deactivate; hard for a DRAFT target).
+  createIdentifier(
+    input: IdentifierCreateInput,
+    idempotencyKey: string,
+  ): Promise<ItemIdentifierRow> {
+    return this.send('POST', '/v1/catalog/identifiers', input, idempotencyKey);
+  }
+  /** scan-resolve: a bare scanned value → at most one ACTIVE identifier (404 if
+   *  none, or the target variant is ARCHIVED) */
+  resolveIdentifier(value: string): Promise<IdentifierResolution> {
+    return this.get('/v1/catalog/identifiers', { value });
+  }
+  /** management view — ACTIVE + INACTIVE identifiers of one variant */
+  listVariantIdentifiers(variantId: string): Promise<ItemIdentifierRow[]> {
+    return this.get('/v1/catalog/identifiers', { targetKind: 'VARIANT', targetId: variantId });
+  }
+  /** normal removal — deactivates (ACTIVE → INACTIVE); a DRAFT-target identifier
+   *  is hard-deleted instead (nothing external ever committed it) */
+  deleteIdentifier(id: string): Promise<{ status: 'deactivated' | 'deleted' }> {
+    return this.call(
+      `/v1/catalog/identifiers/${id}`,
+      { method: 'DELETE' },
+      (raw) => raw as { status: 'deactivated' | 'deleted' },
+    );
+  }
+  reactivateIdentifier(id: string, idempotencyKey: string): Promise<ItemIdentifierRow> {
+    return this.send('POST', `/v1/catalog/identifiers/${id}/reactivate`, undefined, idempotencyKey);
   }
 
   overrideTenantLimit(

@@ -51,6 +51,11 @@ describe('auditable-action registry', () => {
       'catalog.variant_created',
       'catalog.variant_updated',
       'catalog.variant_status_changed',
+      // task 3.5 — identifiers (SKU / barcode / QR)
+      'catalog.identifier_created',
+      'catalog.identifier_deactivated',
+      'catalog.identifier_reactivated',
+      'catalog.identifier_deleted',
     ]) {
       expect(isSecurityEventAction(a), a).toBe(false);
     }

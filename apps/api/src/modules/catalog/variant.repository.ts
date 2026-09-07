@@ -5,6 +5,7 @@ import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { versionConflict } from './catalog-write.helpers.js';
+import { assertVariantHasNoIdentifiers } from './identifier.repository.js';
 import {
   deriveVariantName,
   resolveVariantCombination,
@@ -377,20 +378,27 @@ export async function hasDefaultVariant(tx: ScopedTx, productId: string): Promis
 
 /**
  * Remove the default variant when the product's option structure is about to
- * change (owner L-4). In task 3.4 nothing else can reference a variant
- * (`item_identifier` = 3.5, prices = 3.7/3.8, inventory = Phase 5) and the
- * default has no `variant_option_value` rows, so removal is always safe here —
- * re-check when those tasks land. Returns whether a row was removed.
+ * change (owner L-4). The default has no `variant_option_value` rows, so that is
+ * always safe — but as of task 3.5 it MAY carry an `item_identifier`. In that
+ * case the restructure is REFUSED (`VARIANT_HAS_IDENTIFIERS`, 409): identifiers
+ * are never silently cascaded away (owner "TASK 3.4 DEFAULT-VARIANT RESTRUCTURE
+ * GUARD"). The default variant row is locked `FOR UPDATE` first so a concurrent
+ * `POST /catalog/identifiers` on it either wins (this call then sees the row and
+ * 409s) or loses (this call deletes first, the identifier create then 404s).
+ * The `item_identifier → variant` FK is `ON DELETE RESTRICT` — the DB is the
+ * final backstop. Returns whether a row was removed.
  */
 export async function removeDefaultVariantForRestructure(
   tx: ScopedTx,
   productId: string,
 ): Promise<boolean> {
-  const def = await tx.variant.findFirst({
-    where: { productId, isDefault: true },
-    select: { id: true },
-  });
+  const locked = await tx.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "variant"
+     WHERE "productId" = ${productId}::uuid AND "isDefault" = true
+     FOR UPDATE`;
+  const def = locked[0];
   if (!def) return false;
+  await assertVariantHasNoIdentifiers(tx, def.id);
   await tx.variant.delete({ where: { id: def.id } });
   return true;
 }

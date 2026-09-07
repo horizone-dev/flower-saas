@@ -4,8 +4,8 @@ import path from 'node:path';
 import { describe, it, expect } from 'vitest';
 
 /**
- * HG3-NO-BT-BRANCH — structural proof (owner §21 / tasks 3.3 + 3.4 extension).
- * No catalog domain-logic file (tasks 3.2 + 3.3 + 3.4) may read
+ * HG3-NO-BT-BRANCH — structural proof (owner §21 / tasks 3.3 + 3.4 + 3.5
+ * extension). No catalog domain-logic file (tasks 3.2 + 3.3 + 3.4 + 3.5) may read
  * `tenant.businessTypeKey` / a business-type label to branch behaviour.
  * Behaviour is `product.fulfilmentStrategy` (via `usesFixedVariants`, never a
  * string literal) + enabled `tenant_catalog_capability` rows + configured
@@ -40,6 +40,11 @@ const DOMAIN_FILES = [
   'variant.controller.ts',
   'variant.service.ts',
   'variant.helpers.ts',
+  // task 3.5
+  'identifier.repository.ts',
+  'identifier.controller.ts',
+  'identifier.service.ts',
+  'identifier.helpers.ts',
 ];
 
 /** strip `//` line comments and `/* *\/` block comments */
@@ -47,7 +52,7 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
-describe('HG3-NO-BT-BRANCH — catalog domain code (tasks 3.2 + 3.3) never branches on Business Type', () => {
+describe('HG3-NO-BT-BRANCH — catalog domain code (tasks 3.2–3.5) never branches on Business Type', () => {
   for (const file of DOMAIN_FILES) {
     it(`${file} has no business-type reference in executable code`, () => {
       const code = stripComments(readFileSync(path.join(here, file), 'utf8'));

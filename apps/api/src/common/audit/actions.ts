@@ -95,6 +95,18 @@ export const AUDITABLE_ACTIONS = {
   'catalog.variant_updated': { resourceType: 'variant', security: false },
   'catalog.variant_status_changed': { resourceType: 'variant', security: false },
 
+  // ── identifiers — SKU / barcode / QR (task 3.5) ───────────────────────────
+  // Ordinary tenant catalog configuration — business events, NOT security
+  // events; they do NOT surface in `security_event` (the view already matches
+  // only `= 'catalog.template_applied'`, task 3.2). ONE audit row per successful
+  // public mutation. `identifier_deleted` = the narrow DRAFT-target hard-delete
+  // correction path; `identifier_deactivated` = the normal ACTIVE → INACTIVE
+  // removal on a non-DRAFT target.
+  'catalog.identifier_created': { resourceType: 'item_identifier', security: false },
+  'catalog.identifier_deactivated': { resourceType: 'item_identifier', security: false },
+  'catalog.identifier_reactivated': { resourceType: 'item_identifier', security: false },
+  'catalog.identifier_deleted': { resourceType: 'item_identifier', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

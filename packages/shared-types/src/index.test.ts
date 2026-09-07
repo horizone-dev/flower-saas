@@ -31,6 +31,15 @@ import {
   STRATEGIES_WITH_FIXED_VARIANTS,
   usesFixedVariants,
   variantOptionSignature,
+  IDENTIFIER_CODE_TYPES,
+  IDENTIFIER_STATUSES,
+  ACTIVE_IDENTIFIER_TARGET_KINDS,
+  RESERVED_IDENTIFIER_TARGET_KIND_INVENTORY_ITEM,
+  IDENTIFIER_VALUE_MAX_LENGTH,
+  SKU_VALUE_RE,
+  QR_VALUE_RE,
+  canonicalizeSku,
+  isValidBarcodeValue,
 } from './index.js';
 
 describe('@flower/shared-types schemas', () => {
@@ -234,5 +243,46 @@ describe('@flower/shared-types — variants + option groups (task 3.4)', () => {
         { optionGroupId: 'g-size', optionValueId: 'v-m' },
       ]),
     ).not.toBe(a);
+  });
+});
+
+describe('@flower/shared-types — identifiers (task 3.5)', () => {
+  it('closed code-type + status + target-kind sets; INVENTORY_ITEM is reserved-only', () => {
+    expect([...IDENTIFIER_CODE_TYPES]).toEqual(['SKU', 'BARCODE', 'QR']);
+    expect([...IDENTIFIER_STATUSES]).toEqual(['ACTIVE', 'INACTIVE']);
+    // owner decision 1 — VARIANT is the ONLY active target kind
+    expect([...ACTIVE_IDENTIFIER_TARGET_KINDS]).toEqual(['VARIANT']);
+    expect(RESERVED_IDENTIFIER_TARGET_KIND_INVENTORY_ITEM).toBe('INVENTORY_ITEM');
+    // the reserved value is NOT in the active set
+    expect(
+      (ACTIVE_IDENTIFIER_TARGET_KINDS as readonly string[]).includes(
+        RESERVED_IDENTIFIER_TARGET_KIND_INVENTORY_ITEM,
+      ),
+    ).toBe(false);
+    expect(IDENTIFIER_VALUE_MAX_LENGTH).toBe(128);
+  });
+
+  it('canonicalizeSku: trim + locale-independent upper-case; folds case-only differences', () => {
+    expect(canonicalizeSku('  abc-1 ')).toBe('ABC-1');
+    expect(canonicalizeSku('abc-1')).toBe(canonicalizeSku('ABC-1'));
+    expect(SKU_VALUE_RE.test(canonicalizeSku('rose-red.12'))).toBe(true);
+    expect(SKU_VALUE_RE.test('rose red')).toBe(false); // space rejected
+    expect(SKU_VALUE_RE.test('-lead')).toBe(false); // must start alnum
+    expect(SKU_VALUE_RE.test('A'.repeat(65))).toBe(false); // ≤ 64
+  });
+
+  it('isValidBarcodeValue: bounded, trimmed, control-char-free, never case-folded', () => {
+    expect(isValidBarcodeValue('5901234123457')).toBe(true);
+    expect(isValidBarcodeValue('abc-XYZ_123')).toBe(true); // case preserved by caller
+    expect(isValidBarcodeValue('')).toBe(false);
+    expect(isValidBarcodeValue(' 123')).toBe(false); // leading space
+    expect(isValidBarcodeValue('12\t3')).toBe(false); // control char
+    expect(isValidBarcodeValue('x'.repeat(129))).toBe(false);
+  });
+
+  it('QR_VALUE_RE matches a 40-char upper-hex opaque token', () => {
+    expect(QR_VALUE_RE.test('0123456789ABCDEF0123456789ABCDEF01234567')).toBe(true);
+    expect(QR_VALUE_RE.test('abcdef0123456789abcdef0123456789abcdef01')).toBe(false); // lower
+    expect(QR_VALUE_RE.test('0123')).toBe(false);
   });
 });

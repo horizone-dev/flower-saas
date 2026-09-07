@@ -6,6 +6,7 @@ import {
   PHASE_1_TENANT_PERMISSIONS,
   PHASE_3_2_TENANT_PERMISSIONS,
   PHASE_3_4_TENANT_PERMISSIONS,
+  PHASE_3_5_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   MODULE_OF_PERMISSION,
   STEP_UP_PERMISSIONS,
@@ -116,6 +117,21 @@ describe('@flower/permissions registry', () => {
     expect(PERMISSION_GROUP_OF['identifiers:manage']).toBe('inventory');
     // no second, semantically-equivalent identifier key was introduced
     expect(ALL_PERMISSIONS.filter((k) => k.includes('identifier'))).toEqual(['identifiers:manage']);
+  });
+
+  // ── task 3.5 — HG3-PERMISSION-STABILITY ─────────────────────────────────
+  it('task 3.5 activates ONLY the existing identifiers:manage key, unmoved', () => {
+    expect([...PHASE_3_5_TENANT_PERMISSIONS]).toEqual(['identifiers:manage']);
+    for (const k of PHASE_3_5_TENANT_PERMISSIONS) {
+      expect(isPermissionKey(k), k).toBe(true);
+      // still in `inventory` (display metadata) — NOT moved to `catalog` (D2-6 / I.5)
+      expect(PERMISSION_GROUP_OF[k]).toBe('inventory');
+      // not entitlement-gated (the `identifiers.barcode_qr` capability is the
+      // fine gate, checked in the service — it needs no module)
+      expect(MODULE_OF_PERMISSION[k]).toBeUndefined();
+      // an identifier write is not money / permission / secret / attribution
+      expect(requiresStepUp(k)).toBe(false);
+    }
   });
 });
 

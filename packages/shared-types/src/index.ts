@@ -306,6 +306,89 @@ export function variantOptionSignature(selections: readonly VariantOptionSelecti
     .join('|');
 }
 
+// --- identifiers — SKU / barcode / QR (Phase 3 task 3.5) — PHASE-3-PLAN §C.6 ---
+
+/**
+ * The closed set of identifier code types (ADR-0018 §5). Mirrors the
+ * `item_identifier_code_type_chk` DB CHECK.
+ *   - `SKU`     — internal stable code. OPTIONAL, manual, canonical (trim +
+ *                 upper-case). At most ONE ACTIVE SKU per variant.
+ *   - `BARCODE` — a generic scanner value (EAN-13 / UPC / Code128 / an internal
+ *                 code — no symbology parsing, no checksum). MANY ACTIVE per
+ *                 variant allowed, each value tenant-unique.
+ *   - `QR`      — a server-generated, opaque, cryptographically-random token
+ *                 (no tenant / customer / product / price / stock data, no
+ *                 embedded JSON). At most ONE ACTIVE QR per variant — 100 printed
+ *                 labels are the SAME value printed 100 times.
+ */
+export const IDENTIFIER_CODE_TYPES = ['SKU', 'BARCODE', 'QR'] as const;
+export type IdentifierCodeType = (typeof IDENTIFIER_CODE_TYPES)[number];
+export const identifierCodeTypeSchema = z.enum(IDENTIFIER_CODE_TYPES);
+
+/**
+ * Identifier lifecycle — `ACTIVE ↔ INACTIVE` on the SAME row (owner decision 5).
+ * Deactivation preserves the row and NEVER frees the value: `UNIQUE(tenantId,
+ * value)` spans both statuses, so a printed barcode/QR/SKU can never later
+ * resolve to a different target. Mirrors the `item_identifier_status_chk` CHECK.
+ */
+export const IDENTIFIER_STATUSES = ['ACTIVE', 'INACTIVE'] as const;
+export type IdentifierStatus = (typeof IDENTIFIER_STATUSES)[number];
+
+/**
+ * The identifier target kinds LEGAL at runtime + in the DB in Phase 3a (owner
+ * decision 1). Mirrors the `item_identifier_target_kind_chk` CHECK.
+ */
+export const ACTIVE_IDENTIFIER_TARGET_KINDS = ['VARIANT'] as const;
+export type IdentifierTargetKind = (typeof ACTIVE_IDENTIFIER_TARGET_KINDS)[number];
+
+/**
+ * A RESERVED FUTURE identifier target kind — documented, **not** legal in Phase
+ * 3a. `INVENTORY_ITEM` has no table (D2-11 / HG3-NO-PREMATURE-DOMAIN); a Phase-5
+ * migration widens the DB CHECK and adds real referential integrity to
+ * `inventory_item` before it becomes a legal value. Kept here so the distinction
+ * between "active" and "reserved" target kinds is explicit and testable.
+ */
+export const RESERVED_IDENTIFIER_TARGET_KIND_INVENTORY_ITEM = 'INVENTORY_ITEM' as const;
+
+/** Max stored identifier value length (the `item_identifier_value_chk` CHECK). */
+export const IDENTIFIER_VALUE_MAX_LENGTH = 128;
+
+/**
+ * SKU canonical grammar — applied AFTER `canonicalizeSku` (trim + upper-case).
+ * `A-Z 0-9 - _ . /`, first char `A-Z 0-9`, 1..64 chars. BARCODE / QR do NOT
+ * inherit the upper-casing (owner "SKU NORMALIZATION").
+ */
+export const SKU_VALUE_RE = /^[A-Z0-9][A-Z0-9._/-]{0,63}$/;
+
+/** A server-generated QR value — 40 upper-case hex chars (160 bits of entropy);
+ *  DB uniqueness is the collision backstop (owner "QR SEMANTICS"). */
+export const QR_VALUE_RE = /^[0-9A-F]{40}$/;
+
+/**
+ * Canonicalize a raw SKU: trim, then upper-case with the Unicode default case
+ * mapping (`toUpperCase()` is locale-INDEPENDENT in JS — unlike
+ * `toLocaleUpperCase()`). The caller then validates the result against
+ * `SKU_VALUE_RE`. `"abc-1"` and `"ABC-1"` canonicalize to the same SKU.
+ */
+export function canonicalizeSku(raw: string): string {
+  return raw.trim().toUpperCase();
+}
+
+/**
+ * Validate a BARCODE value (owner "BARCODE SEMANTICS"): non-empty after trim,
+ * ≤ 128 chars, no leading/trailing whitespace, no control characters. No
+ * symbology / checksum validation — a scanner code is accepted verbatim (minus
+ * surrounding whitespace). The value is NEVER case-folded.
+ */
+export function isValidBarcodeValue(trimmed: string): boolean {
+  return (
+    trimmed.length >= 1 &&
+    trimmed.length <= IDENTIFIER_VALUE_MAX_LENGTH &&
+    trimmed === trimmed.trim() &&
+    !/\p{Cc}/u.test(trimmed)
+  );
+}
+
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
  * counts"). Enforced by `LimitService` on create / activate / login.

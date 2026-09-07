@@ -100,7 +100,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_catalog_capability_foundation'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_core'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_attributes'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_variants$/);
+    expect(names.some((n) => n.endsWith('_catalog_variants'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_identifiers$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -777,17 +778,18 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       for (const r of rls.rows) expect(r.rls, `${r.relname} must be RLS-exempt`).toBe(false);
     });
 
-    it('no Identifier / UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
+    it('no UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
       const { rows } = await pool.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
       );
       const present = new Set(rows.map((r) => r.tablename));
       // product / category / product_type (task 3.2) + attribute_definition /
       // attribute_option / product_attribute_value (task 3.3) + option_group /
-      // option_value / variant / variant_option_value (task 3.4) are created
-      // below — the rest stay forbidden through Phase 3a.
+      // option_value / variant / variant_option_value (task 3.4) +
+      // item_identifier (task 3.5) are created below — the rest stay forbidden
+      // through Phase 3a. `item_identifier.target_kind` is VARIANT-only; the
+      // `inventory_item` table it will one day also target is NOT created.
       for (const forbidden of [
-        'item_identifier',
         'uom',
         'uom_conversion',
         'company_variant_uom_price',
@@ -2007,6 +2009,343 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       await pool.query(`DELETE FROM "role_permission" WHERE "tenantId" = $1`, [T]);
       await pool.query(`DELETE FROM "role" WHERE "tenantId" = $1`, [T]);
       await pool.query(`DELETE FROM "tenant" WHERE id = $1`, [T]);
+    });
+  });
+
+  // ── task 3.5 — identifiers (SKU / barcode / QR) ─────────────────────────────
+  // docs/phase-3/PHASE-3-PLAN.md §C.6. Exactly ONE new table `item_identifier`;
+  // NO pack UOM / price / currency / stock / inventory / company / branch /
+  // version column; targetKind VARIANT-only (INVENTORY_ITEM reserved, no table);
+  // RLS ENABLE + FORCE; the server-derived `targetVariantId` GENERATED column +
+  // tenant-safe composite FK ON DELETE RESTRICT; UNIQUE(tenantId,value) spanning
+  // every code type + status; partial uniques (one ACTIVE SKU / one ACTIVE QR per
+  // target; many ACTIVE BARCODE allowed); NO identifier-value backfill.
+  describe('identifiers schema (task 3.5)', () => {
+    const mkVariant = async (
+      tenant: string,
+      slug: string,
+      status = 'DRAFT',
+    ): Promise<{ cat: string; prod: string; variant: string }> => {
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,$2,'C',now()) RETURNING id`,
+          [tenant, `${slug}-c`],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'P','STOCKED',$4,now()) RETURNING id`,
+          [tenant, cat, `${slug}-p`, status === 'ARCHIVED' ? 'ACTIVE' : status],
+        )
+      ).rows[0].id as string;
+      const variant = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V',$3,now()) RETURNING id`,
+          [tenant, prod, status],
+        )
+      ).rows[0].id as string;
+      return { cat, prod, variant };
+    };
+    const cleanup = async (ids: { cat: string; prod: string }): Promise<void> => {
+      await pool
+        .query(
+          `DELETE FROM "item_identifier" WHERE "targetId" IN (SELECT id FROM "variant" WHERE "productId" = $1)`,
+          [ids.prod],
+        )
+        .catch(() => {});
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [ids.prod]);
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [ids.cat]);
+    };
+
+    it('creates exactly item_identifier with the expected columns — no pack/price/stock/company/branch/version', async () => {
+      const { rows } = await pool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'item_identifier'`,
+      );
+      const cols = rows.map((r) => r.column_name).sort();
+      expect(cols).toEqual(
+        [
+          'id',
+          'tenantId',
+          'targetKind',
+          'targetId',
+          'targetVariantId',
+          'codeType',
+          'value',
+          'status',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      for (const c of [
+        'packUomCode',
+        'packQty',
+        'price',
+        'sellAmountMinor',
+        'currencyCode',
+        'stock',
+        'onHand',
+        'companyId',
+        'branchId',
+        'version',
+      ]) {
+        expect(cols, `item_identifier.${c} must not exist`).not.toContain(c);
+      }
+      // `targetVariantId` is a STORED generated column — a client can never set it
+      const gen = await pool.query<{ is_generated: string }>(
+        `SELECT is_generated FROM information_schema.columns
+          WHERE table_name = 'item_identifier' AND column_name = 'targetVariantId'`,
+      );
+      expect(gen.rows[0]!.is_generated).toBe('ALWAYS');
+    });
+
+    it('CHECK constraints: targetKind VARIANT-only, codeType, status, bounded value', async () => {
+      const { rows } = await pool.query<{ conname: string; def: string }>(
+        `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE contype = 'c' AND conrelid = 'item_identifier'::regclass`,
+      );
+      const byName = Object.fromEntries(rows.map((r) => [r.conname, r.def]));
+      expect(byName['item_identifier_target_kind_chk']).toMatch(/VARIANT/);
+      expect(byName['item_identifier_target_kind_chk']).not.toMatch(/INVENTORY_ITEM/);
+      expect(byName['item_identifier_code_type_chk']).toMatch(/SKU.*BARCODE.*QR/s);
+      expect(byName['item_identifier_status_chk']).toMatch(/ACTIVE.*INACTIVE/s);
+      expect(byName['item_identifier_value_chk']).toBeTruthy();
+
+      const t = await mkVariant(TENANT_A, 'ii-chk');
+      // INVENTORY_ITEM is rejected at the DB (owner decision 1 — reserved, not legal)
+      await expect(
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'INVENTORY_ITEM',$2,'BARCODE','X',now())`,
+          [TENANT_A, t.variant],
+        ),
+      ).rejects.toThrow(/item_identifier_target_kind_chk/i);
+      // bad codeType
+      await expect(
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,'EAN','X',now())`,
+          [TENANT_A, t.variant],
+        ),
+      ).rejects.toThrow(/item_identifier_code_type_chk/i);
+      // whitespace-wrapped / control-char value
+      await expect(
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,'BARCODE',' leadingspace',now())`,
+          [TENANT_A, t.variant],
+        ),
+      ).rejects.toThrow(/item_identifier_value_chk/i);
+      await cleanup(t);
+    });
+
+    it('RLS ENABLE + FORCE + policy; no-GUC read → zero rows; flower_app is NOBYPASSRLS', async () => {
+      const meta = await pool.query<{ rls: boolean; force: boolean; policies: number }>(
+        `SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
+                (SELECT count(*) FROM pg_policies p WHERE p.tablename = c.relname) AS policies
+           FROM pg_class c WHERE c.relname = 'item_identifier'`,
+      );
+      expect(meta.rows[0]!.rls).toBe(true);
+      expect(meta.rows[0]!.force).toBe(true);
+      expect(Number(meta.rows[0]!.policies)).toBeGreaterThanOrEqual(1);
+
+      const t = await mkVariant(TENANT_A, 'ii-rls');
+      await pool.query(
+        `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+         VALUES (uuidv7(),$1,'VARIANT',$2,'SKU','II-RLS',now())`,
+        [TENANT_A, t.variant],
+      );
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        const n = Number(
+          (await c.query(`SELECT count(*)::int AS n FROM "item_identifier"`)).rows[0].n,
+        );
+        expect(n, 'no-GUC read of item_identifier').toBe(0);
+        const sup = await c.query<{ rolbypassrls: boolean }>(
+          `SELECT rolbypassrls FROM pg_roles WHERE rolname = '${DB_ROLES.app}'`,
+        );
+        expect(sup.rows[0]!.rolbypassrls).toBe(false);
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+      await cleanup(t);
+    });
+
+    it('tenant-safe composite FK on the generated targetVariantId; cross-tenant + missing variant rejected', async () => {
+      const fks = await pool.query<{ def: string }>(
+        `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+          WHERE conname = 'item_identifier_tenant_variant_fkey'`,
+      );
+      expect(fks.rows[0]!.def).toMatch(/FOREIGN KEY \("tenantId", "targetVariantId"\)/);
+      expect(fks.rows[0]!.def).toMatch(/REFERENCES "?variant"?\("tenantId", "?id"?\)/);
+      expect(fks.rows[0]!.def).toMatch(/ON DELETE RESTRICT/);
+      expect(fks.rows[0]!.def).not.toMatch(/ON DELETE CASCADE/);
+
+      const a = await mkVariant(TENANT_A, 'ii-fk-a');
+      const b = await mkVariant(TENANT_B, 'ii-fk-b');
+      // tenant A identifier pointing at tenant B's variant → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,'SKU','II-XT',now())`,
+          [TENANT_A, b.variant],
+        ),
+      ).rejects.toThrow(/item_identifier_tenant_variant_fkey|foreign key/i);
+      // a non-existent same-tenant variant → rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT','ffffffff-ffff-7fff-8fff-ffffffffffff','SKU','II-NX',now())`,
+          [TENANT_A],
+        ),
+      ).rejects.toThrow(/item_identifier_tenant_variant_fkey|foreign key/i);
+      await cleanup(a);
+      await cleanup(b);
+    });
+
+    it('identifier → variant FK is RESTRICT, not CASCADE — a variant with an identifier cannot be deleted', async () => {
+      const t = await mkVariant(TENANT_A, 'ii-restrict');
+      await pool.query(
+        `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+         VALUES (uuidv7(),$1,'VARIANT',$2,'SKU','II-RESTRICT',now())`,
+        [TENANT_A, t.variant],
+      );
+      await expect(pool.query(`DELETE FROM "variant" WHERE id = $1`, [t.variant])).rejects.toThrow(
+        /item_identifier_tenant_variant_fkey|violates foreign key|still referenced/i,
+      );
+      // and a DRAFT-product hard-delete is likewise blocked by the same FK
+      await expect(pool.query(`DELETE FROM "product" WHERE id = $1`, [t.prod])).rejects.toThrow(
+        /foreign key|still referenced/i,
+      );
+      await cleanup(t);
+    });
+
+    it('UNIQUE(tenantId, value) spans every code type AND both statuses — a value is never reused', async () => {
+      const t = await mkVariant(TENANT_A, 'ii-uniq');
+      await pool.query(
+        `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","status","updatedAt")
+         VALUES (uuidv7(),$1,'VARIANT',$2,'BARCODE','SHARED-1','INACTIVE',now())`,
+        [TENANT_A, t.variant],
+      );
+      // same value as a DIFFERENT code type → still rejected
+      await expect(
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,'SKU','SHARED-1',now())`,
+          [TENANT_A, t.variant],
+        ),
+      ).rejects.toThrow(/item_identifier_tenantId_value_key|duplicate key/i);
+      // the INACTIVE historical value still blocks a new ACTIVE row (no reuse)
+      await expect(
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,'BARCODE','SHARED-1',now())`,
+          [TENANT_A, t.variant],
+        ),
+      ).rejects.toThrow(/item_identifier_tenantId_value_key|duplicate key/i);
+      await cleanup(t);
+    });
+
+    it('partial uniques: one ACTIVE SKU + one ACTIVE QR per target; many ACTIVE BARCODE allowed', async () => {
+      const idx = await pool.query<{ indexname: string; indexdef: string }>(
+        `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'item_identifier'`,
+      );
+      const byName = Object.fromEntries(idx.rows.map((r) => [r.indexname, r.indexdef]));
+      expect(byName['item_identifier_one_active_sku_key']).toMatch(/UNIQUE/);
+      expect(byName['item_identifier_one_active_sku_key']).toMatch(/WHERE.*SKU.*ACTIVE/is);
+      expect(byName['item_identifier_one_active_qr_key']).toMatch(/WHERE.*QR.*ACTIVE/is);
+
+      const t = await mkVariant(TENANT_A, 'ii-partial');
+      const ins = (codeType: string, value: string, status = 'ACTIVE') =>
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","status","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,$3,$4,$5,now())`,
+          [TENANT_A, t.variant, codeType, value, status],
+        );
+      await ins('SKU', 'II-SKU-1');
+      await expect(ins('SKU', 'II-SKU-2')).rejects.toThrow(
+        /item_identifier_one_active_sku_key|duplicate key/i,
+      );
+      // an INACTIVE second SKU is fine (history)
+      await expect(ins('SKU', 'II-SKU-3', 'INACTIVE')).resolves.toBeTruthy();
+      await ins('QR', '0123456789ABCDEF0123456789ABCDEF01234567');
+      await expect(ins('QR', 'FEDCBA9876543210FEDCBA9876543210FEDCBA98')).rejects.toThrow(
+        /item_identifier_one_active_qr_key|duplicate key/i,
+      );
+      // multiple ACTIVE BARCODE rows are allowed
+      await expect(ins('BARCODE', 'II-BC-1')).resolves.toBeTruthy();
+      await expect(ins('BARCODE', 'II-BC-2')).resolves.toBeTruthy();
+      await cleanup(t);
+    });
+
+    it('identifiers:manage is registered + backfilled to owner/admin only', async () => {
+      const reg = await pool.query<{ key: string; realm: string; groupKey: string }>(
+        `SELECT key, realm, "groupKey" FROM permission_registry WHERE key = 'identifiers:manage'`,
+      );
+      expect(reg.rows).toHaveLength(1);
+      expect(reg.rows[0]!.realm).toBe('TENANT');
+      expect(reg.rows[0]!.groupKey).toBe('inventory'); // NOT moved to catalog (D2-6 / I.5)
+
+      const T = '0000dddd-0000-7000-8000-000000350435';
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1,'ibf','ibf','AE','ACTIVE','00000000-0000-7000-8000-000000000002', now())
+         ON CONFLICT (id) DO NOTHING`,
+        [T],
+      );
+      const roleIds: Record<string, string> = {};
+      for (const [key, isSystem] of [
+        ['owner', true],
+        ['admin', true],
+        ['manager', true],
+        ['custom_role', false],
+      ] as const) {
+        const r = await pool.query(
+          `INSERT INTO role (id,"tenantId",key,name,"isSystem","updatedAt")
+           VALUES (uuidv7(),$1,$2,$2,$3, now()) RETURNING id`,
+          [T, key, isSystem],
+        );
+        roleIds[key] = r.rows[0].id;
+      }
+      const backfill = `
+        ALTER TABLE "role"            NO FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", 'identifiers:manage'
+          FROM "role" r WHERE r."isSystem" = true AND r."key" IN ('owner','admin')
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        ALTER TABLE "role"            FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`;
+      await pool.query(backfill);
+      await pool.query(backfill); // idempotent
+
+      const perms = async (roleId: string): Promise<string[]> =>
+        (
+          await pool.query<{ permissionKey: string }>(
+            `SELECT "permissionKey" FROM "role_permission" WHERE "roleId" = $1`,
+            [roleId],
+          )
+        ).rows.map((r) => r.permissionKey);
+      expect(await perms(roleIds['owner']!)).toEqual(['identifiers:manage']);
+      expect(await perms(roleIds['admin']!)).toEqual(['identifiers:manage']);
+      expect(await perms(roleIds['manager']!)).toEqual([]);
+      expect(await perms(roleIds['custom_role']!)).toEqual([]);
+
+      await pool.query(`DELETE FROM "role_permission" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "role" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "tenant" WHERE id = $1`, [T]);
+    });
+
+    it('security_event view is UNCHANGED by task 3.5', async () => {
+      const { rows } = await pool.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
+      );
+      expect(rows[0]!.definition).not.toMatch(/identifier/i);
+      expect(rows[0]!.definition).not.toMatch(/item_identifier/i);
+      expect(rows[0]!.definition).toMatch(/catalog\.template_applied/);
     });
   });
 

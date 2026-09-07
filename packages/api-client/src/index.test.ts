@@ -241,4 +241,52 @@ describe('@flower/api-client', () => {
       'http://api.test/v1/catalog/variants/var1/activate',
     );
   });
+
+  it('catalog: identifier methods carry the right preconditions (task 3.5)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ id: 'i1', status: 'ACTIVE' }));
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    // create — Idempotency-Key, no If-Match
+    await client.createIdentifier(
+      { targetKind: 'VARIANT', targetId: 'var1', codeType: 'SKU', value: 'rose-red' },
+      'idem-id-1',
+    );
+    expect(fetchMock.mock.calls[0]![1]!.method).toBe('POST');
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({ 'idempotency-key': 'idem-id-1' });
+    expect(fetchMock.mock.calls[0]![1]!.headers).not.toHaveProperty('if-match');
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('http://api.test/v1/catalog/identifiers');
+
+    // scan-resolve — bare value query
+    await client.resolveIdentifier('5901234123457');
+    expect(String(fetchMock.mock.calls[1]![0])).toBe(
+      'http://api.test/v1/catalog/identifiers?value=5901234123457',
+    );
+
+    // list-by-target — targetKind + targetId query
+    await client.listVariantIdentifiers('var1');
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(
+      'http://api.test/v1/catalog/identifiers?targetKind=VARIANT&targetId=var1',
+    );
+
+    // delete — plain, no If-Match / Idempotency-Key
+    await client.deleteIdentifier('i1');
+    const del = fetchMock.mock.calls[3]![1]!;
+    expect(del.method).toBe('DELETE');
+    expect(del.headers).not.toHaveProperty('if-match');
+    expect(String(fetchMock.mock.calls[3]![0])).toBe('http://api.test/v1/catalog/identifiers/i1');
+
+    // reactivate — Idempotency-Key
+    await client.reactivateIdentifier('i1', 'idem-react-1');
+    expect(fetchMock.mock.calls[4]![1]!.method).toBe('POST');
+    expect(fetchMock.mock.calls[4]![1]!.headers).toMatchObject({
+      'idempotency-key': 'idem-react-1',
+    });
+    expect(String(fetchMock.mock.calls[4]![0])).toBe(
+      'http://api.test/v1/catalog/identifiers/i1/reactivate',
+    );
+  });
 });

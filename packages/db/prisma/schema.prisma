@@ -1389,3 +1389,70 @@ model VariantOptionValue {
   @@index([tenantId, optionValueId])
   @@map("variant_option_value")
 }
+
+// ══════════════════════ identifiers — SKU / barcode / QR (task 3.5) ══════════
+// docs/phase-3/PHASE-3-PLAN.md §C.6 / ADR-0018 §5·7. The single scannable-code
+// registry for the whole catalog — one `item_identifier` table for every
+// business type (HG3-GENERIC-CATALOG). Tenant-scoped, company / branch / price /
+// currency / stock-neutral (D2-2): a scan resolves the same VARIANT tenant-wide;
+// pricing + availability layer on later (Tasks 3.7 / 3.8) and stock in Phase 5.
+//
+// Owner-locked Task 3.5 decisions:
+//   1. `targetKind` is **VARIANT-only** at runtime + in the DB. `INVENTORY_ITEM`
+//      is a documented RESERVED future value (`@flower/shared-types`
+//      `RESERVED_IDENTIFIER_TARGET_KIND_INVENTORY_ITEM`) — no `inventory_item`
+//      table exists (D2-11); a Phase-5 migration widens the CHECK only once real
+//      referential integrity to `inventory_item` can be added.
+//   2. SKU is OPTIONAL, manual, canonical (trim + upper-case); ≤ 1 ACTIVE SKU
+//      per variant. No numbering service / sequence / format generator.
+//   3. `UNIQUE (tenantId, value)` spans **every** code type AND both statuses —
+//      a deactivated value is reserved to its historical row forever and is
+//      NEVER reused for another target (a printed barcode/QR/SKU can never later
+//      resolve to a different variant).
+//   4. NO pack UOM (`packUomCode` / `packQty`) — Task 3.6 owns those together
+//      with the UOM registry that can validate them.
+//   5. Identity fields (`codeType` / `value` / `targetKind` / `targetId`) are
+//      immutable after create — no PUT. Lifecycle is `ACTIVE ↔ INACTIVE` on the
+//      SAME row (reactivate never creates a new row).
+//   6. DB-enforced tenant-safe VARIANT target integrity via the server-derived
+//      `targetVariantId` GENERATED column + composite FK `(tenantId,
+//      targetVariantId) → variant(tenantId, id)` **ON DELETE RESTRICT** — once a
+//      variant has an identifier it cannot be deleted / restructured away; the
+//      DB is the final backstop behind the service's `VARIANT_HAS_IDENTIFIERS`
+//      409. Prisma models the scalar columns only (the generated column + the
+//      composite FK + the partial unique indexes live in the migration).
+//
+// `tenant.businessTypeKey` is NEVER read (HG3-NO-BT-BRANCH) — an identifier's
+// behaviour comes only from `codeType` + the `identifiers.barcode_qr` capability
+// (BARCODE / QR writes only) + the `identifiers:manage` permission.
+
+/// A scannable code (SKU / BARCODE / QR) pointing at one catalog target. See the
+/// block comment above for the six owner-locked rules. Tenant-owned, RLS
+/// ENABLE + FORCE. No `version` column — the row carries no editable metadata
+/// (owner "CONCURRENCY"); lifecycle races are handled with a `FOR UPDATE` row
+/// lock + a status predicate + the global unique constraint + idempotency.
+model ItemIdentifier {
+  id       String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId String @db.Uuid
+  /// VARIANT only in Phase 3a (CHECK). `INVENTORY_ITEM` is reserved for Phase 5.
+  targetKind String
+  /// the target row's id — for `VARIANT`, a `variant.id` in the same tenant
+  /// (enforced by the migration's tenant-safe composite FK on the server-derived
+  /// `targetVariantId` generated column).
+  targetId String @db.Uuid
+  /// SKU | BARCODE | QR (CHECK). Immutable.
+  codeType String
+  /// canonical stored value — SKU is trimmed + upper-cased; BARCODE / QR are
+  /// trimmed but never case-folded (owner "SKU NORMALIZATION"). Immutable.
+  /// Tenant-unique across every code type and both statuses (owner decision 3).
+  value String
+  /// ACTIVE | INACTIVE (CHECK). Deactivation preserves the row + never frees the
+  /// value. Reactivation flips this back on the same row.
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, value])
+  @@index([tenantId, targetKind, targetId])
+  @@map("item_identifier")
+}
