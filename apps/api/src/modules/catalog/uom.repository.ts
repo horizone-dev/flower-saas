@@ -123,19 +123,33 @@ export class UomRepository extends ScopedRepository {
       if (clash) {
         throw new DomainError('UOM_CODE_TAKEN', `a unit with code "${code}" already exists`, 409);
       }
-      const created = await tx.uom.create({
-        data: {
-          tenantId: requireTenantContext().tenantId,
-          code,
-          family: input.family,
-          perBaseNum,
-          perBaseDen,
-          maxDecimals,
-          nameEn: input.nameEn,
-          nameAr: input.nameAr ?? null,
-        },
-        select: CUSTOM_SELECT,
-      });
+      const created = await tx.uom
+        .create({
+          data: {
+            tenantId: requireTenantContext().tenantId,
+            code,
+            family: input.family,
+            perBaseNum,
+            perBaseDen,
+            maxDecimals,
+            nameEn: input.nameEn,
+            nameAr: input.nameAr ?? null,
+          },
+          select: CUSTOM_SELECT,
+        })
+        .catch((e: unknown) => {
+          // a concurrent create of the SAME brand-new code lost the
+          // `UNIQUE (tenantId, code)` race — map it to the same deterministic
+          // 409 the pre-check raises (never a raw Prisma error → 500).
+          if ((e as { code?: string } | null)?.code === 'P2002') {
+            throw new DomainError(
+              'UOM_CODE_TAKEN',
+              `a unit with code "${code}" already exists`,
+              409,
+            );
+          }
+          throw e;
+        });
       await this.audit.record(tx, {
         action: 'catalog.uom_created',
         resourceType: 'uom',

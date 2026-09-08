@@ -831,6 +831,27 @@ describe('UOM / pack conversion (task 3.6, integration)', () => {
         ),
       ).toBe(0);
     });
+
+    it('concurrent create of the same brand-new code: the loser gets a clean 409, never a raw 500', async () => {
+      const dup = await withHeldTxn(
+        async (c) => {
+          // another request inserts the row first, not yet committed — the
+          // API create's pre-check SELECT cannot see it, so it proceeds to the
+          // INSERT and blocks on `UNIQUE (tenantId, code)`.
+          await c.query(
+            `INSERT INTO "uom" (id,"tenantId","code","family","nameEn","updatedAt")
+             VALUES (uuidv7(),$1,'raceunit3','EACH','R3',now())`,
+            [tenantA],
+          );
+        },
+        () => mkUom(ownerA, { code: 'raceunit3', family: 'EACH', nameEn: 'dup' }),
+      );
+      expect(dup.statusCode).not.toBe(500);
+      expect(dup.statusCode).toBe(409);
+      expect(errCode(dup)).toBe('UOM_CODE_TAKEN');
+      // exactly one row survived
+      expect(await count(`SELECT count(*)::int AS n FROM "uom" WHERE "code"='raceunit3'`)).toBe(1);
+    });
   });
 
   // ════════════ capability matrix (proofs 32–33, 17–18) ═══════════════════
