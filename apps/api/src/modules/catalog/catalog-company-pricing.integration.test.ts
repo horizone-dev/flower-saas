@@ -423,6 +423,79 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
       ).toBe(1);
     });
 
+    it('the PUT response IS this mutation own committed result (built in the write txn, not a post-commit GET)', async () => {
+      const { variantId } = await mkVariant(ownerA, 'linz', { base: 'piece' });
+
+      const r1 = await putPrices(
+        coAED,
+        variantId,
+        [{ uomCode: 'piece', sell: money('500', 'AED', 2) }],
+        '"0"',
+      );
+      expect(r1.statusCode, r1.payload).toBe(200);
+      expect(r1.json()).toEqual({
+        version: 1,
+        priceSetExists: true,
+        prices: [
+          {
+            uomCode: 'piece',
+            sell: { amountMinor: '500', currency: 'AED', exponent: 2 },
+            resolvable: true,
+          },
+        ],
+      });
+      expect(r1.headers.etag).toBe('"1"');
+      const capturedFirst = JSON.stringify(r1.json());
+
+      // a later writer commits v2 with a different set
+      const r2 = await putPrices(
+        coAED,
+        variantId,
+        [{ uomCode: 'piece', sell: money('999', 'AED', 2) }],
+        '"1"',
+      );
+      expect(priceJson(r2).version).toBe(2);
+      expect(priceJson(r2).prices[0]!.sell.amountMinor).toBe('999');
+
+      // the first PUT response is unchanged — it reflected v1 + its own submitted
+      // set, NOT a read that could observe the later writer
+      expect(JSON.stringify(r1.json())).toBe(capturedFirst);
+    });
+
+    it('concurrent PUTs to the same (company, variant): the winner response == its own committed set, at v1', async () => {
+      const { variantId } = await mkVariant(ownerA, 'racy', { base: 'piece' });
+      const [a, b] = await Promise.all([
+        putPrices(coAED, variantId, [{ uomCode: 'piece', sell: money('111', 'AED', 2) }], '"0"'),
+        putPrices(coAED, variantId, [{ uomCode: 'piece', sell: money('222', 'AED', 2) }], '"0"'),
+      ]);
+      const ok = [a, b].filter((r) => r.statusCode === 200);
+      const conflict = [a, b].filter((r) => r.statusCode === 409);
+      expect(ok).toHaveLength(1);
+      expect(conflict).toHaveLength(1);
+      expect(conflict[0]!.statusCode).not.toBe(500);
+      expect(errCode(conflict[0]!)).toBe('PRICE_SET_VERSION_CONFLICT');
+
+      const okJson = priceJson(ok[0]!);
+      expect(okJson.version).toBe(1);
+      expect(['111', '222']).toContain(okJson.prices[0]!.sell.amountMinor);
+      // the winner response amount == the single stored row == one submitted set
+      const stored = await sql<{ a: string }>(
+        `SELECT "sellAmountMinor"::text AS a FROM company_variant_uom_price WHERE "companyId"=$1 AND "variantId"=$2`,
+        [coAED, variantId],
+      );
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.a).toBe(okJson.prices[0]!.sell.amountMinor);
+    });
+
+    it('variant.version is untouched by a company price write', async () => {
+      const { variantId } = await mkVariant(ownerA, 'vv', { base: 'piece' });
+      const before = (await getVariant(ownerA, variantId)).version;
+      await putPrices(coAED, variantId, [{ uomCode: 'piece', sell: money('5', 'AED', 2) }], '"0"');
+      await putPrices(coSAR, variantId, [{ uomCode: 'piece', sell: money('6', 'SAR', 2) }], '"0"');
+      await putPrices(coAED, variantId, [], '"1"');
+      expect((await getVariant(ownerA, variantId)).version).toBe(before);
+    });
+
     it('stale same-company If-Match → 409; company A edit does not invalidate company B', async () => {
       const { variantId } = await mkVariant(ownerA, 'ab-isolation', { base: 'piece' });
       const a1 = await putPrices(
@@ -656,28 +729,57 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
       ).rejects.toThrow(/foreign key|violates/i);
     });
 
-    it('wrong currency exponent → 400 via the API (malformed MoneyDTO); and rejected by the DB (code,exponent) FK on a direct write', async () => {
+    it('MoneyDTO structural error → 400; a structurally-valid wrong-exponent → 422; correct exponent → success; direct DB wrong exponent → FK reject', async () => {
       const { variantId } = await mkVariant(ownerA, 'wrongexp', { base: 'piece' });
-      const p = await putPrices(
+
+      // (a) STRUCTURAL — a non-integer amountMinor / a non-3-letter currency /
+      //     an unknown key => 400 (the Task-3.7 structural money schema)
+      const structural = await req(
+        'PUT',
+        P(coAED, variantId),
+        ownerA,
+        {
+          prices: [{ uomCode: 'piece', sell: { amountMinor: '1.5', currency: 'AE', exponent: 2 } }],
+        },
+        { 'if-match': '"0"' },
+      );
+      expect(structural.statusCode).toBe(400);
+
+      // (b) SEMANTIC — a structurally-valid MoneyDTO whose exponent disagrees
+      //     with the authoritative AED exponent (2) => 422 pricing/money domain error
+      const semantic = await putPrices(
         coAED,
         variantId,
-        [{ uomCode: 'piece', sell: money('1', 'AED', 3) }],
+        [{ uomCode: 'piece', sell: money('500', 'AED', 3) }],
         '"0"',
       );
-      // the body schema's `moneyDtoSchema` rejects an exponent that disagrees
-      // with the currency → 400 VALIDATION_FAILED (a malformed DTO, not a
-      // pricing-rule violation)
-      expect(p.statusCode).toBe(400);
+      expect(semantic.statusCode).toBe(422);
+      expect(errCode(semantic)).toBe('PRICE_CURRENCY_INVALID');
+
+      // (c) correct exponent => success
+      expect(
+        (
+          await putPrices(
+            coAED,
+            variantId,
+            [{ uomCode: 'piece', sell: money('500', 'AED', 2) }],
+            '"0"',
+          )
+        ).statusCode,
+      ).toBe(200);
+
+      // (d) direct DB write of (AED, 3) => rejected by the (code, exponent) FK
+      const { variantId: v2 } = await mkVariant(ownerA, 'wrongexp2', { base: 'piece' });
       await sql(
         `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt") VALUES (uuidv7(),$1,$2,$3,now())`,
-        [tenantA, coAED, variantId],
+        [tenantA, coAED, v2],
       );
       await expect(
         sql(
           `INSERT INTO company_variant_uom_price
              (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
            VALUES (uuidv7(),$1,$2,$3,'piece','1','AED',3,now())`,
-          [tenantA, coAED, variantId],
+          [tenantA, coAED, v2],
         ),
       ).rejects.toThrow(/foreign key|violates/i);
     });
@@ -891,11 +993,31 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
       expect(r.json()).toEqual({ price: null, source: null, reason: 'NO_PRICE_SET' });
     });
 
-    it('a malformed uomCode in resolve → 422 (the one 422-for-a-real-error case)', async () => {
+    it('resolve validates uomCode BEFORE any no-price short-circuit', async () => {
+      // a company/variant with NO price-set aggregate at all
+      const { variantId } = await mkVariant(ownerA, 'validorder', { base: 'piece' });
+
+      // a syntactically invalid canonical UOM → 422 UOM_INVALID_CODE, NOT 200 NO_PRICE_SET
+      const bad = await resolve(coAED, variantId, 'uomCode=BOX%2Fvalue');
+      expect(bad.statusCode).toBe(422);
+      expect(errCode(bad)).toBe('UOM_INVALID_CODE');
+
+      // a valid uomCode with no aggregate → 200 { price: null, NO_PRICE_SET }
+      const good = await resolve(coAED, variantId, 'uomCode=piece');
+      expect(good.statusCode).toBe(200);
+      expect(good.json()).toEqual({ price: null, source: null, reason: 'NO_PRICE_SET' });
+
+      // an unknown query key (branchId) still → 400
+      const branch = await resolve(coAED, variantId, 'uomCode=piece&branchId=abc');
+      expect(branch.statusCode).toBe(400);
+    });
+
+    it('a malformed uomCode in resolve → 422 even when a price set exists', async () => {
       const { variantId } = await mkVariant(ownerA, 'malformed', { base: 'piece' });
       await putPrices(coAED, variantId, [{ uomCode: 'piece', sell: money('1', 'AED', 2) }], '"0"');
       const r = await resolve(coAED, variantId, 'uomCode=BOX%2F12');
       expect(r.statusCode).toBe(422);
+      expect(errCode(r)).toBe('UOM_INVALID_CODE');
     });
   });
 

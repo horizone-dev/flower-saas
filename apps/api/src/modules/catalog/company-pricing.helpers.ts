@@ -36,8 +36,12 @@ export type CompanyPriceResolveReason =
  * Returns the canonical `Money`. Throws a deterministic `DomainError` — never a
  * raw `ZodError` / `RangeError` leak.
  *
- *  - currency must be known + carry its authoritative exponent (belt & braces —
- *    the body schema's `moneyDtoSchema` already enforced this);
+ *  - currency must be known + carry its authoritative exponent — this is the
+ *    PRIMARY semantic check (the Task 3.7 body schema `structuralMoneyDtoSchema`
+ *    validates SHAPE only → `400`; a structurally-valid wrong-exponent DTO
+ *    reaches here and becomes a deterministic `422`; the DB composite FK
+ *    `(sellCurrencyCode, sellCurrencyExponent) → currency(code, exponent)` is the
+ *    hard backstop);
  *  - amount must be int64-safe (`Money` overflow guard);
  *  - `sellAmountMinor > 0` (D-8 — a master sell price is strictly positive;
  *    free/gift is discount / promotion / complimentary-line semantics, later);

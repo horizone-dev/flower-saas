@@ -164,7 +164,12 @@ export class CompanyPricingRepository extends ScopedRepository {
   ): Promise<CompanyPriceSetView> {
     const tenantId = requireTenantContext().tenantId;
     try {
-      await this.scoped(async (tx) => {
+      // The PUT response is built INSIDE the write transaction and returned
+      // directly (never a post-commit GET) — so it is exactly THIS mutation's
+      // linearizable committed result: `nextVersion`, the submitted SELL set,
+      // and the `resolvable` flags for this write. A later writer cannot alter
+      // an earlier PUT's response.
+      return await this.scoped(async (tx): Promise<CompanyPriceSetView> => {
         // 1. company FOR SHARE — serialises against a future defaultCurrency change (Inv-3)
         const companyRows = await tx.$queryRaw<{ id: string; defaultCurrency: string | null }[]>`
           SELECT "id", "defaultCurrency" FROM "company" WHERE "id" = ${companyId}::uuid FOR SHARE`;
@@ -317,13 +322,35 @@ export class CompanyPricingRepository extends ScopedRepository {
             prices: sellMapFromNormalized(normalized),
           },
         });
+
+        // 11. build THIS mutation's result from the transaction (NOT a post-commit
+        //     GET) — `nextVersion` + the submitted SELL set + `resolvable` flags
+        //     computed against the effective registry for this write.
+        const reachable = (code: string): boolean => {
+          if (code === base) return true;
+          try {
+            registry.convert(Quantity.parse('1'), code, base);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        return {
+          version: nextVersion,
+          priceSetExists: true,
+          prices: normalized
+            .map((n) => ({
+              uomCode: n.uomCode,
+              sell: n.money.toDTO(),
+              resolvable: reachable(n.uomCode),
+            }))
+            .sort((a, b) => a.uomCode.localeCompare(b.uomCode)),
+        };
       });
     } catch (e) {
       if (e instanceof DomainError) throw e;
-      mapPricingDbError(e); // throws — a known FK/unique race → deterministic; else re-thrown as-is
+      return mapPricingDbError(e); // `never` — a known FK/unique race → deterministic; else re-thrown as-is
     }
-    // 11. return the fresh view + version
-    return this.getForCompanyVariant(companyId, variantId);
   }
 
   // ── shared helpers ───────────────────────────────────────────────────────

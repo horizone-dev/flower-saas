@@ -453,17 +453,39 @@ export type IdentifierPackInput = z.infer<typeof identifierPackInputSchema>;
 export const COMPANY_PRICE_REPLACE_MAX = 100;
 
 /**
+ * The Task-3.7 replace-set body validates the SELL price for **structure only**
+ * at the request-schema layer — a malformed `MoneyDTO` (non-integer `amountMinor`,
+ * a `currency` that is not a 3-uppercase-letter code, a non-integer `exponent`,
+ * an unknown key) is a `400`. The **semantic** money checks — currency is a real
+ * enabled currency, `exponent` is that currency's authoritative value, the amount
+ * is int64-safe, `> 0`, and equals the company's default currency — run
+ * server-side (`assertSellMoney` in the pricing repository) and surface as a
+ * deterministic **`422`** pricing/money domain error (Task 3.7 D-2 / D-8 / Inv-3).
+ * The generic `moneyDtoSchema` (which folds the semantic exponent check into the
+ * schema) is intentionally **not** used here — that distinction is the Task-3.7
+ * boundary; no other API is changed.
+ */
+export const structuralMoneyDtoSchema = z
+  .object({
+    amountMinor: z.string().regex(/^-?\d+$/, 'amountMinor must be an integer string (minor units)'),
+    currency: z.string().regex(/^[A-Z]{3}$/, 'currency must be a 3-letter ISO code'),
+    exponent: z.number().int(),
+  })
+  .strict();
+export type StructuralMoneyDto = z.infer<typeof structuralMoneyDtoSchema>;
+
+/**
  * One SELL price-tier in the replace-set body. **SELL only** — `purchase_*` is a
  * schema-only Phase-5 foundation, absent from every Task 3.7 wire contract (D-6).
  * The amount must be `> 0` and in the company's default currency (D-2 / D-8 /
- * Inv-3), validated server-side + DB-enforced.
+ * Inv-3), validated server-side (→ `422`) + DB-enforced (composite FKs).
  */
 export const companyPriceEntrySchema = z
   .object({
     /** the variant base UOM OR a UOM resolvable to it via the Task 3.6 conversion model */
     uomCode: z.string().min(1).max(40),
-    /** the tax-EXCLUSIVE / net sell price */
-    sell: moneyDtoSchema,
+    /** the tax-EXCLUSIVE / net sell price — structure here, semantics server-side */
+    sell: structuralMoneyDtoSchema,
   })
   .strict();
 export type CompanyPriceEntry = z.infer<typeof companyPriceEntrySchema>;
