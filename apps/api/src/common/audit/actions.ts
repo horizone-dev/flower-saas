@@ -131,6 +131,23 @@ export const AUDITABLE_ACTIONS = {
   // task 3.7 API, so it never appears in the payload.
   'catalog.company_price_changed': { resourceType: 'company_variant_price_set', security: false },
 
+  // ── branch price override + branch availability (task 3.8) ────────────────
+  // Ordinary tenant commercial / merchandising configuration — a business event,
+  // NOT a security event (D2-10). NO `security_event` change (`catalog.` is not a
+  // security prefix). NO realtime / outbox (task 3.10 — audit only).
+  //   * `catalog.branch_price_changed` — ONE row per branch price replace-set
+  //     mutation (incl. `PUT []`); resource = the `branch_variant_price_set`
+  //     aggregate; payload = THIS branch's semantic before/after SELL-override
+  //     map only (never a sibling branch's data, never `purchase`).
+  //   * `catalog.branch_availability_changed` — ONE row per successful bulk
+  //     availability `PUT`; resource = the `branch` (resourceId = the authorized
+  //     requestedBranchId — NOT an arbitrary `branch_variant_availability` row
+  //     id, Correction 4); payload = `{ variants: { <id>: { available, explicit } } }`
+  //     bounded to the request's variants. An idempotency replay writes NO
+  //     second audit row.
+  'catalog.branch_price_changed': { resourceType: 'branch_variant_price_set', security: false },
+  'catalog.branch_availability_changed': { resourceType: 'branch', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

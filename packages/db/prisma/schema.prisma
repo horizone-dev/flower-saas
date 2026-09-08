@@ -611,6 +611,11 @@ model Branch {
   posTerminals PosTerminal[]
   providerCreds ProviderCredential[]
 
+  /// task 3.8 — FK targets only (no column added / retyped):
+  ///   `(tenantId, id)`             ← `branch_variant_*` tenant-safe FK
+  ///   `(tenantId, companyId, id)`  ← proves branch ∈ company at the DB
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
   @@index([tenantId, companyId])
   @@map("branch")
 }
@@ -1604,4 +1609,93 @@ model CompanyVariantUomPrice {
   @@index([tenantId, companyId, variantId])
   @@index([tenantId, uomCode])
   @@map("company_variant_uom_price")
+}
+
+// ══════════════════════ branch price override + availability (task 3.8) ══════
+// docs/phase-3/PHASE-3-PLAN.md §C.9 (corrected) / ADR-0018 §5·§7 / D2-2·D2-3.
+// One layer deeper than task 3.7: tenant + company + BRANCH scope. Branch-GUC
+// RLS (narrows to `app.branch_id` when set — a single-branch session — else
+// tenant-wide). Company↔branch price-row integrity is service-enforced under
+// the shared `company_variant_price_set` lock (§3) — there is NO FK from the
+// branch aggregate to the company aggregate, and NO row-level FK from the
+// branch price row to the company price row.
+
+/// task 3.8 — the per (tenant, company, branch, variant) branch-price concurrency
+/// aggregate. Carries the `version` (the replace-set `If-Match` target, BD-3 —
+/// NEVER `variant.version`). INDEPENDENTLY MONOTONIC: created at 1, only ever
+/// incremented, NEVER reset, NEVER deleted (there is NO `DELETE …/prices`
+/// endpoint — BD-4). MAY validly exist with ZERO `branch_variant_uom_price` rows
+/// and ZERO company pricing (a first `PUT { prices: [] } If-Match "0"` creates it
+/// — Correction 2). NO FK to `company_variant_price_set`. RLS ENABLE + FORCE
+/// (tenant + branch-GUC).
+model BranchVariantPriceSet {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  companyId String   @db.Uuid
+  branchId  String   @db.Uuid
+  variantId String   @db.Uuid
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, companyId, branchId, variantId])
+  @@index([tenantId, companyId, branchId])
+  @@map("branch_variant_price_set")
+}
+
+/// task 3.8 — the INDEPENDENT stored SELL override Money for (company, branch,
+/// variant, uomCode). NEVER `company_price × factor` (ADR-0018 §5). SELL-only —
+/// NO `purchase_*` (BD-9). The override currency MUST equal
+/// `company.defaultCurrency` (composite FK, ON UPDATE RESTRICT); the
+/// `(code, exponent)` pair MUST be authoritative (FK to `currency`, ON UPDATE
+/// RESTRICT). A matching `company_variant_uom_price` row MUST exist (BD-1) —
+/// service-enforced under the shared `company_variant_price_set` lock, NO
+/// row-level FK. Belongs to `BranchVariantPriceSet` by the natural composite key
+/// — CASCADE-deletes with the aggregate. NO `version` column. RLS ENABLE + FORCE
+/// (tenant + branch-GUC).
+model BranchVariantUomPrice {
+  id        String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String @db.Uuid
+  companyId String @db.Uuid
+  branchId  String @db.Uuid
+  variantId String @db.Uuid
+  /// the variant `baseUomCode` OR a UOM reachable to it via the Task 3.6
+  /// effective conversion model (validated in the service — legitimacy only,
+  /// never used to derive the amount). CHECK on the canonical shape.
+  uomCode   String
+
+  overrideAmountMinor      BigInt
+  overrideCurrencyCode     String
+  overrideCurrencyExponent Int    @db.SmallInt
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, companyId, branchId, variantId, uomCode])
+  @@index([tenantId, companyId, branchId, variantId])
+  @@index([tenantId, uomCode])
+  @@index([tenantId, variantId])
+  @@map("branch_variant_uom_price")
+}
+
+/// task 3.8 — a boolean merchandising flag per (company, branch, variant). NOT a
+/// quantity (D2-11). Absence of a row ⇒ available. Independent of pricing (BD-6)
+/// — validation needs only that the branch is in scope and the variant exists in
+/// the tenant. NO `version` (BD-5). NO posVisible / webVisible / displayOrder /
+/// reason / note / quantity / stock state (BD-7). A `variant` hard-delete
+/// cascades these rows. RLS ENABLE + FORCE (tenant + branch-GUC).
+model BranchVariantAvailability {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  companyId String   @db.Uuid
+  branchId  String   @db.Uuid
+  variantId String   @db.Uuid
+  available Boolean
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, companyId, branchId, variantId])
+  @@index([tenantId, companyId, branchId])
+  @@index([tenantId, variantId])
+  @@map("branch_variant_availability")
 }

@@ -54,6 +54,19 @@
   processing). The server stores `(key, scope, request_hash, response_snapshot,
 expires_at)`; a repeat with the same key + hash returns the stored response; a
   repeat with a different hash is a 409.
+- **Structural vs semantic validation.** A malformed request shape (missing /
+  wrong-typed field, unknown body key, an out-of-bounds array length) is a
+  **`400`** from the request schema. A **semantic / domain** violation on a
+  structurally-valid payload (a duplicate identity in a bulk set, a currency that
+  disagrees with an authoritative reference, a value that breaks a business rule)
+  is a **typed `DomainError`** raised by the controller/service **after** the
+  parse — `422` for a business-rule violation, `400` only for a canonical-form
+  requirement (e.g. "entries must be sorted"). A bulk-write client MAY sort
+  entries into canonical order for transport but MUST NOT silently de-duplicate —
+  a duplicate is surfaced (client-side error before the call, or the server's
+  authoritative `422`), never collapsed to one arbitrary value. Task 3.8's branch
+  availability bulk `PUT` is the reference: `structuralSetBranchAvailabilitySchema`
+  → `400`; `duplicateVariantIds` → `422 BRANCH_AVAILABILITY_DUPLICATE_VARIANT`.
 
 ## Concurrency
 

@@ -317,3 +317,93 @@ describe('@flower/shared-types — UOM / pack conversion (task 3.6)', () => {
     ).toBe(false);
   });
 });
+
+describe('@flower/shared-types — branch price override + availability (task 3.8)', () => {
+  it('branchPriceEntrySchema is SELL-only (no purchase), strict, structural money', async () => {
+    const m = await import('./index.js');
+    const ok = m.branchPriceEntrySchema.safeParse({
+      uomCode: 'box',
+      sell: { amountMinor: '500', currency: 'AED', exponent: 2 },
+    });
+    expect(ok.success).toBe(true);
+    // a stray `purchase` field → rejected (strict)
+    expect(
+      m.branchPriceEntrySchema.safeParse({
+        uomCode: 'box',
+        sell: { amountMinor: '500', currency: 'AED', exponent: 2 },
+        purchase: { amountMinor: '1', currency: 'AED', exponent: 2 },
+      }).success,
+    ).toBe(false);
+    // structural money failure (non-integer amount / non-ISO currency)
+    expect(
+      m.branchPriceEntrySchema.safeParse({
+        uomCode: 'box',
+        sell: { amountMinor: '1.5', currency: 'AE', exponent: 2 },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('replaceBranchPricesSchema is strict + bounded; no DELETE type; no branchId in the body', async () => {
+    const m = await import('./index.js');
+    expect(m.BRANCH_PRICE_REPLACE_MAX).toBe(100);
+    expect(m.replaceBranchPricesSchema.safeParse({ prices: [] }).success).toBe(true);
+    expect(m.replaceBranchPricesSchema.safeParse({ prices: [], branchId: 'x' }).success).toBe(
+      false,
+    );
+    expect(
+      m.replaceBranchPricesSchema.safeParse({
+        prices: new Array(101).fill({
+          uomCode: 'piece',
+          sell: { amountMinor: '1', currency: 'AED', exponent: 2 },
+        }),
+      }).success,
+    ).toBe(false);
+  });
+
+  it('structuralSetBranchAvailabilitySchema validates SHAPE only — NO .refine owns the 422 duplicate', async () => {
+    const m = await import('./index.js');
+    expect(m.BRANCH_AVAILABILITY_MAX).toBe(500);
+    const s = m.structuralSetBranchAvailabilitySchema;
+    // a DUPLICATE variantId passes STRUCTURAL validation (the 422 is a server-side
+    // DomainError, not a schema refinement — Correction H)
+    const v = '00000000-0000-7000-8000-000000000001';
+    expect(
+      s.safeParse({
+        entries: [
+          { variantId: v, available: true },
+          { variantId: v, available: false },
+        ],
+      }).success,
+    ).toBe(true);
+    // 0 entries / 501 entries / non-uuid / non-boolean / unknown key → structural fail (400)
+    expect(s.safeParse({ entries: [] }).success).toBe(false);
+    expect(s.safeParse({ entries: [{ variantId: 'nope', available: true }] }).success).toBe(false);
+    expect(s.safeParse({ entries: [{ variantId: v, available: 1 }] }).success).toBe(false);
+    expect(s.safeParse({ entries: [{ variantId: v, available: true }], extra: 1 }).success).toBe(
+      false,
+    );
+  });
+
+  it('duplicateVariantIds + isAscendingByVariantId are pure data helpers', async () => {
+    const m = await import('./index.js');
+    expect(
+      m.duplicateVariantIds([{ variantId: 'a' }, { variantId: 'b' }, { variantId: 'a' }]),
+    ).toEqual(['a']);
+    expect(m.duplicateVariantIds([{ variantId: 'a' }, { variantId: 'b' }])).toEqual([]);
+    expect(
+      m.isAscendingByVariantId([{ variantId: 'a' }, { variantId: 'b' }, { variantId: 'c' }]),
+    ).toBe(true);
+    expect(m.isAscendingByVariantId([{ variantId: 'b' }, { variantId: 'a' }])).toBe(false);
+    expect(m.isAscendingByVariantId([{ variantId: 'a' }, { variantId: 'a' }])).toBe(false); // strict
+  });
+
+  it('exports the branch resolve reasons; no `DELETE` schema', async () => {
+    const m = (await import('./index.js')) as Record<string, unknown>;
+    expect(m['BRANCH_PRICE_RESOLVE_REASONS']).toEqual([
+      'NO_PRICE_SET',
+      'UOM_NOT_PRICED',
+      'UOM_UNRESOLVABLE',
+    ]);
+    expect(m['deleteBranchPricesSchema']).toBeUndefined();
+  });
+});

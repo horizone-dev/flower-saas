@@ -6,6 +6,7 @@ import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { versionConflict } from './catalog-write.helpers.js';
+import { countTenantWideBranchPriceUomDependencies } from './branch-price-integrity.repo.js';
 import {
   buildRegistry,
   canonicalUomCode,
@@ -229,11 +230,19 @@ export class UomRepository extends ScopedRepository {
         // still referenced. `company_variant_uom_price (tenantId, uomCode)` index.
         tx.companyVariantUomPrice.count({ where: { uomCode: code } }),
       ]);
-      if (inBase + inConv + inPack + inPrice > 0) {
+      // task 3.8 (§10.2 / Correction G) — a `branch_variant_uom_price` row for
+      // this code across ANY branch of the tenant. Computed AFTER `uom FOR UPDATE`
+      // is held (no pre-lock count → no TOCTOU). A STANDALONE await — never inside
+      // the Promise.all above — because the tenant-wide helper neutralizes
+      // `app.branch_id` for one grouped SELECT and no other tx query may overlap
+      // that window (Correction F). Message names a count only — no branchIds.
+      const inBranchPrice = await countTenantWideBranchPriceUomDependencies(tx, { uomCode: code });
+      if (inBase + inConv + inPack + inPrice + inBranchPrice > 0) {
         throw new DomainError(
           'UOM_IN_USE',
           `unit "${code}" is referenced by ${inBase} variant base UOM(s), ${inConv} conversion(s), ` +
-            `${inPack} pack identifier(s) and ${inPrice} company price(s) — remove them first`,
+            `${inPack} pack identifier(s), ${inPrice} company price(s) and ${inBranchPrice} branch ` +
+            `price override(s) — remove them first`,
           409,
         );
       }

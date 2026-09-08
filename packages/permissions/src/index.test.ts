@@ -8,6 +8,7 @@ import {
   PHASE_3_4_TENANT_PERMISSIONS,
   PHASE_3_5_TENANT_PERMISSIONS,
   PHASE_3_7_TENANT_PERMISSIONS,
+  PHASE_3_8_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   MODULE_OF_PERMISSION,
   STEP_UP_PERMISSIONS,
@@ -146,6 +147,21 @@ describe('@flower/permissions registry', () => {
     // is a foundation module), and a price is catalog config → no step-up (D-9)
     expect(MODULE_OF_PERMISSION['pricing:manage']).toBeUndefined();
     expect(requiresStepUp('pricing:manage')).toBe(false);
+  });
+
+  // ── task 3.8 — HG3-PERMISSION-STABILITY ─────────────────────────────────
+  it('task 3.8 activates ONLY the existing branch_price:manage key, unmoved', () => {
+    expect([...PHASE_3_8_TENANT_PERMISSIONS]).toEqual(['branch_price:manage']);
+    expect(isPermissionKey('branch_price:manage')).toBe(true);
+    // a long-standing catalog-group key — not invented, not duplicated / renamed
+    expect(PERMISSION_GROUP_OF['branch_price:manage']).toBe('catalog');
+    expect(ALL_PERMISSIONS.filter((k) => k === 'branch_price:manage')).toHaveLength(1);
+    // no separate `branch_availability` key/capability; catalog is a foundation
+    // module (no `MODULE_OF_PERMISSION` entry); a branch price is catalog config
+    // → not step-up (BD-12)
+    expect(MODULE_OF_PERMISSION['branch_price:manage']).toBeUndefined();
+    expect(requiresStepUp('branch_price:manage')).toBe(false);
+    expect(isPermissionKey('branch_availability:manage')).toBe(false);
   });
 });
 

@@ -65,6 +65,9 @@ describe('auditable-action registry', () => {
       'catalog.product_conversions_changed',
       // task 3.7 — company per-UOM sale pricing
       'catalog.company_price_changed',
+      // task 3.8 — branch price override + branch availability
+      'catalog.branch_price_changed',
+      'catalog.branch_availability_changed',
     ]) {
       expect(isSecurityEventAction(a), a).toBe(false);
     }

@@ -4,6 +4,7 @@ import {
   PHASE_3_4_TENANT_PERMISSIONS,
   PHASE_3_5_TENANT_PERMISSIONS,
   PHASE_3_7_TENANT_PERMISSIONS,
+  PHASE_3_8_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -32,15 +33,21 @@ import {
  * ALREADY-RESERVED `pricing:manage`; `manager` does NOT (mirrors
  * `catalog:manage` / `variants:manage` / `identifiers:manage`). Existing tenants
  * get the identical backfill in the task 3.7 migration. Not step-up (D-9).
+ *
+ * Phase 3 task 3.8 (owner BD-12): `owner` + `admin` also gain the ALREADY-RESERVED
+ * `branch_price:manage`; `manager` does NOT by default (mirrors the keys above).
+ * Existing tenants get the identical backfill in the task 3.8 migration. Not
+ * step-up. Gates BOTH branch-price writes and branch-availability writes.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
-/** catalog:view + catalog:manage (3.2) + variants:manage (3.4) + identifiers:manage (3.5) + pricing:manage (3.7) */
+/** catalog:view + catalog:manage (3.2) + variants:manage (3.4) + identifiers:manage (3.5) + pricing:manage (3.7) + branch_price:manage (3.8) */
 const CATALOG = [
   ...PHASE_3_2_TENANT_PERMISSIONS,
   ...PHASE_3_4_TENANT_PERMISSIONS,
   ...PHASE_3_5_TENANT_PERMISSIONS,
   ...PHASE_3_7_TENANT_PERMISSIONS,
+  ...PHASE_3_8_TENANT_PERMISSIONS,
 ];
 const CATALOG_VIEW = 'catalog:view';
 

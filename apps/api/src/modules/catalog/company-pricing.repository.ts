@@ -9,6 +9,7 @@ import { DomainError, NotFoundError } from '../../common/errors/domain-error.js'
 import { versionConflict } from './catalog-write.helpers.js';
 import { isBuiltinUom } from './uom.helpers.js';
 import { UomRepository, loadEffectiveVariantRegistry } from './uom.repository.js';
+import { findTenantWideBlockedCompanyPriceUoms } from './branch-price-integrity.repo.js';
 import {
   assertSellMoney,
   mapPricingDbError,
@@ -282,6 +283,35 @@ export class CompanyPricingRepository extends ScopedRepository {
           where: { companyId, variantId },
           select: { uomCode: true, sellAmountMinor: true, sellCurrencyCode: true },
         });
+
+        // 6b. task 3.8 — while `company_variant_price_set` is FOR UPDATE-locked
+        //     (the shared synchronization point), block the removal of a company
+        //     UOM price that ANY branch of this company currently overrides —
+        //     otherwise the branch override would be orphaned (BD-1 / BD-2).
+        //     Runs REGARDLESS of the `branch_pricing` capability state. The
+        //     tenant-wide dependency query neutralizes ONLY `app.branch_id` for
+        //     exactly one grouped SELECT and is a STANDALONE await — never inside
+        //     a Promise.all (Correction F). Its error payload carries only the
+        //     blocked UOM codes + a row count — never a sibling `branchId`.
+        const incomingUoms = new Set(normalized.map((n) => n.uomCode));
+        const removedUoms = beforeRows.map((r) => r.uomCode).filter((c) => !incomingUoms.has(c));
+        if (removedUoms.length > 0) {
+          const blocked = await findTenantWideBlockedCompanyPriceUoms(tx, {
+            companyId,
+            variantId,
+            uomCodes: removedUoms,
+          });
+          if (blocked.blockedUomCodes.length > 0) {
+            throw new DomainError(
+              'COMPANY_PRICE_HAS_BRANCH_OVERRIDE',
+              `${blocked.dependentRowCount} branch override row(s) reference the company UOM price(s) ` +
+                `being removed (${blocked.blockedUomCodes.join(', ')}) — clear those branch overrides ` +
+                `first (PUT …/branches/:branchId/variants/:variantId/prices [])`,
+              409,
+              [{ field: 'uomCode', issue: 'referenced by a branch override' }],
+            );
+          }
+        }
 
         // 7. replace existing price rows
         await tx.companyVariantUomPrice.deleteMany({ where: { companyId, variantId } });

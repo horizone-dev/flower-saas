@@ -103,7 +103,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_catalog_variants'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_identifiers'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_uom'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_company_pricing$/);
+    expect(names.some((n) => n.endsWith('_catalog_company_pricing'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_branch_pricing$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -789,12 +790,12 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       // attribute_option / product_attribute_value (task 3.3) + option_group /
       // option_value / variant / variant_option_value (task 3.4) +
       // item_identifier (task 3.5) + uom / uom_conversion (task 3.6) +
-      // company_variant_price_set / company_variant_uom_price (task 3.7) are
-      // created below — the rest stay forbidden through Phase 3a. `branch_*`
-      // pricing / availability is task 3.8; `inventory_*` is Phase 5.
+      // company_variant_price_set / company_variant_uom_price (task 3.7) +
+      // branch_variant_price_set / branch_variant_uom_price /
+      // branch_variant_availability (task 3.8) are created below — the rest stay
+      // forbidden through Phase 3a. `inventory_*` / `order` / `payment` /
+      // `journal_*` are Phase 3b / Phase 5.
       for (const forbidden of [
-        'branch_variant_uom_price',
-        'branch_variant_availability',
         'inventory_item',
         'branch_inventory_balance',
         'inventory_movement',
@@ -2886,12 +2887,13 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
 
     beforeAll(seedCurrencies);
 
-    it('records the migration and it is the LAST one', async () => {
+    it('records the migration (task 3.8 is now the last one)', async () => {
       const { rows } = await pool.query<{ migration_name: string }>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
       );
       const names = rows.map((r) => r.migration_name);
-      expect(names.at(-1)).toMatch(/_catalog_company_pricing$/);
+      expect(names.some((n) => n.endsWith('_catalog_company_pricing'))).toBe(true);
+      expect(names.at(-1)).toMatch(/_catalog_branch_pricing$/);
     });
 
     it('creates exactly company_variant_price_set / company_variant_uom_price — no discount / list-price / tax / effective-date / branch / stock column', async () => {
@@ -3191,6 +3193,376 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
       );
       expect(rows[0]!.definition).not.toMatch(/company_price|company_variant/i);
+    });
+  });
+
+  // ── task 3.8 — branch price override + branch availability ─────────────────
+  // docs/phase-3/PHASE-3-PLAN.md §C.9 (corrected). Three tenant-owned tables +
+  // TWO additive FK-target UNIQUEs on `branch`. Branch-GUC RLS. Currency FKs
+  // RESTRICT. NO FK from the branch aggregate to the company aggregate, NO
+  // row-level FK from the branch price row to the company price row. NO new role.
+  describe('branch pricing schema (task 3.8)', () => {
+    const seedCurrencies = async (): Promise<void> => {
+      for (const [code, exp] of [
+        ['AED', 2],
+        ['SAR', 2],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
+           VALUES ($1, $2, 'x', $1, $1) ON CONFLICT (code) DO NOTHING`,
+          [code, exp],
+        );
+      }
+    };
+    const mk = async (
+      tenant: string,
+      slug: string,
+      currency: string | null = 'AED',
+    ): Promise<{ company: string; branch: string; cat: string; prod: string; variant: string }> => {
+      const company = (
+        await pool.query(
+          `INSERT INTO company (id,"tenantId","legalNameEn","defaultCurrency","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now()) RETURNING id`,
+          [tenant, `${slug} Co`, currency],
+        )
+      ).rows[0].id as string;
+      const branch = (
+        await pool.query(
+          `INSERT INTO "branch" (id,"tenantId","companyId",name,"updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now()) RETURNING id`,
+          [tenant, company, `${slug} Branch`],
+        )
+      ).rows[0].id as string;
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,$2,'C',now()) RETURNING id`,
+          [tenant, `${slug}-c`],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'P','STOCKED','DRAFT',now()) RETURNING id`,
+          [tenant, cat, `${slug}-p`],
+        )
+      ).rows[0].id as string;
+      const variant = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","status","baseUomCode","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','DRAFT','piece',now()) RETURNING id`,
+          [tenant, prod],
+        )
+      ).rows[0].id as string;
+      return { company, branch, cat, prod, variant };
+    };
+    const clean = async (ids: { company: string; cat: string; prod: string }): Promise<void> => {
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [ids.prod]).catch(() => {});
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [ids.cat]).catch(() => {});
+      await pool.query(`DELETE FROM "company" WHERE id = $1`, [ids.company]).catch(() => {});
+    };
+    const cols = async (t: string): Promise<string[]> => {
+      const { rows } = await pool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+        [t],
+      );
+      return rows.map((r) => r.column_name).sort();
+    };
+    const mkPriceSet = async (ids: {
+      company: string;
+      branch: string;
+      variant: string;
+    }): Promise<string> =>
+      (
+        await pool.query(
+          `INSERT INTO branch_variant_price_set (id,"tenantId","companyId","branchId","variantId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,now()) RETURNING id`,
+          [TENANT_A, ids.company, ids.branch, ids.variant],
+        )
+      ).rows[0].id as string;
+
+    beforeAll(seedCurrencies);
+
+    it('exact columns — no version on the price row, no purchase / tax / discount / effective-date / stock column', async () => {
+      expect(await cols('branch_variant_price_set')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'companyId',
+          'branchId',
+          'variantId',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      expect(await cols('branch_variant_uom_price')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'companyId',
+          'branchId',
+          'variantId',
+          'uomCode',
+          'overrideAmountMinor',
+          'overrideCurrencyCode',
+          'overrideCurrencyExponent',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      expect(await cols('branch_variant_availability')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'companyId',
+          'branchId',
+          'variantId',
+          'available',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      for (const forbidden of [
+        'version',
+        'purchaseAmountMinor',
+        'purchaseCurrencyCode',
+        'taxCategoryKey',
+        'discountAmountMinor',
+        'listAmountMinor',
+        'promotionId',
+        'priceListId',
+        'effectiveFrom',
+        'effectiveTo',
+        'onHandQty',
+      ]) {
+        expect(await cols('branch_variant_uom_price')).not.toContain(forbidden);
+      }
+      for (const forbidden of [
+        'version',
+        'posVisible',
+        'webVisible',
+        'displayOrder',
+        'reason',
+        'note',
+        'quantity',
+        'onHandQty',
+      ]) {
+        expect(await cols('branch_variant_availability')).not.toContain(forbidden);
+      }
+      const { rows: t } = await pool.query<{ data_type: string }>(
+        `SELECT data_type FROM information_schema.columns
+          WHERE table_name = 'branch_variant_uom_price' AND column_name = 'overrideAmountMinor'`,
+      );
+      expect(t[0]!.data_type).toBe('bigint');
+    });
+
+    it('branch_variant_uom_price CHECKs: uom shape, override > 0, currency shape, exponent range', async () => {
+      const ids = await mk(TENANT_A, 'chk');
+      await mkPriceSet(ids);
+      const base = `INSERT INTO branch_variant_uom_price
+        (id,"tenantId","companyId","branchId","variantId","uomCode","overrideAmountMinor","overrideCurrencyCode","overrideCurrencyExponent","updatedAt")
+        VALUES (uuidv7(),$1,$2,$3,$4,$5,$6,$7,$8,now())`;
+      const p = [TENANT_A, ids.company, ids.branch, ids.variant];
+      await expect(pool.query(base, [...p, 'PIECE', 500, 'AED', 2])).rejects.toThrow(
+        /uom_code_shape/i,
+      );
+      await expect(pool.query(base, [...p, 'piece', 0, 'AED', 2])).rejects.toThrow(
+        /override_amount_positive/i,
+      );
+      await expect(pool.query(base, [...p, 'piece', -5, 'AED', 2])).rejects.toThrow(
+        /override_amount_positive/i,
+      );
+      await expect(pool.query(base, [...p, 'piece', 500, 'aed', 2])).rejects.toThrow(
+        /override_currency_shape/i,
+      );
+      await expect(pool.query(base, [...p, 'piece', 500, 'AED', 4])).rejects.toThrow(
+        /override_exponent_range/i,
+      );
+      // a valid row inserts
+      await pool.query(base, [...p, 'piece', 500, 'AED', 2]);
+      await clean(ids);
+    });
+
+    it('override currency MUST equal company.defaultCurrency (composite FK); (code,exponent) MUST be authoritative', async () => {
+      const ids = await mk(TENANT_A, 'cur', 'AED');
+      await mkPriceSet(ids);
+      const base = `INSERT INTO branch_variant_uom_price
+        (id,"tenantId","companyId","branchId","variantId","uomCode","overrideAmountMinor","overrideCurrencyCode","overrideCurrencyExponent","updatedAt")
+        VALUES (uuidv7(),$1,$2,$3,$4,'piece',$5,$6,$7,now())`;
+      const p = [TENANT_A, ids.company, ids.branch, ids.variant];
+      // SAR ≠ the company's AED default → company-currency FK reject
+      await expect(pool.query(base, [...p, 500, 'SAR', 2])).rejects.toThrow(
+        /foreign key|violates/i,
+      );
+      // AED with exponent 3 ≠ authoritative 2 → currency-pair FK reject
+      await expect(pool.query(base, [...p, 500, 'AED', 3])).rejects.toThrow(
+        /foreign key|violates/i,
+      );
+      await pool.query(base, [...p, 500, 'AED', 2]);
+      // company.defaultCurrency cannot change while referenced (ON UPDATE RESTRICT)
+      await expect(
+        pool.query(`UPDATE company SET "defaultCurrency" = 'SAR' WHERE id = $1`, [ids.company]),
+      ).rejects.toThrow(/foreign key|violates|update or delete/i);
+      // currency.exponent cannot change while referenced (ON UPDATE RESTRICT)
+      await expect(
+        pool.query(`UPDATE currency SET exponent = 3 WHERE code = 'AED'`),
+      ).rejects.toThrow(/foreign key|violates|update or delete/i);
+      await pool.query(`DELETE FROM branch_variant_uom_price WHERE "companyId" = $1`, [
+        ids.company,
+      ]);
+      await clean(ids);
+    });
+
+    it('NO FK from branch_variant_price_set to company_variant_price_set; NO FK from branch_variant_uom_price to company_variant_uom_price', async () => {
+      const { rows } = await pool.query<{ conname: string; refname: string }>(
+        `SELECT c.conname, cl2.relname AS refname
+           FROM pg_constraint c
+           JOIN pg_class cl  ON cl.oid  = c.conrelid
+           JOIN pg_class cl2 ON cl2.oid = c.confrelid
+          WHERE c.contype = 'f'
+            AND cl.relname IN ('branch_variant_price_set','branch_variant_uom_price')`,
+      );
+      expect(rows.map((r) => r.refname)).not.toContain('company_variant_price_set');
+      expect(rows.map((r) => r.refname)).not.toContain('company_variant_uom_price');
+      // it DOES reference branch + variant + tenant + the branch aggregate
+      expect(new Set(rows.map((r) => r.refname))).toEqual(
+        new Set(['tenant', 'branch', 'variant', 'branch_variant_price_set', 'company', 'currency']),
+      );
+    });
+
+    it('branch += UNIQUE (tenantId,id) and (tenantId,companyId,id) — additive, no column change', async () => {
+      const { rows } = await pool.query<{ conname: string }>(
+        `SELECT conname FROM pg_constraint c JOIN pg_class cl ON cl.oid = c.conrelid
+          WHERE cl.relname = 'branch' AND c.contype = 'u'`,
+      );
+      const names = rows.map((r) => r.conname);
+      expect(names).toContain('branch_tenantId_id_key');
+      expect(names).toContain('branch_tenantId_companyId_id_key');
+    });
+
+    it('aggregate ON DELETE CASCADE — deleting a branch removes its price set + rows + availability', async () => {
+      const ids = await mk(TENANT_A, 'cascade');
+      await mkPriceSet(ids);
+      await pool.query(
+        `INSERT INTO branch_variant_uom_price
+          (id,"tenantId","companyId","branchId","variantId","uomCode","overrideAmountMinor","overrideCurrencyCode","overrideCurrencyExponent","updatedAt")
+          VALUES (uuidv7(),$1,$2,$3,$4,'piece',500,'AED',2,now())`,
+        [TENANT_A, ids.company, ids.branch, ids.variant],
+      );
+      await pool.query(
+        `INSERT INTO branch_variant_availability
+          (id,"tenantId","companyId","branchId","variantId",available,"updatedAt")
+          VALUES (uuidv7(),$1,$2,$3,$4,true,now())`,
+        [TENANT_A, ids.company, ids.branch, ids.variant],
+      );
+      await pool.query(`DELETE FROM branch WHERE id = $1`, [ids.branch]);
+      for (const t of [
+        'branch_variant_price_set',
+        'branch_variant_uom_price',
+        'branch_variant_availability',
+      ]) {
+        const { rows } = await pool.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM ${t} WHERE "branchId" = $1`,
+          [ids.branch],
+        );
+        expect(Number(rows[0]!.n)).toBe(0);
+      }
+      await clean(ids);
+    });
+
+    it('RLS ENABLE + FORCE + branch-GUC predicate on all three; a neutralized-branch-GUC read stays tenant-isolated; no-GUC → 0', async () => {
+      const idsA = await mk(TENANT_A, 'rlsa');
+      const idsB = await mk(TENANT_B, 'rlsb', 'AED');
+      await mkPriceSet(idsA);
+      await pool.query(
+        `INSERT INTO branch_variant_price_set (id,"tenantId","companyId","branchId","variantId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,$4,now())`,
+        [TENANT_B, idsB.company, idsB.branch, idsB.variant],
+      );
+
+      for (const t of [
+        'branch_variant_price_set',
+        'branch_variant_uom_price',
+        'branch_variant_availability',
+      ]) {
+        const { rows } = await pool.query<{
+          relrowsecurity: boolean;
+          relforcerowsecurity: boolean;
+        }>(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = $1`, [t]);
+        expect(rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+      }
+
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        // no GUC → zero rows
+        expect(
+          (await c.query(`SELECT count(*)::int AS n FROM branch_variant_price_set`)).rows[0].n,
+        ).toBe(0);
+        // tenant A GUC + branch A GUC → only branch A's row
+        await c.query(`SELECT set_config('app.tenant_id', $1, false)`, [TENANT_A]);
+        await c.query(`SELECT set_config('app.branch_id', $1, false)`, [idsA.branch]);
+        expect(
+          (await c.query(`SELECT count(*)::int AS n FROM branch_variant_price_set`)).rows[0].n,
+        ).toBe(1);
+        // NEUTRALIZE only app.branch_id (what the tenant-wide integrity helpers do)
+        // → still ONLY tenant A's rows (tenant isolation intact, not tenant B's)
+        await c.query(`SELECT set_config('app.branch_id', '', false)`);
+        const wide = await c.query<{ tid: string }>(
+          `SELECT DISTINCT "tenantId" AS tid FROM branch_variant_price_set`,
+        );
+        expect(wide.rows.map((r) => r.tid)).toEqual([TENANT_A]);
+      } finally {
+        await c.query(`RESET ROLE`).catch(() => {});
+        c.release();
+      }
+      await pool.query(`DELETE FROM branch_variant_price_set WHERE "companyId" IN ($1,$2)`, [
+        idsA.company,
+        idsB.company,
+      ]);
+      await clean(idsA);
+      await clean(idsB);
+    });
+
+    it('flower_app is still NOBYPASSRLS; task 3.8 adds NO new DB role', async () => {
+      const { rows } = await pool.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
+        `SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = $1`,
+        [DB_ROLES.app],
+      );
+      expect(rows[0]).toEqual({ rolbypassrls: false, rolsuper: false });
+      const roleNames = (
+        await pool.query<{ rolname: string }>(
+          `SELECT rolname FROM pg_roles WHERE rolname LIKE 'flower_%'`,
+        )
+      ).rows
+        .map((r) => r.rolname)
+        .sort();
+      expect(roleNames).toEqual(
+        ['flower_app', 'flower_dispatcher', 'flower_migrate', 'flower_platform'].sort(),
+      );
+    });
+
+    it('three tables in TENANT_SCOPED_TABLES; branch_price:manage registered TENANT/catalog; security_event unchanged', async () => {
+      expect(TENANT_SCOPED_TABLES).toContain('branch_variant_price_set');
+      expect(TENANT_SCOPED_TABLES).toContain('branch_variant_uom_price');
+      expect(TENANT_SCOPED_TABLES).toContain('branch_variant_availability');
+
+      const reg = await pool.query<{ realm: string; groupKey: string }>(
+        `SELECT realm, "groupKey" FROM permission_registry WHERE key = 'branch_price:manage'`,
+      );
+      expect(reg.rows[0]).toEqual({ realm: 'TENANT', groupKey: 'catalog' });
+
+      const { rows } = await pool.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
+      );
+      expect(rows[0]!.definition).not.toMatch(/branch_variant|branch_price/i);
+    });
+
+    it('exactly ONE new task 3.8 migration', async () => {
+      const { rows } = await pool.query<{ migration_name: string }>(
+        `SELECT migration_name FROM _prisma_migrations WHERE migration_name LIKE '%catalog_branch_pricing%'`,
+      );
+      expect(rows).toHaveLength(1);
     });
   });
 

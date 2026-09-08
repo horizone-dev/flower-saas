@@ -15,6 +15,7 @@ import {
   PHASE_3_4_TENANT_PERMISSIONS,
   PHASE_3_5_TENANT_PERMISSIONS,
   PHASE_3_7_TENANT_PERMISSIONS,
+  PHASE_3_8_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -168,6 +169,7 @@ describe('cross-tenant isolation probe suite', () => {
         ...PHASE_3_4_TENANT_PERMISSIONS,
         ...PHASE_3_5_TENANT_PERMISSIONS,
         ...PHASE_3_7_TENANT_PERMISSIONS,
+        ...PHASE_3_8_TENANT_PERMISSIONS,
       ],
     });
     ownerBTok = await mint('probe-owner-b', {
@@ -181,6 +183,7 @@ describe('cross-tenant isolation probe suite', () => {
         ...PHASE_3_4_TENANT_PERMISSIONS,
         ...PHASE_3_5_TENANT_PERMISSIONS,
         ...PHASE_3_7_TENANT_PERMISSIONS,
+        ...PHASE_3_8_TENANT_PERMISSIONS,
       ],
     });
 
@@ -291,6 +294,24 @@ describe('cross-tenant isolation probe suite', () => {
              (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
            VALUES (uuidv7(),$1,$2,$3,'piece','99999','AED',2,now())`,
           [A.tenantId, A.companyId, A.variantId],
+        );
+        // task 3.8 — an A-owned branch price override + branch availability row
+        // on A's branch, to probe: B cannot read / replace / resolve / leak them.
+        await c2.query(
+          `INSERT INTO branch_variant_price_set (id,"tenantId","companyId","branchId","variantId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,now())`,
+          [A.tenantId, A.companyId, A.branchId, A.variantId],
+        );
+        await c2.query(
+          `INSERT INTO branch_variant_uom_price
+             (id,"tenantId","companyId","branchId","variantId","uomCode","overrideAmountMinor","overrideCurrencyCode","overrideCurrencyExponent","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,'piece','88888','AED',2,now())`,
+          [A.tenantId, A.companyId, A.branchId, A.variantId],
+        );
+        await c2.query(
+          `INSERT INTO branch_variant_availability (id,"tenantId","companyId","branchId","variantId",available,"updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,false,now())`,
+          [A.tenantId, A.companyId, A.branchId, A.variantId],
         );
       } finally {
         await c2.end();
@@ -958,6 +979,85 @@ describe('cross-tenant isolation probe suite', () => {
             ],
           },
           { 'if-match': '"1"' },
+        ),
+      },
+      // ── task 3.8: branch_variant_* are tenant-scoped through RLS + branch-scoped
+      // through the guard pipeline. B (a different tenant) cannot read, replace,
+      // resolve or leak A's branch pricing / availability / effective catalog,
+      // even against A's own branch id.
+      {
+        name: "GET A branch prices as ownerB (A's branch id)",
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/branches/${A.branchId}/variants/${A.variantId}/prices`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked: !denied && ['88888', A.branchId].some((s) => blob.includes(s)),
+          };
+        },
+      },
+      {
+        name: 'GET A branch price resolve as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/branches/${A.branchId}/variants/${A.variantId}/prices/resolve?uomCode=piece`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked: !denied && blob.includes('88888'),
+          };
+        },
+      },
+      {
+        name: 'GET A branch effective catalog as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send('GET', `/v1/catalog/branches/${A.branchId}/catalog`, ownerBTok);
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked: !denied && blob.includes('88888'),
+          };
+        },
+      },
+      {
+        name: 'PUT A branch prices as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409, 422],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/branches/${A.branchId}/variants/${A.variantId}/prices`,
+          ownerBTok,
+          {
+            prices: [
+              { uomCode: 'piece', sell: { amountMinor: '1', currency: 'AED', exponent: 2 } },
+            ],
+          },
+          { 'if-match': '"0"' },
+        ),
+      },
+      {
+        name: 'PUT A branch availability as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409, 422],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/branches/${A.branchId}/availability`,
+          ownerBTok,
+          { entries: [{ variantId: A.variantId, available: false }] },
+          { 'idempotency-key': 'probe-b-avail' },
         ),
       },
     ];

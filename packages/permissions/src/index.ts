@@ -249,6 +249,26 @@ export const PHASE_3_7_TENANT_PERMISSIONS = [
 export type Phase37TenantPermission = (typeof PHASE_3_7_TENANT_PERMISSIONS)[number];
 
 /**
+ * Phase 3 task 3.8 activates the ALREADY-RESERVED `branch_price:manage` key — it
+ * has existed in `PERMISSIONS.catalog` since Phase 0; task 3.8 registers it in
+ * `permission_registry` and assigns it to the built-in `owner` / `admin` system
+ * roles (`manager` does NOT get it by default — mirrors `catalog:manage` /
+ * `variants:manage` / `identifiers:manage` / `pricing:manage`; a custom role may
+ * receive it normally). No key is renamed, duplicated or invented (D2-6 /
+ * HG3-PERMISSION-STABILITY). It gates BOTH branch-price writes (`PUT …/prices`,
+ * which ALSO need the `branch_pricing` catalog capability) AND branch-availability
+ * writes (`PUT …/availability`, which have NO capability gate — BD-11).
+ * `catalog:view` covers every branch read. Not in `MODULE_OF_PERMISSION` —
+ * `catalog` is a foundation module. NOT step-up (BD-12). There is NO separate
+ * `branch_availability` permission or capability.
+ */
+export const PHASE_3_8_TENANT_PERMISSIONS = [
+  'branch_price:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase38TenantPermission = (typeof PHASE_3_8_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the

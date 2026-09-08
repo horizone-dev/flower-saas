@@ -406,4 +406,83 @@ describe('@flower/api-client', () => {
     );
     expect(String(fetchMock.mock.calls[2]![0])).not.toMatch(/branchId/i);
   });
+
+  it('catalog: branch pricing + availability methods carry the right preconditions (task 3.8)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ version: 1, priceSetExists: true, prices: [], entries: [] }),
+    );
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    // GET branch prices — no If-Match, no Idempotency-Key; no companyId in the path
+    await client.getBranchPrices('b1', 'v1');
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://api.test/v1/catalog/branches/b1/variants/v1/prices',
+    );
+
+    // replace branch prices — dedicated branch price-set version as If-Match, NO
+    // Idempotency-Key, NO purchase, NO branchId in the body
+    await client.replaceBranchPrices(
+      'b1',
+      'v1',
+      [{ uomCode: 'box', sell: { amountMinor: '5000', currency: 'AED', exponent: 2 } }],
+      2,
+    );
+    expect(fetchMock.mock.calls[1]![1]!.method).toBe('PUT');
+    expect(fetchMock.mock.calls[1]![1]!.headers).toMatchObject({ 'if-match': '"2"' });
+    expect(fetchMock.mock.calls[1]![1]!.headers).not.toHaveProperty('idempotency-key');
+    const priceBody = JSON.parse(String(fetchMock.mock.calls[1]![1]!.body));
+    expect(JSON.stringify(priceBody)).not.toMatch(/purchase/i);
+    expect(JSON.stringify(priceBody)).not.toMatch(/"branchId"/);
+
+    // resolve — query carries ONLY uomCode
+    await client.resolveBranchPrice('b1', 'v1', 'box');
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(
+      'http://api.test/v1/catalog/branches/b1/variants/v1/prices/resolve?uomCode=box',
+    );
+
+    // availability — Idempotency-Key, NO If-Match; entries sorted ascending
+    await client.setBranchAvailability(
+      'b1',
+      [
+        { variantId: 'v-b', available: false },
+        { variantId: 'v-a', available: true },
+      ],
+      'ik-avail-1',
+    );
+    expect(fetchMock.mock.calls[3]![1]!.method).toBe('PUT');
+    expect(fetchMock.mock.calls[3]![1]!.headers).toMatchObject({ 'idempotency-key': 'ik-avail-1' });
+    expect(fetchMock.mock.calls[3]![1]!.headers).not.toHaveProperty('if-match');
+    const availBody = JSON.parse(String(fetchMock.mock.calls[3]![1]!.body));
+    expect(availBody.entries.map((e: { variantId: string }) => e.variantId)).toEqual([
+      'v-a',
+      'v-b',
+    ]); // sorted ascending for canonical transport
+
+    // NO deleteBranchPrices method exists (PUT [] is the only clear op — BD-4)
+    expect((client as unknown as Record<string, unknown>)['deleteBranchPrices']).toBeUndefined();
+  });
+
+  it('catalog: setBranchAvailability NEVER silently dedupes — a duplicate variantId throws before any HTTP call (task 3.8, Correction C)', () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ entries: [] }));
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+    expect(() =>
+      client.setBranchAvailability(
+        'b1',
+        [
+          { variantId: 'dup', available: true },
+          { variantId: 'dup', available: false },
+        ],
+        'ik-dup',
+      ),
+    ).toThrow(/duplicate variantId/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

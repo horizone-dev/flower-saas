@@ -27,6 +27,13 @@ import { UomService, VariantUomService } from './uom.service.js';
 import { UomController, CatalogUomConversionController } from './uom.controller.js';
 import { CompanyPricingRepository } from './company-pricing.repository.js';
 import { CompanyPricingController } from './company-pricing.controller.js';
+import { BranchPricingRepository } from './branch-pricing.repository.js';
+import { BranchPricingService } from './branch-pricing.service.js';
+import {
+  BranchPricingController,
+  BranchAvailabilityController,
+  BranchEffectiveCatalogController,
+} from './branch-pricing.controller.js';
 
 /**
  * `catalog` module (Phase 3).
@@ -53,7 +60,21 @@ import { CompanyPricingController } from './company-pricing.controller.js';
  *     pricing is foundational). The additive Task-3.6 guard rules (base-UOM
  *     change / custom-UOM delete blocked while a price row references the
  *     variant / UOM) live in `variant.repository` / `uom.repository`.
- * No branch pricing / tax computation / discount / inventory — later Task 3.x / Phase 5.
+ *   - Task 3.8: branch price override + branch availability — `branch_variant_price_set`
+ *     (the monotonic branch-price version aggregate, never deleted) +
+ *     `branch_variant_uom_price` (the independent stored SELL override Money,
+ *     never `company_price × factor`; a matching company price must exist — BD-1)
+ *     + `branch_variant_availability` (a boolean merchandising flag, NOT a
+ *     quantity). `branch_price:manage` writes / `catalog:view` reads; branch
+ *     scoped (`@ScopedParam({ branch })`); the `branch_pricing` capability gates
+ *     PRICE writes only — availability writes have no capability gate.
+ *     Company↔branch price-row integrity is synchronized on the Task 3.7
+ *     `company_variant_price_set` lock; the additive company-price-removal guard
+ *     + the tenant-wide branch-price dependency counts (custom-UOM delete /
+ *     base-UOM change) live in `company-pricing.repository` / `uom.repository` /
+ *     `variant.repository` via the three narrow read helpers in
+ *     `branch-price-integrity.repo`.
+ * No tax computation / discount / inventory / realtime — later Task 3.x / Phase 5.
  */
 @Module({
   providers: [
@@ -76,6 +97,8 @@ import { CompanyPricingController } from './company-pricing.controller.js';
     UomService,
     VariantUomService,
     CompanyPricingRepository,
+    BranchPricingRepository,
+    BranchPricingService,
   ],
   controllers: [
     CatalogCapabilityController,
@@ -91,6 +114,9 @@ import { CompanyPricingController } from './company-pricing.controller.js';
     UomController,
     CatalogUomConversionController,
     CompanyPricingController,
+    BranchPricingController,
+    BranchAvailabilityController,
+    BranchEffectiveCatalogController,
   ],
   exports: [CatalogCapabilityService],
 })

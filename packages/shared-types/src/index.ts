@@ -526,6 +526,148 @@ export interface ResolvedCompanyPrice {
   reason: CompanyPriceResolveReason | null;
 }
 
+// --- branch price override + branch availability (Phase 3 task 3.8) — PHASE-3-PLAN §C.9 ---
+
+/** Max override tiers one branch price replace-set `PUT` may submit. */
+export const BRANCH_PRICE_REPLACE_MAX = 100;
+/** Max entries one branch availability bulk `PUT` may submit. */
+export const BRANCH_AVAILABILITY_MAX = 500;
+
+/**
+ * One SELL override tier in the branch replace-set body. **SELL only** — no
+ * `purchase` (BD-9). Structure here (→ `400`); the semantic money checks (known
+ * currency, authoritative exponent, int64-safe, `> 0`, `== company.defaultCurrency`)
+ * run server-side (`assertBranchOverrideMoney`) and surface as a deterministic
+ * `422` (Task 3.8 §9), with the DB composite FKs as the hard backstop.
+ */
+export const branchPriceEntrySchema = z
+  .object({
+    /** the variant base UOM OR a UOM resolvable to it via the Task 3.6 conversion model */
+    uomCode: z.string().min(1).max(40),
+    /** the tax-EXCLUSIVE / net override price — structure here, semantics server-side */
+    sell: structuralMoneyDtoSchema,
+  })
+  .strict();
+export type BranchPriceEntry = z.infer<typeof branchPriceEntrySchema>;
+
+export const replaceBranchPricesSchema = z
+  .object({ prices: z.array(branchPriceEntrySchema).max(BRANCH_PRICE_REPLACE_MAX) })
+  .strict();
+export type ReplaceBranchPricesBody = z.infer<typeof replaceBranchPricesSchema>;
+
+/** A stored branch override row as read back — SELL only, plus whether its UOM
+ *  currently resolves to the variant base (`false` ⇒ a conversion was deleted). */
+export interface BranchPriceRowView {
+  uomCode: string;
+  sell: MoneyDto;
+  resolvable: boolean;
+}
+
+/** GET `/branches/:branchId/variants/:variantId/prices` — the branch's own
+ *  override rows + the dedicated branch price-set version (`version: 0`,
+ *  `priceSetExists: false` ⇔ no aggregate yet; ETag `"0"`). The aggregate is
+ *  monotonic — once created it is never deleted or reset (BD-4). */
+export interface BranchVariantPriceSetView {
+  version: number;
+  priceSetExists: boolean;
+  prices: BranchPriceRowView[];
+}
+
+/** GET `/branches/:branchId/variants/:variantId/prices/resolve` — the effective
+ *  branch price (branch override → company default → no price), or an explicit
+ *  no-price state (never a `422` for absence). NO cross-branch / cross-company
+ *  fallback, NO price multiplication. `branchAvailable` is informational and
+ *  NEVER changes `price` (BD-15 / BD-16). */
+export const BRANCH_PRICE_RESOLVE_REASONS = [
+  'NO_PRICE_SET',
+  'UOM_NOT_PRICED',
+  'UOM_UNRESOLVABLE',
+] as const;
+export type BranchPriceResolveReason = (typeof BRANCH_PRICE_RESOLVE_REASONS)[number];
+export interface ResolvedBranchPrice {
+  price: MoneyDto | null;
+  source: 'BRANCH' | 'COMPANY' | null;
+  reason: BranchPriceResolveReason | null;
+  branchAvailable: boolean;
+}
+
+/**
+ * The Task-3.8 availability bulk `PUT` body — **structure only**. A malformed
+ * shape (non-uuid `variantId`, non-boolean `available`, `< 1` or `> 500` entries,
+ * an unknown key) is a `400`. The **semantic** checks run AFTER the structural
+ * parse in the controller/service as explicit typed domain errors — a duplicate
+ * `variantId` → `422 BRANCH_AVAILABILITY_DUPLICATE_VARIANT` (a `DomainError`,
+ * NOT a Zod refinement — Correction H); a non-ascending order → `400`; an unknown
+ * tenant variant → `422 BRANCH_AVAILABILITY_VARIANT_NOT_FOUND`.
+ */
+export const branchAvailabilityEntrySchema = z
+  .object({ variantId: z.string().uuid(), available: z.boolean() })
+  .strict();
+export type BranchAvailabilityEntry = z.infer<typeof branchAvailabilityEntrySchema>;
+
+export const structuralSetBranchAvailabilitySchema = z
+  .object({
+    entries: z.array(branchAvailabilityEntrySchema).min(1).max(BRANCH_AVAILABILITY_MAX),
+  })
+  .strict();
+export type SetBranchAvailabilityBody = z.infer<typeof structuralSetBranchAvailabilitySchema>;
+
+/**
+ * Pure data helper — the `variantId`s that appear more than once in `entries`.
+ * Used by BOTH the server (→ `422 BRANCH_AVAILABILITY_DUPLICATE_VARIANT`) and the
+ * api-client (→ throw before sending). It is NOT a schema refinement — the 422
+ * domain error is owned by the server controller/service.
+ */
+export function duplicateVariantIds(entries: readonly { variantId: string }[]): string[] {
+  const seen = new Set<string>();
+  const dup = new Set<string>();
+  for (const e of entries) {
+    if (seen.has(e.variantId)) dup.add(e.variantId);
+    seen.add(e.variantId);
+  }
+  return [...dup];
+}
+
+/** Pure data helper — are `entries` strictly ascending by `variantId`? The
+ *  canonical form the deterministic idempotency fingerprint requires. */
+export function isAscendingByVariantId(entries: readonly { variantId: string }[]): boolean {
+  for (let i = 1; i < entries.length; i++) {
+    if (!(entries[i - 1]!.variantId < entries[i]!.variantId)) return false;
+  }
+  return true;
+}
+
+/** GET `/branches/:branchId/availability` — one branch availability row.
+ *  A variant with no explicit row resolves to `{ available: true, explicit: false }`. */
+export interface BranchAvailabilityView {
+  variantId: string;
+  available: boolean;
+  explicit: boolean;
+}
+
+/** PUT `/branches/:branchId/availability` — the declared result of THAT batch,
+ *  built inside the write transaction, sorted ascending by `variantId`. */
+export interface BranchAvailabilitySetResult {
+  entries: BranchAvailabilityView[];
+}
+
+/** GET `/branches/:branchId/catalog` — one entry per variant for which the
+ *  branch's company has ≥ 1 current `company_variant_uom_price` row. Branch
+ *  overrides replace the matching company UOM tiers. Price + availability only —
+ *  product names / categories / attributes / identifiers / media / inventory
+ *  come from the existing catalog reads (BD-14). */
+export interface BranchEffectiveCatalogEntry {
+  variantId: string;
+  productId: string;
+  available: boolean;
+  prices: {
+    uomCode: string;
+    sell: MoneyDto;
+    source: 'BRANCH' | 'COMPANY';
+    resolvable: boolean;
+  }[];
+}
+
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
  * counts"). Enforced by `LimitService` on create / activate / login.

@@ -70,6 +70,15 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   // company scope is the guard-pipeline step, not RLS. No branch / tax / discount.
   'company_variant_price_set',
   'company_variant_uom_price',
+  // Phase 3 (task 3.8) — branch price override + branch availability.
+  // `branch_variant_price_set` is the branch-price concurrency aggregate;
+  // `branch_variant_uom_price` holds the independent stored SELL override Money;
+  // `branch_variant_availability` is a boolean merchandising flag (NOT a
+  // quantity). Tenant-scoped RLS + a branch-GUC defence-in-depth predicate
+  // (narrows to `app.branch_id` when set). No tax / discount / inventory.
+  'branch_variant_price_set',
+  'branch_variant_uom_price',
+  'branch_variant_availability',
 ]);
 
 /**

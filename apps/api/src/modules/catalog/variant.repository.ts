@@ -7,6 +7,7 @@ import { DomainError, NotFoundError } from '../../common/errors/domain-error.js'
 import { versionConflict } from './catalog-write.helpers.js';
 import { assertVariantHasNoIdentifiers } from './identifier.repository.js';
 import { UomRepository } from './uom.repository.js';
+import { countTenantWideBranchPriceVariantDependencies } from './branch-price-integrity.repo.js';
 import {
   buildRegistry,
   isBuiltinUom,
@@ -380,10 +381,21 @@ export class VariantRepository extends ScopedRepository {
         tx.companyVariantUomPrice.count({ where: { variantId: id } }),
       ]);
 
-      if (priceCount > 0) {
+      // task 3.8 (§10.1 / Correction 3) — a `branch_variant_uom_price` row for
+      // this variant across ANY branch of the tenant likewise freezes the base
+      // UOM. Computed AFTER `variant FOR UPDATE` is held; a STANDALONE await
+      // (never inside the Promise.all above — the tenant-wide helper neutralizes
+      // `app.branch_id` for one SELECT, Correction F). `branch_variant_availability`
+      // rows do NOT block a base-UOM change. Message names a count only.
+      const branchPriceCount = await countTenantWideBranchPriceVariantDependencies(tx, {
+        variantId: id,
+      });
+
+      if (priceCount > 0 || branchPriceCount > 0) {
         throw new DomainError(
           'VARIANT_BASE_UOM_LOCKED',
-          'this variant has company prices — remove every company price row (PUT …/prices []) before changing its base UOM',
+          `this variant has ${priceCount} company price row(s) and ${branchPriceCount} branch ` +
+            `override row(s) — remove every price row (PUT …/prices []) before changing its base UOM`,
           409,
         );
       }

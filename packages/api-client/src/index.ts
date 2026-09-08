@@ -2,11 +2,18 @@ import {
   healthResponseSchema,
   readinessResponseSchema,
   apiErrorSchema,
+  duplicateVariantIds,
   type HealthResponse,
   type ReadinessResponse,
   type CompanyPriceEntry,
   type CompanyVariantPriceSetView,
   type ResolvedCompanyPrice,
+  type BranchPriceEntry,
+  type BranchVariantPriceSetView,
+  type ResolvedBranchPrice,
+  type BranchAvailabilityView,
+  type BranchAvailabilitySetResult,
+  type BranchEffectiveCatalogEntry,
 } from '@flower/shared-types';
 
 export type {
@@ -16,6 +23,15 @@ export type {
   CompanyVariantPriceSetView,
   CompanyPriceResolveReason,
   ResolvedCompanyPrice,
+  BranchPriceEntry,
+  BranchPriceRowView,
+  BranchVariantPriceSetView,
+  BranchPriceResolveReason,
+  ResolvedBranchPrice,
+  BranchAvailabilityEntry,
+  BranchAvailabilityView,
+  BranchAvailabilitySetResult,
+  BranchEffectiveCatalogEntry,
 } from '@flower/shared-types';
 
 /**
@@ -1348,6 +1364,79 @@ export class ApiClient {
     return this.get(`/v1/catalog/companies/${companyId}/variants/${variantId}/prices/resolve`, {
       uomCode,
     });
+  }
+
+  // ── branch price override + branch availability (task 3.8) ─────────────────
+  // branch-scoped; `branch_price:manage` writes / `catalog:view` reads. `companyId`
+  // is DERIVED from the authorized branch — NEVER a client argument. NO purchase,
+  // NO branchId in a body, NO `deleteBranchPrices` (there is no DELETE — `PUT []`
+  // is the only clear op). Branch price replace uses `If-Match` (the dedicated
+  // branch price-set version — `"0"` on the first write). Availability uses an
+  // `Idempotency-Key` (no version).
+  getBranchPrices(branchId: string, variantId: string): Promise<BranchVariantPriceSetView> {
+    return this.get(`/v1/catalog/branches/${branchId}/variants/${variantId}/prices`);
+  }
+  replaceBranchPrices(
+    branchId: string,
+    variantId: string,
+    prices: BranchPriceEntry[],
+    expectedVersion: number,
+  ): Promise<BranchVariantPriceSetView> {
+    return this.call(
+      `/v1/catalog/branches/${branchId}/variants/${variantId}/prices`,
+      { method: 'PUT', body: { prices }, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as BranchVariantPriceSetView,
+    );
+  }
+  resolveBranchPrice(
+    branchId: string,
+    variantId: string,
+    uomCode: string,
+  ): Promise<ResolvedBranchPrice> {
+    return this.get(`/v1/catalog/branches/${branchId}/variants/${variantId}/prices/resolve`, {
+      uomCode,
+    });
+  }
+  /**
+   * Bulk branch availability. The client MAY sort `entries` ascending by
+   * `variantId` for canonical transport; it MUST NOT dedupe — a duplicate
+   * `variantId` is a client-side validation error (no HTTP request), never a
+   * silently-collapsed entry (Correction C). A raw HTTP caller with duplicates
+   * still gets the authoritative server `422 BRANCH_AVAILABILITY_DUPLICATE_VARIANT`.
+   */
+  setBranchAvailability(
+    branchId: string,
+    entries: { variantId: string; available: boolean }[],
+    idempotencyKey: string,
+  ): Promise<BranchAvailabilitySetResult> {
+    const sorted = [...entries].sort((a, b) => a.variantId.localeCompare(b.variantId));
+    const dups = duplicateVariantIds(sorted);
+    if (dups.length > 0) {
+      throw new Error(
+        `setBranchAvailability: duplicate variantId in entries (${dups.join(', ')}) — ` +
+          `each variant may appear at most once`,
+      );
+    }
+    return this.call(
+      `/v1/catalog/branches/${branchId}/availability`,
+      { method: 'PUT', body: { entries: sorted }, idempotencyKey },
+      (raw) => raw as BranchAvailabilitySetResult,
+    );
+  }
+  getBranchAvailability(branchId: string, variantId?: string): Promise<BranchAvailabilityView[]> {
+    return this.get(
+      `/v1/catalog/branches/${branchId}/availability`,
+      variantId !== undefined ? { variantId } : undefined,
+    );
+  }
+  getBranchEffectiveCatalog(
+    branchId: string,
+    query?: { cursor?: string; limit?: number },
+  ): Promise<{ entries: BranchEffectiveCatalogEntry[]; nextCursor: string | null }> {
+    const q: Record<string, string | number> = {};
+    if (query?.cursor !== undefined) q['cursor'] = query.cursor;
+    if (query?.limit !== undefined) q['limit'] = query.limit;
+    return this.get(`/v1/catalog/branches/${branchId}/catalog`, q);
   }
 
   overrideTenantLimit(
