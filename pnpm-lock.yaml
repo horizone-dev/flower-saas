@@ -51,6 +51,9 @@ importers:
       '@flower/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@flower/money':
+        specifier: workspace:*
+        version: link:../../packages/money
       '@flower/permissions':
         specifier: workspace:*
         version: link:../../packages/permissions

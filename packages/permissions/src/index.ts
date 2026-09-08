@@ -230,6 +230,25 @@ export const PHASE_3_5_TENANT_PERMISSIONS = [
 export type Phase35TenantPermission = (typeof PHASE_3_5_TENANT_PERMISSIONS)[number];
 
 /**
+ * Phase 3 task 3.7 activates the ALREADY-RESERVED `pricing:manage` key — it has
+ * existed in `PERMISSIONS.catalog` since Phase 0; task 3.7 registers it in
+ * `permission_registry` and assigns it to the built-in `owner` / `admin` system
+ * roles (`manager` does NOT get it — mirrors `catalog:manage` / `variants:manage`
+ * / `identifiers:manage`). No key is renamed, duplicated or invented (D2-6 /
+ * HG3-PERMISSION-STABILITY). It gates every `company_variant_uom_price` write
+ * (the replace-set `PUT`); `catalog:view` covers the price GET + the `/resolve`
+ * read. Not in `MODULE_OF_PERMISSION` — `catalog` is a foundation module (always
+ * entitled) and there is NO `company_pricing` catalog capability (company pricing
+ * is foundational — D-12). NOT step-up — a price is catalog configuration, not a
+ * money-moving transaction (D-9), consistent with every other catalog key.
+ */
+export const PHASE_3_7_TENANT_PERMISSIONS = [
+  'pricing:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase37TenantPermission = (typeof PHASE_3_7_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the

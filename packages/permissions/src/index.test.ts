@@ -7,6 +7,7 @@ import {
   PHASE_3_2_TENANT_PERMISSIONS,
   PHASE_3_4_TENANT_PERMISSIONS,
   PHASE_3_5_TENANT_PERMISSIONS,
+  PHASE_3_7_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   MODULE_OF_PERMISSION,
   STEP_UP_PERMISSIONS,
@@ -132,6 +133,19 @@ describe('@flower/permissions registry', () => {
       // an identifier write is not money / permission / secret / attribution
       expect(requiresStepUp(k)).toBe(false);
     }
+  });
+
+  // ── task 3.7 — HG3-PERMISSION-STABILITY ─────────────────────────────────
+  it('task 3.7 activates ONLY the existing pricing:manage key, unmoved', () => {
+    expect([...PHASE_3_7_TENANT_PERMISSIONS]).toEqual(['pricing:manage']);
+    expect(isPermissionKey('pricing:manage')).toBe(true);
+    // a long-standing catalog-group key — not invented, not duplicated
+    expect(PERMISSION_GROUP_OF['pricing:manage']).toBe('catalog');
+    expect(ALL_PERMISSIONS.filter((k) => k === 'pricing:manage')).toHaveLength(1);
+    // no `company_pricing` capability, no `MODULE_OF_PERMISSION` entry (catalog
+    // is a foundation module), and a price is catalog config → no step-up (D-9)
+    expect(MODULE_OF_PERMISSION['pricing:manage']).toBeUndefined();
+    expect(requiresStepUp('pricing:manage')).toBe(false);
   });
 });
 

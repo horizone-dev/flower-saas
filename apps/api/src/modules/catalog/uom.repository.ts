@@ -217,17 +217,23 @@ export class UomRepository extends ScopedRepository {
         throw versionConflict('uom', expectedVersion, current.version);
       }
 
-      const [inBase, inConv, inPack] = await Promise.all([
+      const [inBase, inConv, inPack, inPrice] = await Promise.all([
         tx.variant.count({ where: { baseUomCode: code } }),
         tx.uomConversion.count({ where: { OR: [{ fromUomCode: code }, { toUomCode: code }] } }),
         // ACTIVE **and** INACTIVE pack identifiers count — an INACTIVE row is a
         // historical printed identity that may be reactivated.
         tx.itemIdentifier.count({ where: { packUomCode: code } }),
+        // task 3.7 (D-5) — a `company_variant_uom_price` row for this code, across
+        // ANY company. Textual reference, no FK. Counts EVERY row, even one whose
+        // conversion is currently deleted (`resolvable: false`) — the code is
+        // still referenced. `company_variant_uom_price (tenantId, uomCode)` index.
+        tx.companyVariantUomPrice.count({ where: { uomCode: code } }),
       ]);
-      if (inBase + inConv + inPack > 0) {
+      if (inBase + inConv + inPack + inPrice > 0) {
         throw new DomainError(
           'UOM_IN_USE',
-          `unit "${code}" is referenced by ${inBase} variant base UOM(s), ${inConv} conversion(s) and ${inPack} pack identifier(s) — remove them first`,
+          `unit "${code}" is referenced by ${inBase} variant base UOM(s), ${inConv} conversion(s), ` +
+            `${inPack} pack identifier(s) and ${inPrice} company price(s) — remove them first`,
           409,
         );
       }

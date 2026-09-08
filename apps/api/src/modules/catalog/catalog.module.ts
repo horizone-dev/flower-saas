@@ -25,6 +25,8 @@ import { UomRepository } from './uom.repository.js';
 import { UomConversionRepository } from './uom-conversion.repository.js';
 import { UomService, VariantUomService } from './uom.service.js';
 import { UomController, CatalogUomConversionController } from './uom.controller.js';
+import { CompanyPricingRepository } from './company-pricing.repository.js';
+import { CompanyPricingController } from './company-pricing.controller.js';
 
 /**
  * `catalog` module (Phase 3).
@@ -42,7 +44,16 @@ import { UomController, CatalogUomConversionController } from './uom.controller.
  *     BARCODE / QR writes gate on `identifiers.barcode_qr`; SKU writes do not.
  *     The Task-3.4 default-variant restructure guard (`VARIANT_HAS_IDENTIFIERS`)
  *     lives in `variant.repository` / `product.repository`.
- * No UOM / pricing / tax / inventory — later Task 3.x / Phase 5.
+ *   - Task 3.6: the tenant UOM registry + variant base UOM + variant/product
+ *     scoped pack conversions; the `multi_uom` capability gates every write.
+ *   - Task 3.7: company per-UOM SELL pricing — `company_variant_price_set`
+ *     (the version aggregate) + `company_variant_uom_price` (the independent
+ *     stored Money per selling UOM tier, never `base × factor`). `pricing:manage`
+ *     writes / `catalog:view` reads; company-scoped; no capability gate (company
+ *     pricing is foundational). The additive Task-3.6 guard rules (base-UOM
+ *     change / custom-UOM delete blocked while a price row references the
+ *     variant / UOM) live in `variant.repository` / `uom.repository`.
+ * No branch pricing / tax computation / discount / inventory — later Task 3.x / Phase 5.
  */
 @Module({
   providers: [
@@ -64,6 +75,7 @@ import { UomController, CatalogUomConversionController } from './uom.controller.
     UomConversionRepository,
     UomService,
     VariantUomService,
+    CompanyPricingRepository,
   ],
   controllers: [
     CatalogCapabilityController,
@@ -78,6 +90,7 @@ import { UomController, CatalogUomConversionController } from './uom.controller.
     IdentifierController,
     UomController,
     CatalogUomConversionController,
+    CompanyPricingController,
   ],
   exports: [CatalogCapabilityService],
 })

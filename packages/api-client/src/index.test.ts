@@ -364,4 +364,46 @@ describe('@flower/api-client', () => {
       pack: { uomCode: 'box', qty: '1' },
     });
   });
+
+  it('catalog: company pricing methods carry the right preconditions (task 3.7)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ version: 1, priceSetExists: true, prices: [] }),
+    );
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    // GET prices — no If-Match, no Idempotency-Key
+    await client.getCompanyPrices('c1', 'v1');
+    expect(fetchMock.mock.calls[0]![1]!.method ?? 'GET').toBe('GET');
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://api.test/v1/catalog/companies/c1/variants/v1/prices',
+    );
+
+    // replace prices — dedicated price-set version as If-Match, NO Idempotency-Key, NO purchase
+    await client.replaceCompanyPrices(
+      'c1',
+      'v1',
+      [{ uomCode: 'box', sell: { amountMinor: '5500', currency: 'AED', exponent: 2 } }],
+      3,
+    );
+    expect(fetchMock.mock.calls[1]![1]!.method).toBe('PUT');
+    expect(fetchMock.mock.calls[1]![1]!.headers).toMatchObject({ 'if-match': '"3"' });
+    expect(fetchMock.mock.calls[1]![1]!.headers).not.toHaveProperty('idempotency-key');
+    const body = JSON.parse(String(fetchMock.mock.calls[1]![1]!.body));
+    expect(body).toEqual({
+      prices: [{ uomCode: 'box', sell: { amountMinor: '5500', currency: 'AED', exponent: 2 } }],
+    });
+    expect(JSON.stringify(body)).not.toMatch(/purchase/i);
+    expect(JSON.stringify(body)).not.toMatch(/branch/i);
+
+    // resolve — query carries ONLY uomCode (no branchId — task 3.8)
+    await client.resolveCompanyPrice('c1', 'v1', 'box');
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(
+      'http://api.test/v1/catalog/companies/c1/variants/v1/prices/resolve?uomCode=box',
+    );
+    expect(String(fetchMock.mock.calls[2]![0])).not.toMatch(/branchId/i);
+  });
 });

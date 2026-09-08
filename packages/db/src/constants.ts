@@ -64,6 +64,12 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   // tenant-scoped, company/branch/price/currency/stock-neutral
   'uom',
   'uom_conversion',
+  // Phase 3 (task 3.7) — company per-UOM SELL pricing. `company_variant_price_set`
+  // is the concurrency aggregate (carries the version); `company_variant_uom_price`
+  // holds the independent stored Money per selling UOM tier. Tenant-scoped;
+  // company scope is the guard-pipeline step, not RLS. No branch / tax / discount.
+  'company_variant_price_set',
+  'company_variant_uom_price',
 ]);
 
 /**

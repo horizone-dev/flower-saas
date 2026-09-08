@@ -564,6 +564,12 @@ model Company {
   posTerminals      PosTerminal[]
   providerCreds     ProviderCredential[]
 
+  /// task 3.7 — FK targets only (no column added / retyped):
+  ///   `(tenantId, id)`                  ← `company_variant_price_set` tenant-safe FK
+  ///   `(tenantId, id, defaultCurrency)` ← `company_variant_uom_price.sellCurrencyCode`
+  ///     must equal the company's default currency (Inv-3); ON UPDATE RESTRICT.
+  @@unique([tenantId, id])
+  @@unique([tenantId, id, defaultCurrency])
   @@index([tenantId])
   @@map("company")
 }
@@ -863,6 +869,11 @@ model Currency {
   nameEn   String
   nameAr   String
 
+  /// task 3.7 — FK target only: `company_variant_uom_price.(sellCurrencyCode,
+  /// sellCurrencyExponent)` references it so a stored price can never carry a
+  /// non-authoritative exponent. `code` is already the PK, so this is trivially
+  /// satisfied; no per-company currency rows, business model unchanged.
+  @@unique([code, exponent])
   @@map("currency")
 }
 
@@ -1534,4 +1545,63 @@ model UomConversion {
 
   @@index([tenantId, scopeKind, scopeId])
   @@map("uom_conversion")
+}
+
+/// task 3.7 — the per (tenant, company, variant) company-pricing AGGREGATE. It
+/// carries the `version` that guards the price replace-set (`If-Match` — D-7,
+/// NEVER `variant.version`), and it EXISTS independently of whether any price
+/// rows exist. Task 3.7 NEVER deletes it through the pricing API: `PUT []`
+/// deletes the child price rows and bumps `version`, the aggregate row stays.
+/// Tenant-safe composite FKs to `company` / `variant` (migration-only);
+/// CASCADE-deletes with either. RLS ENABLE + FORCE.
+model CompanyVariantPriceSet {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  companyId String   @db.Uuid
+  variantId String   @db.Uuid
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, companyId, variantId])
+  @@index([tenantId, companyId])
+  @@map("company_variant_price_set")
+}
+
+/// task 3.7 — the INDEPENDENT stored SELL Money for (company, variant, uomCode).
+/// NEVER `base_price × conversion_factor` (ADR-0018 §5) — each UOM tier is priced
+/// on its own. `sell*` mandatory (> 0, tax-EXCLUSIVE / net); `purchase*` a
+/// NULLABLE, API-absent, unconsumed Phase-5 foundation (D-6). Belongs to
+/// `CompanyVariantPriceSet` by the `(tenantId, companyId, variantId)` composite
+/// (migration-only FK) — CASCADE-deletes with the aggregate. The migration also
+/// adds: `(tenantId, companyId, sellCurrencyCode) -> company(tenantId, id,
+/// defaultCurrency)` (Inv-3, ON UPDATE RESTRICT) and `(sellCurrencyCode,
+/// sellCurrencyExponent) -> currency(code, exponent)` (Inv-3 / C-3, ON UPDATE
+/// RESTRICT). RLS ENABLE + FORCE. NO `version` column — the aggregate owns it.
+model CompanyVariantUomPrice {
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  companyId String   @db.Uuid
+  variantId String   @db.Uuid
+  /// the variant's `baseUomCode` OR a UOM reachable to it via the Task 3.6
+  /// effective conversion model (validated in the service — legitimacy only,
+  /// never used to derive the price). CHECK on the canonical shape.
+  uomCode   String
+
+  sellAmountMinor      BigInt
+  sellCurrencyCode     String
+  sellCurrencyExponent Int      @db.SmallInt
+
+  /// FOUNDATION ONLY — nullable, never touched by the Task 3.7 API.
+  purchaseAmountMinor      BigInt?
+  purchaseCurrencyCode     String?
+  purchaseCurrencyExponent Int?    @db.SmallInt
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, companyId, variantId, uomCode])
+  @@index([tenantId, companyId, variantId])
+  @@index([tenantId, uomCode])
+  @@map("company_variant_uom_price")
 }

@@ -1,4 +1,8 @@
 import { z } from 'zod';
+// the authoritative Money DTO validator lives with the value object (it needs the
+// currency table); imported here so task-3.7 schemas below can compose it, and
+// re-exported (line below) as the shared FE/BE surface.
+import { moneyDtoSchema, type MoneyDtoShape as MoneyDto } from '@flower/money';
 
 /**
  * Contracts shared FE/BE. No business logic lives here (ADR-0001).
@@ -15,7 +19,8 @@ export const uuidSchema = z.uuid();
 // --- Money / Quantity DTOs — the authoritative, currency/range-aware validators
 //     live with the value objects (they need the currency table / the
 //     NUMERIC(18,4) bounds); re-exported here as the shared FE/BE import surface. ---
-export { moneyDtoSchema, type MoneyDtoShape as MoneyDto, type MoneyDTO } from '@flower/money';
+export { moneyDtoSchema, type MoneyDto };
+export { type MoneyDTO } from '@flower/money';
 export {
   quantityDtoSchema,
   type QuantityDtoShape as QuantityDto,
@@ -441,6 +446,63 @@ export const identifierPackInputSchema = z
   })
   .strict();
 export type IdentifierPackInput = z.infer<typeof identifierPackInputSchema>;
+
+// --- company per-UOM SELL pricing (Phase 3 task 3.7) — PHASE-3-PLAN §C.8 / ADR-0018 §5 ---
+
+/** Max price tiers one replace-set `PUT` may submit (a bounded catalog-config write). */
+export const COMPANY_PRICE_REPLACE_MAX = 100;
+
+/**
+ * One SELL price-tier in the replace-set body. **SELL only** — `purchase_*` is a
+ * schema-only Phase-5 foundation, absent from every Task 3.7 wire contract (D-6).
+ * The amount must be `> 0` and in the company's default currency (D-2 / D-8 /
+ * Inv-3), validated server-side + DB-enforced.
+ */
+export const companyPriceEntrySchema = z
+  .object({
+    /** the variant base UOM OR a UOM resolvable to it via the Task 3.6 conversion model */
+    uomCode: z.string().min(1).max(40),
+    /** the tax-EXCLUSIVE / net sell price */
+    sell: moneyDtoSchema,
+  })
+  .strict();
+export type CompanyPriceEntry = z.infer<typeof companyPriceEntrySchema>;
+
+export const replaceCompanyPricesSchema = z
+  .object({ prices: z.array(companyPriceEntrySchema).max(COMPANY_PRICE_REPLACE_MAX) })
+  .strict();
+export type ReplaceCompanyPricesBody = z.infer<typeof replaceCompanyPricesSchema>;
+
+/** A stored price row as read back — SELL only, plus whether its UOM currently
+ *  resolves to the variant base (`false` ⇒ a conversion was deleted, D-5). */
+export interface CompanyPriceRowView {
+  uomCode: string;
+  sell: MoneyDto;
+  resolvable: boolean;
+}
+
+/** GET `/prices` — the company's own rows + the dedicated price-set version
+ *  (`version: 0`, `priceSetExists: false` ⇔ no aggregate yet; ETag `"0"`). */
+export interface CompanyVariantPriceSetView {
+  version: number;
+  priceSetExists: boolean;
+  prices: CompanyPriceRowView[];
+}
+
+/** GET `/prices/resolve` — a resolved company sell price, or an explicit no-price
+ *  state. A missing price is a normal `200` (never a `422` for absence — D-13).
+ *  NO branch fallback, NO cross-company fallback, NO price multiplication. */
+export const COMPANY_PRICE_RESOLVE_REASONS = [
+  'NO_PRICE_SET',
+  'UOM_NOT_PRICED',
+  'UOM_UNRESOLVABLE',
+] as const;
+export type CompanyPriceResolveReason = (typeof COMPANY_PRICE_RESOLVE_REASONS)[number];
+export interface ResolvedCompanyPrice {
+  price: MoneyDto | null;
+  source: 'COMPANY' | null;
+  reason: CompanyPriceResolveReason | null;
+}
 
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct

@@ -18,6 +18,7 @@ import {
   PHASE_3_2_TENANT_PERMISSIONS,
   PHASE_3_4_TENANT_PERMISSIONS,
   PHASE_3_5_TENANT_PERMISSIONS,
+  PHASE_3_7_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   PERMISSION_GROUP_OF,
 } from '@flower/permissions';
@@ -72,6 +73,9 @@ async function main(): Promise<void> {
       // task 3.5 — the reserved `identifiers:manage` key (D2-6). Existing DBs
       // also get it via the task 3.5 migration. Stays in its `inventory` group.
       ...PHASE_3_5_TENANT_PERMISSIONS.map((key) => ({ key, phase: 3 })),
+      // task 3.7 — the reserved `pricing:manage` key (D2-6). Existing DBs also
+      // get it via the task 3.7 migration. In its `catalog` group.
+      ...PHASE_3_7_TENANT_PERMISSIONS.map((key) => ({ key, phase: 3 })),
     ];
     for (const { key, phase } of TENANT_REGISTRY) {
       await prisma.permissionRegistry.upsert({

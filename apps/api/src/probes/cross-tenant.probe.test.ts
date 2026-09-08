@@ -14,6 +14,7 @@ import {
   PHASE_3_2_TENANT_PERMISSIONS,
   PHASE_3_4_TENANT_PERMISSIONS,
   PHASE_3_5_TENANT_PERMISSIONS,
+  PHASE_3_7_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -166,6 +167,7 @@ describe('cross-tenant isolation probe suite', () => {
         ...PHASE_3_2_TENANT_PERMISSIONS,
         ...PHASE_3_4_TENANT_PERMISSIONS,
         ...PHASE_3_5_TENANT_PERMISSIONS,
+        ...PHASE_3_7_TENANT_PERMISSIONS,
       ],
     });
     ownerBTok = await mint('probe-owner-b', {
@@ -178,6 +180,7 @@ describe('cross-tenant isolation probe suite', () => {
         ...PHASE_3_2_TENANT_PERMISSIONS,
         ...PHASE_3_4_TENANT_PERMISSIONS,
         ...PHASE_3_5_TENANT_PERMISSIONS,
+        ...PHASE_3_7_TENANT_PERMISSIONS,
       ],
     });
 
@@ -276,6 +279,19 @@ describe('cross-tenant isolation probe suite', () => {
             [A.tenantId, A.variantId, A.uomCode],
           )
         ).rows[0].id;
+        // task 3.7 — an A-owned company price (aggregate + a base-UOM price row)
+        // to probe: B cannot read, replace, resolve or leak A's pricing.
+        await c2.query(
+          `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now())`,
+          [A.tenantId, A.companyId, A.variantId],
+        );
+        await c2.query(
+          `INSERT INTO company_variant_uom_price
+             (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'piece','99999','AED',2,now())`,
+          [A.tenantId, A.companyId, A.variantId],
+        );
       } finally {
         await c2.end();
       }
@@ -887,6 +903,60 @@ describe('cross-tenant isolation probe suite', () => {
           `/v1/catalog/variants/${A.variantId}/base-uom`,
           ownerBTok,
           { baseUomCode: 'piece' },
+          { 'if-match': '"1"' },
+        ),
+      },
+      // ── task 3.7: company_variant_price_set / company_variant_uom_price are
+      // tenant-scoped through RLS + company-scoped through the guard pipeline.
+      // B (a different tenant) cannot read, replace, resolve or leak A's prices,
+      // even against A's own company id.
+      {
+        name: "GET A company prices as ownerB (A's company id)",
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/companies/${A.companyId}/variants/${A.variantId}/prices`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked: !denied && ['99999', A.companyId].some((s) => blob.includes(s)),
+          };
+        },
+      },
+      {
+        name: 'GET A company price resolve as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/companies/${A.companyId}/variants/${A.variantId}/prices/resolve?uomCode=piece`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked: !denied && blob.includes('99999'),
+          };
+        },
+      },
+      {
+        name: 'PUT A company prices as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/companies/${A.companyId}/variants/${A.variantId}/prices`,
+          ownerBTok,
+          {
+            prices: [
+              { uomCode: 'piece', sell: { amountMinor: '1', currency: 'AED', exponent: 2 } },
+            ],
+          },
           { 'if-match': '"1"' },
         ),
       },

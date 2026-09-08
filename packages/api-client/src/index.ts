@@ -4,6 +4,18 @@ import {
   apiErrorSchema,
   type HealthResponse,
   type ReadinessResponse,
+  type CompanyPriceEntry,
+  type CompanyVariantPriceSetView,
+  type ResolvedCompanyPrice,
+} from '@flower/shared-types';
+
+export type {
+  MoneyDto,
+  CompanyPriceEntry,
+  CompanyPriceRowView,
+  CompanyVariantPriceSetView,
+  CompanyPriceResolveReason,
+  ResolvedCompanyPrice,
 } from '@flower/shared-types';
 
 /**
@@ -1307,6 +1319,35 @@ export class ApiClient {
       { method: 'PUT', body: { conversions }, ifMatch: `"${expectedProductVersion}"` },
       (raw) => raw as ProductConversionsView,
     );
+  }
+
+  // ── company per-UOM SELL pricing (task 3.7) ───────────────────────────────
+  // company-scoped; `pricing:manage` writes / `catalog:view` reads. NO branchId
+  // (task 3.8). NO purchase in the wire contract (D-6). `If-Match` is the
+  // dedicated price-set version — `"0"` on the first write.
+  getCompanyPrices(companyId: string, variantId: string): Promise<CompanyVariantPriceSetView> {
+    return this.get(`/v1/catalog/companies/${companyId}/variants/${variantId}/prices`);
+  }
+  replaceCompanyPrices(
+    companyId: string,
+    variantId: string,
+    prices: CompanyPriceEntry[],
+    expectedVersion: number,
+  ): Promise<CompanyVariantPriceSetView> {
+    return this.call(
+      `/v1/catalog/companies/${companyId}/variants/${variantId}/prices`,
+      { method: 'PUT', body: { prices }, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as CompanyVariantPriceSetView,
+    );
+  }
+  resolveCompanyPrice(
+    companyId: string,
+    variantId: string,
+    uomCode: string,
+  ): Promise<ResolvedCompanyPrice> {
+    return this.get(`/v1/catalog/companies/${companyId}/variants/${variantId}/prices/resolve`, {
+      uomCode,
+    });
   }
 
   overrideTenantLimit(

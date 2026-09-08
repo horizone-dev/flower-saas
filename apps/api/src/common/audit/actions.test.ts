@@ -63,6 +63,8 @@ describe('auditable-action registry', () => {
       'catalog.variant_base_uom_set',
       'catalog.variant_conversions_changed',
       'catalog.product_conversions_changed',
+      // task 3.7 — company per-UOM sale pricing
+      'catalog.company_price_changed',
     ]) {
       expect(isSecurityEventAction(a), a).toBe(false);
     }

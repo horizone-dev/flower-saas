@@ -121,6 +121,16 @@ export const AUDITABLE_ACTIONS = {
   'catalog.variant_conversions_changed': { resourceType: 'variant', security: false },
   'catalog.product_conversions_changed': { resourceType: 'product', security: false },
 
+  // ── company per-UOM sale pricing (task 3.7) ───────────────────────────────
+  // Ordinary tenant commercial configuration — a business event, NOT a security
+  // event (D2-10). ONE audit row per replace-set mutation (incl. `PUT []`),
+  // resource = the `company_variant_price_set` aggregate, payload = the semantic
+  // before/after sell-price map. NOT money-moving (no cash / ledger effect —
+  // that is Phase 3b), so `security: false` and no `security_event` change. NO
+  // realtime / outbox (that is task 3.10). `purchase_*` is never written by the
+  // task 3.7 API, so it never appears in the payload.
+  'catalog.company_price_changed': { resourceType: 'company_variant_price_set', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

@@ -51,6 +51,10 @@ const DOMAIN_FILES = [
   'uom.service.ts',
   'uom.controller.ts',
   'uom.helpers.ts',
+  // task 3.7
+  'company-pricing.repository.ts',
+  'company-pricing.controller.ts',
+  'company-pricing.helpers.ts',
 ];
 
 /** strip `//` line comments and `/* *\/` block comments */
@@ -58,7 +62,7 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
-describe('HG3-NO-BT-BRANCH — catalog domain code (tasks 3.2–3.6) never branches on Business Type', () => {
+describe('HG3-NO-BT-BRANCH — catalog domain code (tasks 3.2–3.7) never branches on Business Type', () => {
   for (const file of DOMAIN_FILES) {
     it(`${file} has no business-type reference in executable code`, () => {
       const code = stripComments(readFileSync(path.join(here, file), 'utf8'));

@@ -366,12 +366,27 @@ export class VariantRepository extends ScopedRepository {
       }
       if (current.baseUomCode === code) return this.getInTx(tx, id); // idempotent no-op
 
-      const [convCount, packCount] = await Promise.all([
+      const [convCount, packCount, priceCount] = await Promise.all([
         tx.uomConversion.count({ where: { scopeKind: 'VARIANT', scopeId: id } }),
         tx.itemIdentifier.count({
           where: { targetKind: 'VARIANT', targetId: id, packUomCode: { not: null } },
         }),
+        // task 3.7 (Inv-1) — a `company_variant_uom_price` row for this variant,
+        // across ANY company. Once any company price exists, the base UOM is
+        // frozen (existing prices must not be silently reinterpreted under a new
+        // base). To change the base: `PUT …/prices []` for every pricing company,
+        // then the rules below apply again. Only price ROWS block — the retained
+        // empty `company_variant_price_set` aggregate does not.
+        tx.companyVariantUomPrice.count({ where: { variantId: id } }),
       ]);
+
+      if (priceCount > 0) {
+        throw new DomainError(
+          'VARIANT_BASE_UOM_LOCKED',
+          'this variant has company prices — remove every company price row (PUT …/prices []) before changing its base UOM',
+          409,
+        );
+      }
 
       if (current.baseUomCode === null) {
         // one-time initialization — DRAFT or legacy ACTIVE, but nothing may depend on it yet

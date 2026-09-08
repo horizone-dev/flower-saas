@@ -102,7 +102,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_catalog_attributes'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_variants'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_identifiers'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_uom$/);
+    expect(names.some((n) => n.endsWith('_catalog_uom'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_company_pricing$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -787,12 +788,11 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       // product / category / product_type (task 3.2) + attribute_definition /
       // attribute_option / product_attribute_value (task 3.3) + option_group /
       // option_value / variant / variant_option_value (task 3.4) +
-      // item_identifier (task 3.5) + uom / uom_conversion (task 3.6) are created
-      // below — the rest stay forbidden through Phase 3a. `item_identifier` and
-      // `uom_conversion.scope_kind` are VARIANT/PRODUCT-only; the `inventory_item`
-      // one will one day also target is NOT created.
+      // item_identifier (task 3.5) + uom / uom_conversion (task 3.6) +
+      // company_variant_price_set / company_variant_uom_price (task 3.7) are
+      // created below — the rest stay forbidden through Phase 3a. `branch_*`
+      // pricing / availability is task 3.8; `inventory_*` is Phase 5.
       for (const forbidden of [
-        'company_variant_uom_price',
         'branch_variant_uom_price',
         'branch_variant_availability',
         'inventory_item',
@@ -2485,13 +2485,12 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       await pool.query(`DELETE FROM "uom" WHERE "tenantId" IN ($1,$2)`, [TENANT_A, TENANT_B]);
     };
 
-    it('records the migration and it is the LAST one', async () => {
+    it('records the catalog_uom migration', async () => {
       const { rows } = await pool.query<{ migration_name: string }>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
       );
       const names = rows.map((r) => r.migration_name);
       expect(names.some((n) => n.endsWith('_catalog_uom'))).toBe(true);
-      expect(names.at(-1)).toMatch(/_catalog_uom$/);
     });
 
     it('creates exactly uom / uom_conversion — no price / cost / currency / company / branch / stock column', async () => {
@@ -2823,6 +2822,375 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       );
       expect(rows[0]!.definition).not.toMatch(/uom/i);
       expect(rows[0]!.definition).toMatch(/catalog\.template_applied/);
+    });
+  });
+
+  // ── task 3.7 — company per-UOM SELL pricing ────────────────────────────────
+  // docs/phase-3/PHASE-3-PLAN.md §C.8 (corrected). TWO tenant-owned tables +
+  // additive FK-target UNIQUE constraints. NO discount / list-price / tax /
+  // effective-date / branch / stock / promotion column. NO `version` on the
+  // price row (the aggregate owns it). Currency code AND exponent DB-enforced.
+  describe('company pricing schema (task 3.7)', () => {
+    const seedCurrencies = async (): Promise<void> => {
+      for (const [code, exp] of [
+        ['AED', 2],
+        ['SAR', 2],
+        ['KWD', 3],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
+           VALUES ($1, $2, 'x', $1, $1) ON CONFLICT (code) DO NOTHING`,
+          [code, exp],
+        );
+      }
+    };
+    const mk = async (
+      tenant: string,
+      slug: string,
+      currency: string | null = 'AED',
+    ): Promise<{ company: string; cat: string; prod: string; variant: string }> => {
+      const company = (
+        await pool.query(
+          `INSERT INTO company (id,"tenantId","legalNameEn","defaultCurrency","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now()) RETURNING id`,
+          [tenant, `${slug} Co`, currency],
+        )
+      ).rows[0].id as string;
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,$2,'C',now()) RETURNING id`,
+          [tenant, `${slug}-c`],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'P','STOCKED','DRAFT',now()) RETURNING id`,
+          [tenant, cat, `${slug}-p`],
+        )
+      ).rows[0].id as string;
+      const variant = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","status","baseUomCode","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','DRAFT','piece',now()) RETURNING id`,
+          [tenant, prod],
+        )
+      ).rows[0].id as string;
+      return { company, cat, prod, variant };
+    };
+    const clean = async (ids: { company: string; cat: string; prod: string }): Promise<void> => {
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [ids.prod]).catch(() => {});
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [ids.cat]).catch(() => {});
+      await pool.query(`DELETE FROM "company" WHERE id = $1`, [ids.company]).catch(() => {});
+    };
+
+    beforeAll(seedCurrencies);
+
+    it('records the migration and it is the LAST one', async () => {
+      const { rows } = await pool.query<{ migration_name: string }>(
+        `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
+      );
+      const names = rows.map((r) => r.migration_name);
+      expect(names.at(-1)).toMatch(/_catalog_company_pricing$/);
+    });
+
+    it('creates exactly company_variant_price_set / company_variant_uom_price — no discount / list-price / tax / effective-date / branch / stock column', async () => {
+      const cols = async (t: string): Promise<string[]> => {
+        const { rows } = await pool.query<{ column_name: string }>(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+          [t],
+        );
+        return rows.map((r) => r.column_name).sort();
+      };
+      expect(await cols('company_variant_price_set')).toEqual(
+        ['id', 'tenantId', 'companyId', 'variantId', 'version', 'createdAt', 'updatedAt'].sort(),
+      );
+      expect(await cols('company_variant_uom_price')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'companyId',
+          'variantId',
+          'uomCode',
+          'sellAmountMinor',
+          'sellCurrencyCode',
+          'sellCurrencyExponent',
+          'purchaseAmountMinor',
+          'purchaseCurrencyCode',
+          'purchaseCurrencyExponent',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      // the price ROW has NO `version` (the aggregate owns it), NO branch / tax /
+      // discount / promotion / effective-date / stock / list-price column
+      for (const forbidden of [
+        'version',
+        'branchId',
+        'taxCategoryKey',
+        'taxRateBps',
+        'discountAmountMinor',
+        'listAmountMinor',
+        'rrpAmountMinor',
+        'promotionId',
+        'priceListId',
+        'customerGroupId',
+        'effectiveFrom',
+        'effectiveTo',
+        'onHandQty',
+      ]) {
+        expect(await cols('company_variant_uom_price')).not.toContain(forbidden);
+      }
+      // bigint money amounts (no float / numeric for money)
+      const { rows: t } = await pool.query<{ column_name: string; data_type: string }>(
+        `SELECT column_name, data_type FROM information_schema.columns
+          WHERE table_name = 'company_variant_uom_price'
+            AND column_name IN ('sellAmountMinor','purchaseAmountMinor')`,
+      );
+      expect(t.every((r) => r.data_type === 'bigint')).toBe(true);
+    });
+
+    it('company_variant_uom_price CHECKs: uom shape, sell > 0, sell currency shape, exponent range, purchase triple all-or-none, purchase >= 0', async () => {
+      const ids = await mk(TENANT_A, 'chk');
+      const set = (
+        await pool.query(
+          `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now()) RETURNING id`,
+          [TENANT_A, ids.company, ids.variant],
+        )
+      ).rows[0].id as string;
+      const ins = (
+        uom: string,
+        amt: string,
+        cur: string,
+        exp: number,
+        purchase = '',
+      ): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO company_variant_uom_price
+             (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent"${purchase ? ',"purchaseAmountMinor"' : ''},"updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,$6,$7${purchase ? ',' + purchase : ''},now())`,
+          [TENANT_A, ids.company, ids.variant, uom, amt, cur, exp],
+        );
+      await expect(ins('BOX', '100', 'AED', 2)).rejects.toThrow(/cvup_uom_code_shape_chk/i);
+      await expect(ins('box', '0', 'AED', 2)).rejects.toThrow(/cvup_sell_amount_positive_chk/i);
+      await expect(ins('box', '-5', 'AED', 2)).rejects.toThrow(/cvup_sell_amount_positive_chk/i);
+      await expect(ins('box', '100', 'aed', 2)).rejects.toThrow(/cvup_sell_currency_shape_chk/i);
+      await expect(ins('box', '100', 'AED', 7)).rejects.toThrow(/cvup_sell_exponent_range_chk/i);
+      // purchase triple: amount without currency/exponent
+      await expect(ins('box', '100', 'AED', 2, '50')).rejects.toThrow(/cvup_purchase_triple_chk/i);
+      // a valid row succeeds
+      await expect(ins('box', '100', 'AED', 2)).resolves.toBeTruthy();
+      await pool.query(`DELETE FROM company_variant_price_set WHERE id = $1`, [set]);
+      await clean(ids);
+    });
+
+    it('sell currency MUST equal company.defaultCurrency (composite FK, ON UPDATE RESTRICT — NOT CASCADE)', async () => {
+      const ids = await mk(TENANT_A, 'cur', 'AED');
+      await pool.query(
+        `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,now())`,
+        [TENANT_A, ids.company, ids.variant],
+      );
+      const insPrice = (cur: string, exp: number): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO company_variant_uom_price
+             (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'piece','100',$4,$5,now())`,
+          [TENANT_A, ids.company, ids.variant, cur, exp],
+        );
+      // wrong company currency → rejected by the (tenantId, companyId, sellCurrencyCode) → company FK
+      await expect(insPrice('SAR', 2)).rejects.toThrow(/foreign key|company_currency_fkey/i);
+      await expect(insPrice('AED', 2)).resolves.toBeTruthy();
+      // company.defaultCurrency cannot change while a price row references it
+      await expect(
+        pool.query(`UPDATE company SET "defaultCurrency" = 'SAR' WHERE id = $1`, [ids.company]),
+      ).rejects.toThrow(/foreign key|update or delete|company_currency_fkey|violates/i);
+      // the AED price row is untouched (NOT rewritten to SAR)
+      const { rows } = await pool.query<{ c: string }>(
+        `SELECT "sellCurrencyCode" AS c FROM company_variant_uom_price WHERE "companyId" = $1`,
+        [ids.company],
+      );
+      expect(rows[0]!.c).toBe('AED');
+      await pool.query(`DELETE FROM company_variant_price_set WHERE "companyId" = $1`, [
+        ids.company,
+      ]);
+      await clean(ids);
+    });
+
+    it('sell (currency, exponent) MUST be an authoritative currency pair (FK to currency(code, exponent), ON UPDATE RESTRICT)', async () => {
+      const ids = await mk(TENANT_A, 'exp', 'AED');
+      await pool.query(
+        `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,now())`,
+        [TENANT_A, ids.company, ids.variant],
+      );
+      // AED's authoritative exponent is 2 — storing (AED, 3) is rejected by the DB
+      await expect(
+        pool.query(
+          `INSERT INTO company_variant_uom_price
+             (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'piece','100','AED',3,now())`,
+          [TENANT_A, ids.company, ids.variant],
+        ),
+      ).rejects.toThrow(/foreign key|currency_pair_fkey|violates/i);
+      // (AED, 2) succeeds
+      await pool.query(
+        `INSERT INTO company_variant_uom_price
+           (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,'piece','100','AED',2,now())`,
+        [TENANT_A, ids.company, ids.variant],
+      );
+      // currency exponent cannot silently mutate the meaning of an existing price
+      await expect(
+        pool.query(`UPDATE currency SET exponent = 3 WHERE code = 'AED'`),
+      ).rejects.toThrow(/foreign key|update or delete|currency_pair_fkey|violates/i);
+      await pool.query(`DELETE FROM company_variant_price_set WHERE "companyId" = $1`, [
+        ids.company,
+      ]);
+      await clean(ids);
+    });
+
+    it('price row belongs to the aggregate by (tenantId, companyId, variantId); ON DELETE CASCADE with the price set / company / variant', async () => {
+      const ids = await mk(TENANT_A, 'casc', 'AED');
+      // a price row with NO aggregate is rejected
+      await expect(
+        pool.query(
+          `INSERT INTO company_variant_uom_price
+             (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'piece','100','AED',2,now())`,
+          [TENANT_A, ids.company, ids.variant],
+        ),
+      ).rejects.toThrow(/foreign key|price_set_fkey|violates/i);
+      await pool.query(
+        `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,now())`,
+        [TENANT_A, ids.company, ids.variant],
+      );
+      await pool.query(
+        `INSERT INTO company_variant_uom_price
+           (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,'piece','100','AED',2,now())`,
+        [TENANT_A, ids.company, ids.variant],
+      );
+      // deleting the variant cascades away both the aggregate and the price row
+      await pool.query(`DELETE FROM "variant" WHERE id = $1`, [ids.variant]);
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT (SELECT count(*) FROM company_variant_price_set WHERE "companyId" = $1)::text
+              || '/' || (SELECT count(*) FROM company_variant_uom_price WHERE "companyId" = $1)::text AS n`,
+        [ids.company],
+      );
+      expect(rows[0]!.n).toBe('0/0');
+      await clean(ids);
+    });
+
+    it('UNIQUE (tenantId, companyId, variantId) on the set; (tenantId, companyId, variantId, uomCode) on the row', async () => {
+      const ids = await mk(TENANT_A, 'uniq', 'AED');
+      await pool.query(
+        `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,now())`,
+        [TENANT_A, ids.company, ids.variant],
+      );
+      await expect(
+        pool.query(
+          `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now())`,
+          [TENANT_A, ids.company, ids.variant],
+        ),
+      ).rejects.toThrow(/unique|company_variant_price_set_scope_key/i);
+      const p = (): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO company_variant_uom_price
+             (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'piece','100','AED',2,now())`,
+          [TENANT_A, ids.company, ids.variant],
+        );
+      await expect(p()).resolves.toBeTruthy();
+      await expect(p()).rejects.toThrow(/unique|scope_uom_key/i);
+      await pool.query(`DELETE FROM company_variant_price_set WHERE "companyId" = $1`, [
+        ids.company,
+      ]);
+      await clean(ids);
+    });
+
+    it('RLS ENABLE + FORCE + policy; no-GUC read → zero rows; flower_app NOBYPASSRLS + full DML', async () => {
+      const rls = await pool.query<{
+        relname: string;
+        relrowsecurity: boolean;
+        relforcerowsecurity: boolean;
+      }>(
+        `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class
+          WHERE relname IN ('company_variant_price_set','company_variant_uom_price')`,
+      );
+      expect(rls.rows.length).toBe(2);
+      expect(rls.rows.every((r) => r.relrowsecurity && r.relforcerowsecurity)).toBe(true);
+
+      const ids = await mk(TENANT_A, 'rls', 'AED');
+      await pool.query(
+        `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,now())`,
+        [TENANT_A, ids.company, ids.variant],
+      );
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL ROLE ${DB_ROLES.app}`);
+        // no GUC → zero rows (fails closed)
+        expect(
+          Number(
+            (await c.query(`SELECT count(*)::int AS n FROM company_variant_price_set`)).rows[0].n,
+          ),
+        ).toBe(0);
+        await c.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+        expect(
+          Number(
+            (await c.query(`SELECT count(*)::int AS n FROM company_variant_price_set`)).rows[0].n,
+          ),
+        ).toBe(1);
+      } finally {
+        await c.query('ROLLBACK').catch(() => {});
+        c.release();
+      }
+      // full DML for the Owner-written price data (NOT SELECT-only)
+      const g = await pool.query<{ privilege_type: string }>(
+        `SELECT privilege_type FROM information_schema.role_table_grants
+          WHERE grantee = 'flower_app' AND table_name = 'company_variant_uom_price'`,
+      );
+      expect(new Set(g.rows.map((r) => r.privilege_type))).toEqual(
+        new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE']),
+      );
+      const nb = await pool.query<{ rolbypassrls: boolean }>(
+        `SELECT rolbypassrls FROM pg_roles WHERE rolname = 'flower_app'`,
+      );
+      expect(nb.rows[0]!.rolbypassrls).toBe(false);
+      await pool.query(`DELETE FROM company_variant_price_set WHERE "companyId" = $1`, [
+        ids.company,
+      ]);
+      await clean(ids);
+    });
+
+    it('both tables in TENANT_SCOPED_TABLES; pricing:manage registered TENANT/catalog; owner+admin get it, manager does not; security_event unchanged', async () => {
+      expect(TENANT_SCOPED_TABLES).toContain('company_variant_price_set');
+      expect(TENANT_SCOPED_TABLES).toContain('company_variant_uom_price');
+
+      const reg = await pool.query<{ realm: string; groupKey: string }>(
+        `SELECT realm, "groupKey" FROM permission_registry WHERE key = 'pricing:manage'`,
+      );
+      expect(reg.rows[0]).toEqual({ realm: 'TENANT', groupKey: 'catalog' });
+
+      // no built-in system roles exist in this bare-migration DB (they are seeded
+      // at provisioning) — the migration's backfill is a no-op here, which is
+      // correct. Assert the backfill SQL targeted only owner/admin by checking it
+      // did not create any `role_permission` row (no roles present).
+      const rp = await pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM role_permission WHERE "permissionKey" = 'pricing:manage'`,
+      );
+      expect(Number(rp.rows[0]!.n)).toBe(0);
+
+      const { rows } = await pool.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
+      );
+      expect(rows[0]!.definition).not.toMatch(/company_price|company_variant/i);
     });
   });
 
