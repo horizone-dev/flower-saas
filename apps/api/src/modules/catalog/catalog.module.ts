@@ -21,6 +21,10 @@ import { ProductVariantController, VariantController } from './variant.controlle
 import { IdentifierRepository } from './identifier.repository.js';
 import { IdentifierService } from './identifier.service.js';
 import { IdentifierController } from './identifier.controller.js';
+import { UomRepository } from './uom.repository.js';
+import { UomConversionRepository } from './uom-conversion.repository.js';
+import { UomService, VariantUomService } from './uom.service.js';
+import { UomController, CatalogUomConversionController } from './uom.controller.js';
 
 /**
  * `catalog` module (Phase 3).
@@ -56,6 +60,10 @@ import { IdentifierController } from './identifier.controller.js';
     VariantService,
     IdentifierRepository,
     IdentifierService,
+    UomRepository,
+    UomConversionRepository,
+    UomService,
+    VariantUomService,
   ],
   controllers: [
     CatalogCapabilityController,
@@ -68,6 +76,8 @@ import { IdentifierController } from './identifier.controller.js';
     ProductVariantController,
     VariantController,
     IdentifierController,
+    UomController,
+    CatalogUomConversionController,
   ],
   exports: [CatalogCapabilityService],
 })

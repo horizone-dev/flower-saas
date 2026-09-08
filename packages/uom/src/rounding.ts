@@ -7,6 +7,33 @@
 export type RoundingMode = 'HALF_UP' | 'HALF_EVEN' | 'DOWN' | 'UP' | 'HALF_DOWN';
 
 /**
+ * A division that could not be performed **exactly** — the numerator is not an
+ * integer multiple of the denominator, so any result would silently lose
+ * precision. Raised by `divRoundExact` / `Quantity.scaleByExact` /
+ * `UomRegistry.convertExact`. Task 3.6 uses the exact path for a printed
+ * pack-identity snapshot (`item_identifier.packBaseQty`): if the base quantity
+ * is not exactly representable at scale 4, the identifier is rejected rather
+ * than rounded.
+ */
+export class InexactError extends RangeError {
+  constructor(numerator: bigint, denominator: bigint) {
+    super(`${numerator} / ${denominator} is not exact — result would lose precision`);
+    this.name = 'InexactError';
+  }
+}
+
+/**
+ * Divide `numerator / denominator` (denominator > 0) and return the exact
+ * integer quotient, or throw `InexactError` if there is any remainder. No
+ * rounding, no rounding mode — exact or reject.
+ */
+export function divRoundExact(numerator: bigint, denominator: bigint): bigint {
+  if (denominator <= 0n) throw new RangeError('denominator must be > 0');
+  if (numerator % denominator !== 0n) throw new InexactError(numerator, denominator);
+  return numerator / denominator;
+}
+
+/**
  * Divide `numerator / denominator` (denominator > 0) and round the quotient to
  * an integer using `mode`. Sign-aware (half-up rounds away from zero).
  */

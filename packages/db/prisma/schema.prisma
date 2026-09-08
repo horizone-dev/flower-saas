@@ -1336,7 +1336,11 @@ model OptionValue {
 /// combination are immutable ("variant identity immutability"); option
 /// selections change only while DRAFT. `isDefault = true` ⇒ `optionSignature`
 /// is '' and there are zero `variant_option_value` rows (CHECK + service +
-/// tests). No price / currency / sku / baseUom / stock column — ever.
+/// tests). No price / currency / sku / stock column — ever (D2-2). `baseUomCode`
+/// (task 3.6, nullable — OD-2, NO backfill) is the canonical base UOM; it is a
+/// textual reference (a `@flower/uom` built-in OR a tenant `uom.code`), with NO
+/// DB FK (OD-5) — the service validates it against `@flower/uom` and row-locks
+/// any tenant-custom code (FOR KEY SHARE).
 model Variant {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
@@ -1353,6 +1357,10 @@ model Variant {
   optionSignature String   @default("")
   /// DRAFT | ACTIVE | ARCHIVED (CHECK)
   status          String   @default("DRAFT")
+  /// canonical base UOM — task 3.6. Nullable (no backfill); STOCKED/BOM need it
+  /// to reach ACTIVE. Locked once a conversion or a pack identifier depends on
+  /// it. Shape CHECK, NO FK (OD-5).
+  baseUomCode     String?
   version         Int      @default(1)
   createdAt       DateTime @default(now()) @db.Timestamptz(6)
   updatedAt       DateTime @updatedAt @db.Timestamptz(6)
@@ -1452,10 +1460,78 @@ model ItemIdentifier {
   /// ACTIVE | INACTIVE (CHECK). Deactivation preserves the row + never frees the
   /// value. Reactivation flips this back on the same row.
   status    String   @default("ACTIVE")
+  /// task 3.6 — the IMMUTABLE printed pack-identity snapshot. BARCODE / QR only
+  /// (SKU pack-forbidden, CHECK). All three NULL or all three non-NULL (CHECK).
+  /// `packBaseQty` = `packQty` converted to the target variant's `baseUomCode`
+  /// EXACTLY ONCE at create (`@flower/uom` `convertExact`) — never recomputed.
+  packUomCode String?
+  packQty     Decimal? @db.Decimal(18, 4)
+  packBaseQty Decimal? @db.Decimal(18, 4)
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
   @@unique([tenantId, value])
   @@index([tenantId, targetKind, targetId])
   @@map("item_identifier")
+}
+
+// ══════════════════════ UOM registry + pack conversions (task 3.6) ═══════════
+// docs/phase-3/PHASE-3-PLAN.md §C.7 / ADR-0018 / D0-1. Two tenant-owned tables,
+// company / branch / price / currency / stock-neutral. Built-in units come from
+// `@flower/uom` (no DB row); a `uom` row is only ever a tenant-specific unit.
+// Conversions are P2 base-anchored (no graph / traversal). NO `GLOBAL` scope.
+// The migration adds the generated `scopeVariantId` / `scopeProductId` shadow
+// columns + the tenant-safe composite FKs + the two partial unique indexes it
+// cannot express; Prisma models the scalar columns only (Task 3.5 pattern).
+
+/// A tenant custom unit of measure. Semantic fields (`code` / `family` /
+/// `perBaseNum` / `perBaseDen` / `maxDecimals`) are IMMUTABLE after create
+/// (service-enforced); only `nameEn` / `nameAr` are editable (`PUT` + `version`
+/// If-Match). Hard-delete only while completely unreferenced.
+model Uom {
+  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  /// canonical lowercase, NOT a `@flower/uom` built-in (CHECK + service)
+  code        String
+  /// LENGTH | MASS | VOLUME | COUNT | EACH (CHECK). Immutable.
+  family      String
+  /// exact ratio of family-base units per one of this unit. Immutable.
+  /// EACH ⇒ forced 1/1 (CHECK). COUNT ⇒ maxDecimals 0 (CHECK).
+  perBaseNum  BigInt   @default(1)
+  perBaseDen  BigInt   @default(1)
+  maxDecimals Int      @default(0) @db.SmallInt
+  nameEn      String
+  nameAr      String?
+  version     Int      @default(1)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("uom")
+}
+
+/// A base-anchored explicit conversion, scoped to one VARIANT or one PRODUCT
+/// (D0-1 — there is NO `GLOBAL` scope). `num` `toUomCode` units per `den`
+/// `fromUomCode` units. For VARIANT scope the service pins `toUomCode` to the
+/// variant's `baseUomCode`. Ratio edits are semantic (bump the parent
+/// variant/product `version` + audit before/after) — they NEVER rewrite a frozen
+/// `item_identifier.packBaseQty`. CASCADE-deletes with its variant/product.
+model UomConversion {
+  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  /// VARIANT | PRODUCT (CHECK)
+  scopeKind   String
+  /// variant.id | product.id — tenant-safe composite FK via the migration's
+  /// generated `scopeVariantId` / `scopeProductId` shadow columns.
+  scopeId     String   @db.Uuid
+  fromUomCode String
+  toUomCode   String
+  num         BigInt
+  den         BigInt   @default(1)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([tenantId, scopeKind, scopeId])
+  @@map("uom_conversion")
 }

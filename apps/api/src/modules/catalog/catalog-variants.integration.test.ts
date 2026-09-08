@@ -261,6 +261,33 @@ describe('variants + option groups (task 3.4, integration)', () => {
       status: string;
     }[];
   };
+  /**
+   * task 3.6 (owner OD-G) — a STOCKED / BOM variant now needs a base UOM before
+   * it can reach ACTIVE. This helper transparently sets `baseUomCode = 'piece'`
+   * (a built-in — no `multi_uom` needed) if unset, then POSTs `/activate`.
+   */
+  async function activateVariant(token: string, variantId: string) {
+    const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
+      version: number;
+      baseUomCode: string | null;
+    };
+    let version = cur.version;
+    if (cur.baseUomCode === null) {
+      const sb = await req(
+        'PUT',
+        `/catalog/variants/${variantId}/base-uom`,
+        token,
+        { baseUomCode: 'piece' },
+        { 'if-match': `"${version}"` },
+      );
+      expect(sb.statusCode, sb.payload).toBe(200);
+      version = (sb.json() as { version: number }).version;
+    }
+    return req('POST', `/catalog/variants/${variantId}/activate`, token, undefined, {
+      'idempotency-key': ik(),
+      'if-match': `"${version}"`,
+    });
+  }
   async function addGroup(
     token: string,
     productId: string,
@@ -619,10 +646,7 @@ describe('variants + option groups (task 3.4, integration)', () => {
         'idempotency-key': ik(),
         'if-match': `"${pv}"`,
       });
-      const act = await req('POST', `/catalog/variants/${v1.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${v1.version}"`,
-      });
+      const act = await activateVariant(ownerA, v1.id);
       expect(act.statusCode, act.payload).toBe(200);
       const v1v2 = (act.json() as { version: number }).version;
 
@@ -640,10 +664,7 @@ describe('variants + option groups (task 3.4, integration)', () => {
       ]);
       expect(v2.statusCode, v2.payload).toBe(201);
       const v2Id = (v2.json() as { id: string }).id;
-      await req('POST', `/catalog/variants/${v2Id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${(v2.json() as { version: number }).version}"`,
-      });
+      await activateVariant(ownerA, v2Id);
 
       // reactivating v1 now → 409 (v2 holds the combination), no mutation
       const archived = (
@@ -684,7 +705,6 @@ describe('variants + option groups (task 3.4, integration)', () => {
         { 'if-match': `"${v.version}"` },
       );
       expect(edit.statusCode, edit.payload).toBe(200);
-      const v2 = (edit.json() as { version: number }).version;
 
       // activate product + variant, then a combination edit → 409
       const pv = (
@@ -694,10 +714,7 @@ describe('variants + option groups (task 3.4, integration)', () => {
         'idempotency-key': ik(),
         'if-match': `"${pv}"`,
       });
-      const actv = await req('POST', `/catalog/variants/${v.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${v2}"`,
-      });
+      const actv = await activateVariant(ownerA, v.id);
       const v3 = (actv.json() as { version: number }).version;
       const drift = await req(
         'PUT',
@@ -759,13 +776,7 @@ describe('variants + option groups (task 3.4, integration)', () => {
 
       // the variant cannot activate before the product is ACTIVE — but now it is
       const vRow = (await listVariants(ownerA, p.id))[0]!;
-      const vFull = (await req('GET', `/catalog/variants/${vRow.id}`, ownerA)).json() as {
-        version: number;
-      };
-      const va = await req('POST', `/catalog/variants/${vRow.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${vFull.version}"`,
-      });
+      const va = await activateVariant(ownerA, vRow.id);
       expect(va.statusCode, va.payload).toBe(200);
       expect((va.json() as { status: string }).status).toBe('ACTIVE');
     });
@@ -846,9 +857,19 @@ describe('variants + option groups (task 3.4, integration)', () => {
       });
       expect(pa.statusCode).toBe(200);
       const v = (await listVariants(ownerA, p.id))[0]!;
-      const vv = (await req('GET', `/catalog/variants/${v.id}`, ownerA)).json() as {
+      // task 3.6 — a built-in base UOM first (no multi_uom needed)
+      const v0 = (await req('GET', `/catalog/variants/${v.id}`, ownerA)).json() as {
         version: number;
       };
+      const sb = await req(
+        'PUT',
+        `/catalog/variants/${v.id}/base-uom`,
+        ownerA,
+        { baseUomCode: 'piece' },
+        { 'if-match': `"${v0.version}"` },
+      );
+      expect(sb.statusCode, sb.payload).toBe(200);
+      const vv = { version: (sb.json() as { version: number }).version };
       const before = await auditRows(tenantA, 'catalog.variant_status_changed');
       const key = ik();
       const a = await req('POST', `/catalog/variants/${v.id}/activate`, ownerA, undefined, {

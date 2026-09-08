@@ -60,6 +60,10 @@ export const TENANT_SCOPED_TABLES: readonly string[] = Object.freeze([
   // Phase 3 (task 3.5) — the scannable-code registry (SKU / barcode / QR),
   // tenant-scoped, company/branch/price/stock-neutral
   'item_identifier',
+  // Phase 3 (task 3.6) — UOM registry + product/variant-scoped pack conversions,
+  // tenant-scoped, company/branch/price/currency/stock-neutral
+  'uom',
+  'uom_conversion',
 ]);
 
 /**

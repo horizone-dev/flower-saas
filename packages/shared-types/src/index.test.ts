@@ -286,3 +286,34 @@ describe('@flower/shared-types — identifiers (task 3.5)', () => {
     expect(QR_VALUE_RE.test('0123')).toBe(false);
   });
 });
+
+describe('@flower/shared-types — UOM / pack conversion (task 3.6)', () => {
+  it('re-exports the canonical UOM-code semantics from @flower/uom', async () => {
+    const m = await import('./index.js');
+    expect(m.canonicalUomCode('  BOX ')).toBe('box');
+    expect(m.UOM_CODE_RE.test('bag-25kg')).toBe(true);
+    expect(m.UOM_CODE_RE.test('box/12')).toBe(false); // no slash
+    expect(m.isBuiltinUom('piece')).toBe(true);
+    expect(m.isBuiltinUom('box')).toBe(false);
+    expect(m.BUILTIN_UOMS.map((u) => u.code).sort()).toContain('milliliter');
+  });
+
+  it('the UOM family + conversion-scope enums are closed; there is NO GLOBAL scope', async () => {
+    const m = await import('./index.js');
+    expect([...m.UOM_FAMILIES].sort()).toEqual(['COUNT', 'EACH', 'LENGTH', 'MASS', 'VOLUME']);
+    expect([...m.UOM_CONVERSION_SCOPE_KINDS]).toEqual(['VARIANT', 'PRODUCT']);
+    expect(m.uomConversionScopeKindSchema.safeParse('GLOBAL').success).toBe(false);
+  });
+
+  it('identifierPackInputSchema requires both packUomCode and packQty, rejects extra keys', async () => {
+    const m = await import('./index.js');
+    expect(
+      m.identifierPackInputSchema.safeParse({ packUomCode: 'box', packQty: '1' }).success,
+    ).toBe(true);
+    expect(m.identifierPackInputSchema.safeParse({ packUomCode: 'box' }).success).toBe(false);
+    expect(
+      m.identifierPackInputSchema.safeParse({ packUomCode: 'box', packQty: '1', packBaseQty: '12' })
+        .success,
+    ).toBe(false);
+  });
+});

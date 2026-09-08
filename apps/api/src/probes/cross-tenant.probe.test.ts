@@ -60,6 +60,8 @@ describe('cross-tenant isolation probe suite', () => {
     optionGroupId: '',
     identifierId: '',
     identifierValue: '',
+    uomCode: '',
+    uomConversionId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -257,6 +259,21 @@ describe('cross-tenant isolation probe suite', () => {
             `INSERT INTO item_identifier (id,"tenantId","targetKind","targetId","codeType","value","updatedAt")
              VALUES (uuidv7(),$1,'VARIANT',$2,'BARCODE',$3,now()) RETURNING id`,
             [A.tenantId, A.variantId, A.identifierValue],
+          )
+        ).rows[0].id;
+        // task 3.6 — an A-owned custom UOM + a variant-scoped conversion to probe
+        A.uomCode = 'aonlybox';
+        await c2.query(
+          `INSERT INTO uom (id,"tenantId","code","family","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'EACH','A only box',now())`,
+          [A.tenantId, A.uomCode],
+        );
+        await c2.query(`UPDATE variant SET "baseUomCode"='piece' WHERE id=$1`, [A.variantId]);
+        A.uomConversionId = (
+          await c2.query(
+            `INSERT INTO uom_conversion (id,"tenantId","scopeKind","scopeId","fromUomCode","toUomCode","num","updatedAt")
+             VALUES (uuidv7(),$1,'VARIANT',$2,$3,'piece',12,now()) RETURNING id`,
+            [A.tenantId, A.variantId, A.uomCode],
           )
         ).rows[0].id;
       } finally {
@@ -781,6 +798,96 @@ describe('cross-tenant isolation probe suite', () => {
           ownerBTok,
           undefined,
           { 'idempotency-key': 'probe-b-id-react-0001' },
+        ),
+      },
+      // ── task 3.6: uom + uom_conversion are tenant-scoped through RLS + the
+      // tenant-safe composite FK on the generated scopeVariantId column. B
+      // cannot list, read, mutate or delete A's units / conversions, cannot
+      // scope a conversion to A's variant, and a list never leaks A's unit.
+      {
+        name: 'GET / list A UOM registry as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send('GET', '/v1/catalog/uoms', ownerBTok);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode === 200 ? 200 : res.statusCode,
+            leaked:
+              res.statusCode === 200 && [A.uomCode, 'A only box'].some((s) => blob.includes(s)),
+          };
+        },
+      },
+      {
+        name: 'PUT A custom UOM as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/uoms/${A.uomCode}`,
+          ownerBTok,
+          { nameEn: 'pwn' },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'DELETE A custom UOM as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409],
+        attempt: asStatus('DELETE', `/v1/catalog/uoms/${A.uomCode}`, ownerBTok, undefined, {
+          'if-match': '"1"',
+        }),
+      },
+      {
+        name: 'GET A variant conversions as ownerB',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/variants/${A.variantId}/conversions`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked: !denied && [A.uomCode, A.uomConversionId].some((s) => blob.includes(s)),
+          };
+        },
+      },
+      {
+        name: 'PUT a conversion scoped to A variant as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/variants/${A.variantId}/conversions`,
+          ownerBTok,
+          { conversions: [{ fromUomCode: 'dozen', num: '12' }] },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'PUT A product conversions as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/products/${A.productId}/conversions`,
+          ownerBTok,
+          { conversions: [{ fromUomCode: 'box', toUomCode: 'piece', num: '12' }] },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'PUT A variant base-uom as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404, 409],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/variants/${A.variantId}/base-uom`,
+          ownerBTok,
+          { baseUomCode: 'piece' },
+          { 'if-match': '"1"' },
         ),
       },
     ];

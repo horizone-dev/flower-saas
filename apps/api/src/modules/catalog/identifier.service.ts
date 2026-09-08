@@ -9,19 +9,21 @@ import {
 } from './identifier.repository.js';
 
 /**
- * Task 3.5 identifier orchestration. The ONLY business decision here is the
- * capability gate (owner "CAPABILITY"):
+ * Task 3.5 / 3.6 identifier orchestration. The ONLY business decisions here are
+ * the capability gates:
  *   - a **BARCODE / QR** write (create / reactivate) requires the
- *     `identifiers.barcode_qr` catalog capability enabled;
- *   - a **SKU** write does NOT (a SKU is a basic catalog attribute);
- *   - every **read** (`catalog:view`) is unaffected by capability state;
- *   - a **deactivate** is always allowed — disabling the capability must never
- *     leave the owner unable to retire a code.
+ *     `identifiers.barcode_qr` catalog capability enabled (task 3.5);
+ *   - creating **pack metadata**, and reactivating an identifier that CARRIES
+ *     pack metadata, additionally requires `multi_uom` (task 3.6 §K / FC-5);
+ *   - a **SKU** write, and a plain (no-pack) BARCODE / QR reactivate, keep exact
+ *     Task 3.5 behaviour;
+ *   - every **read** (`catalog:view`) is unaffected by capability state — an
+ *     ACTIVE pack identifier stays readable / scannable when `multi_uom` is off;
+ *   - a **deactivate** is always allowed.
  *
- * `identifiers.barcode_qr` has no required entitlement module, so only
- * `assertEnabled` is ever called (never `assertEntitledFor`). Business Type is
- * never consulted (HG3-NO-BT-BRANCH). All data access / concurrency / audit
- * lives in the repository.
+ * Neither capability has a required entitlement module, so only `assertEnabled`
+ * is ever called. Business Type is never consulted (HG3-NO-BT-BRANCH). All data
+ * access / concurrency / audit lives in the repository.
  */
 @Injectable()
 export class IdentifierService {
@@ -40,6 +42,7 @@ export class IdentifierService {
 
   async create(input: CreateIdentifierInput): Promise<ItemIdentifierRow> {
     await this.assertBarcodeQrCapability(input.codeType);
+    if (input.pack) await this.caps.assertEnabled('multi_uom');
     return this.repo.create(input);
   }
 
@@ -49,8 +52,9 @@ export class IdentifierService {
   }
 
   async reactivate(id: string): Promise<ItemIdentifierRow> {
-    const codeType = await this.repo.peekCodeType(id);
+    const { codeType, hasPack } = await this.repo.peekForReactivate(id);
     await this.assertBarcodeQrCapability(codeType);
+    if (hasPack) await this.caps.assertEnabled('multi_uom');
     return this.repo.reactivate(id);
   }
 

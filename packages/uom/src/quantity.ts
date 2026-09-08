@@ -1,4 +1,4 @@
-import { divRound, type RoundingMode } from './rounding.js';
+import { divRound, divRoundExact, type RoundingMode } from './rounding.js';
 
 /**
  * A fractional-safe quantity. The DB stores quantities as NUMERIC(18,4) in the
@@ -133,6 +133,18 @@ export class Quantity {
     const d = toExactBigInt(den, 'den');
     if (d <= 0n) throw new RangeError('scaleBy: denominator must be > 0');
     return new Quantity(divRound(this.scaled * toExactBigInt(num, 'num'), d, mode));
+  }
+
+  /**
+   * Multiply by the rational `num / den` (den > 0) with **no rounding** — throws
+   * `InexactError` if the scale-4 result would not be exact. The exact
+   * counterpart of `scaleBy`; used where a rounded result must never be silently
+   * accepted (Task 3.6 printed pack-identity snapshot).
+   */
+  scaleByExact(num: bigint | number, den: bigint | number = 1n): Quantity {
+    const d = toExactBigInt(den, 'den');
+    if (d <= 0n) throw new RangeError('scaleByExact: denominator must be > 0');
+    return new Quantity(divRoundExact(this.scaled * toExactBigInt(num, 'num'), d));
   }
 
   compare(other: Quantity): -1 | 0 | 1 {

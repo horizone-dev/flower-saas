@@ -107,6 +107,20 @@ export const AUDITABLE_ACTIONS = {
   'catalog.identifier_reactivated': { resourceType: 'item_identifier', security: false },
   'catalog.identifier_deleted': { resourceType: 'item_identifier', security: false },
 
+  // ── UOM registry + pack conversions (task 3.6) ────────────────────────────
+  // Ordinary tenant catalog configuration — business events, NOT security
+  // events (D2-10). ONE audit row per successful public mutation. A conversion
+  // replace-set writes exactly one row with the before/after row-set (a ratio
+  // edit changes future normalised quantities — payload completeness matters —
+  // but it is not money / permission / secret / attribution, so `security: false`
+  // and no `security_event` change).
+  'catalog.uom_created': { resourceType: 'uom', security: false },
+  'catalog.uom_updated': { resourceType: 'uom', security: false },
+  'catalog.uom_deleted': { resourceType: 'uom', security: false },
+  'catalog.variant_base_uom_set': { resourceType: 'variant', security: false },
+  'catalog.variant_conversions_changed': { resourceType: 'variant', security: false },
+  'catalog.product_conversions_changed': { resourceType: 'product', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

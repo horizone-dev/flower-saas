@@ -101,7 +101,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_catalog_core'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_attributes'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_variants'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_identifiers$/);
+    expect(names.some((n) => n.endsWith('_catalog_identifiers'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_uom$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -778,7 +779,7 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       for (const r of rls.rows) expect(r.rls, `${r.relname} must be RLS-exempt`).toBe(false);
     });
 
-    it('no UOM / Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
+    it('no Pricing / Inventory / Order table exists (HG3-NO-PREMATURE-DOMAIN)', async () => {
       const { rows } = await pool.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
       );
@@ -786,12 +787,11 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       // product / category / product_type (task 3.2) + attribute_definition /
       // attribute_option / product_attribute_value (task 3.3) + option_group /
       // option_value / variant / variant_option_value (task 3.4) +
-      // item_identifier (task 3.5) are created below — the rest stay forbidden
-      // through Phase 3a. `item_identifier.target_kind` is VARIANT-only; the
-      // `inventory_item` table it will one day also target is NOT created.
+      // item_identifier (task 3.5) + uom / uom_conversion (task 3.6) are created
+      // below — the rest stay forbidden through Phase 3a. `item_identifier` and
+      // `uom_conversion.scope_kind` are VARIANT/PRODUCT-only; the `inventory_item`
+      // one will one day also target is NOT created.
       for (const forbidden of [
-        'uom',
-        'uom_conversion',
         'company_variant_uom_price',
         'branch_variant_uom_price',
         'branch_variant_availability',
@@ -1529,20 +1529,20 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
           'isDefault',
           'optionSignature',
           'status',
+          // `baseUomCode` (nullable) is added by task 3.6's additive migration
+          'baseUomCode',
           'version',
           'createdAt',
           'updatedAt',
         ].sort(),
       );
-      // no price / currency / sku / base-UOM / stock / availability column — ever
+      // no price / currency / sku / stock / availability column — ever
       for (const c of [
         'price',
         'sellPrice',
         'currency',
         'currencyCode',
         'sku',
-        'baseUomCode',
-        'uomCode',
         'stock',
         'onHand',
         'available',
@@ -2061,7 +2061,7 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       await pool.query(`DELETE FROM "category" WHERE id = $1`, [ids.cat]);
     };
 
-    it('creates exactly item_identifier with the expected columns — no pack/price/stock/company/branch/version', async () => {
+    it('creates exactly item_identifier with the expected columns — no price/stock/company/branch/version', async () => {
       const { rows } = await pool.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns WHERE table_name = 'item_identifier'`,
       );
@@ -2076,13 +2076,15 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
           'codeType',
           'value',
           'status',
+          // the immutable printed pack-identity snapshot — added by task 3.6
+          'packUomCode',
+          'packQty',
+          'packBaseQty',
           'createdAt',
           'updatedAt',
         ].sort(),
       );
       for (const c of [
-        'packUomCode',
-        'packQty',
         'price',
         'sellAmountMinor',
         'currencyCode',
@@ -2441,6 +2443,385 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       );
       expect(rows[0]!.definition).not.toMatch(/identifier/i);
       expect(rows[0]!.definition).not.toMatch(/item_identifier/i);
+      expect(rows[0]!.definition).toMatch(/catalog\.template_applied/);
+    });
+  });
+
+  // ── task 3.6 — UOM registry + product/variant-scoped pack conversions ───────
+  // docs/phase-3/PHASE-3-PLAN.md §C.7. Two new tables `uom` / `uom_conversion`;
+  // additive nullable `variant.baseUomCode` (NO backfill, NO NOT NULL);
+  // additive nullable `item_identifier` pack snapshot columns; NO GLOBAL scope;
+  // NO price/cost/currency/company/branch/stock column; NO permission change.
+  describe('UOM schema (task 3.6)', () => {
+    const mk = async (
+      tenant: string,
+      slug: string,
+    ): Promise<{ cat: string; prod: string; variant: string }> => {
+      const cat = (
+        await pool.query(
+          `INSERT INTO "category" (id,"tenantId",slug,"nameEn","updatedAt") VALUES (uuidv7(),$1,$2,'C',now()) RETURNING id`,
+          [tenant, `${slug}-c`],
+        )
+      ).rows[0].id as string;
+      const prod = (
+        await pool.query(
+          `INSERT INTO "product" (id,"tenantId","categoryId",slug,"nameEn","fulfilmentStrategy","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'P','STOCKED','DRAFT',now()) RETURNING id`,
+          [tenant, cat, `${slug}-p`],
+        )
+      ).rows[0].id as string;
+      const variant = (
+        await pool.query(
+          `INSERT INTO "variant" (id,"tenantId","productId","nameEn","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','DRAFT',now()) RETURNING id`,
+          [tenant, prod],
+        )
+      ).rows[0].id as string;
+      return { cat, prod, variant };
+    };
+    const clean = async (ids: { cat: string; prod: string }): Promise<void> => {
+      await pool.query(`DELETE FROM "product" WHERE id = $1`, [ids.prod]).catch(() => {});
+      await pool.query(`DELETE FROM "category" WHERE id = $1`, [ids.cat]).catch(() => {});
+      await pool.query(`DELETE FROM "uom" WHERE "tenantId" IN ($1,$2)`, [TENANT_A, TENANT_B]);
+    };
+
+    it('records the migration and it is the LAST one', async () => {
+      const { rows } = await pool.query<{ migration_name: string }>(
+        `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
+      );
+      const names = rows.map((r) => r.migration_name);
+      expect(names.some((n) => n.endsWith('_catalog_uom'))).toBe(true);
+      expect(names.at(-1)).toMatch(/_catalog_uom$/);
+    });
+
+    it('creates exactly uom / uom_conversion — no price / cost / currency / company / branch / stock column', async () => {
+      const cols = async (t: string): Promise<string[]> =>
+        (
+          await pool.query<{ column_name: string }>(
+            `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+            [t],
+          )
+        ).rows
+          .map((r) => r.column_name)
+          .sort();
+      expect(await cols('uom')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'code',
+          'family',
+          'perBaseNum',
+          'perBaseDen',
+          'maxDecimals',
+          'nameEn',
+          'nameAr',
+          'version',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      expect(await cols('uom_conversion')).toEqual(
+        [
+          'id',
+          'tenantId',
+          'scopeKind',
+          'scopeId',
+          'fromUomCode',
+          'toUomCode',
+          'num',
+          'den',
+          'scopeVariantId',
+          'scopeProductId',
+          'createdAt',
+          'updatedAt',
+        ].sort(),
+      );
+      const forbidden = [
+        'price',
+        'sellAmountMinor',
+        'currencyCode',
+        'companyId',
+        'branchId',
+        'stock',
+        'onHand',
+        'cost',
+      ];
+      for (const c of forbidden) {
+        expect(await cols('uom')).not.toContain(c);
+        expect(await cols('uom_conversion')).not.toContain(c);
+      }
+      const gen = await pool.query<{ column_name: string; is_generated: string }>(
+        `SELECT column_name, is_generated FROM information_schema.columns
+          WHERE table_name = 'uom_conversion' AND column_name IN ('scopeVariantId','scopeProductId')`,
+      );
+      for (const r of gen.rows) expect(r.is_generated).toBe('ALWAYS');
+    });
+
+    it('uom CHECKs: family, perBase > 0, maxDecimals 0..4, COUNT-discrete, EACH perBase 1/1, lowercase code (no slash)', async () => {
+      const def = Object.fromEntries(
+        (
+          await pool.query<{ conname: string; def: string }>(
+            `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+              WHERE contype = 'c' AND conrelid = 'uom'::regclass`,
+          )
+        ).rows.map((r) => [r.conname, r.def]),
+      );
+      expect(def['uom_family_chk']).toMatch(/LENGTH.*MASS.*VOLUME.*COUNT.*EACH/s);
+      expect(def['uom_family_chk']).not.toMatch(/GLOBAL/);
+      expect(def['uom_count_discrete_chk']).toMatch(/COUNT/);
+      expect(def['uom_each_perbase_chk']).toMatch(/EACH/);
+      expect(def['uom_code_shape_chk']).toMatch(/\[a-z\]/);
+
+      const ins = (code: string, family = 'EACH', num = 1, den = 1, md = 0): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO "uom" (id,"tenantId","code","family","perBaseNum","perBaseDen","maxDecimals","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,$6,'n',now())`,
+          [TENANT_A, code, family, num, den, md],
+        );
+      await expect(ins('BOX')).rejects.toThrow(/uom_code_shape_chk/i); // uppercase
+      await expect(ins('box/12')).rejects.toThrow(/uom_code_shape_chk/i); // slash
+      await expect(ins('1box')).rejects.toThrow(/uom_code_shape_chk/i); // leading digit
+      await expect(ins('halfdozen', 'COUNT', 6, 1, 2)).rejects.toThrow(/uom_count_discrete_chk/i);
+      await expect(ins('bigbox', 'EACH', 5, 1, 0)).rejects.toThrow(/uom_each_perbase_chk/i);
+      await expect(ins('weird', 'MASS', 0, 1, 4)).rejects.toThrow(/uom_per_base_num_chk/i);
+      await expect(ins('weird2', 'MASS', 1, 1, 7)).rejects.toThrow(/uom_max_decimals_chk/i);
+      await expect(ins('okbox')).resolves.toBeTruthy();
+      await pool.query(`DELETE FROM "uom" WHERE "tenantId" = $1`, [TENANT_A]);
+    });
+
+    it('uom UNIQUE (tenantId, code); a different tenant may reuse the code', async () => {
+      const ins = (t: string): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO "uom" (id,"tenantId","code","family","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,'carton','EACH','n',now())`,
+          [t],
+        );
+      await ins(TENANT_A);
+      await expect(ins(TENANT_A)).rejects.toThrow(/uom_tenantId_code_key|duplicate key/i);
+      await expect(ins(TENANT_B)).resolves.toBeTruthy();
+      await pool.query(`DELETE FROM "uom" WHERE "tenantId" IN ($1,$2)`, [TENANT_A, TENANT_B]);
+    });
+
+    it('uom_conversion CHECKs: scopeKind (no GLOBAL), num/den > 0, from <> to, shape', async () => {
+      const def = Object.fromEntries(
+        (
+          await pool.query<{ conname: string; def: string }>(
+            `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+              WHERE contype = 'c' AND conrelid = 'uom_conversion'::regclass`,
+          )
+        ).rows.map((r) => [r.conname, r.def]),
+      );
+      expect(def['uom_conversion_scope_kind_chk']).toMatch(/VARIANT.*PRODUCT/s);
+      expect(def['uom_conversion_scope_kind_chk']).not.toMatch(/GLOBAL/);
+
+      const t = await mk(TENANT_A, 'uc-chk');
+      const ins = (kind: string, from: string, to: string, num = 12, den = 1): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO "uom_conversion" (id,"tenantId","scopeKind","scopeId","fromUomCode","toUomCode","num","den","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,$6,$7,now())`,
+          [TENANT_A, kind, t.variant, from, to, num, den],
+        );
+      await expect(ins('GLOBAL', 'box', 'piece')).rejects.toThrow(/uom_conversion_scope_kind_chk/i);
+      await expect(ins('VARIANT', 'box', 'box')).rejects.toThrow(/uom_conversion_from_ne_to_chk/i);
+      await expect(ins('VARIANT', 'box', 'piece', 0)).rejects.toThrow(/uom_conversion_num_chk/i);
+      await expect(ins('VARIANT', 'box', 'piece', 1, 0)).rejects.toThrow(/uom_conversion_den_chk/i);
+      await expect(ins('VARIANT', 'BOX', 'piece')).rejects.toThrow(
+        /uom_conversion_from_shape_chk/i,
+      );
+      await clean(t);
+    });
+
+    it('partial uniques: VARIANT one-per-fromUom; PRODUCT allows same fromUom → different toUom', async () => {
+      const idx = Object.fromEntries(
+        (
+          await pool.query<{ indexname: string; indexdef: string }>(
+            `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'uom_conversion'`,
+          )
+        ).rows.map((r) => [r.indexname, r.indexdef]),
+      );
+      expect(idx['uom_conversion_variant_from_key']).toMatch(/WHERE.*VARIANT/is);
+      expect(idx['uom_conversion_product_from_to_key']).toMatch(/WHERE.*PRODUCT/is);
+
+      const t = await mk(TENANT_A, 'uc-uniq');
+      const ins = (kind: string, from: string, to: string): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO "uom_conversion" (id,"tenantId","scopeKind","scopeId","fromUomCode","toUomCode","num","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$4,$5,12,now())`,
+          [TENANT_A, kind, kind === 'VARIANT' ? t.variant : t.prod, from, to],
+        );
+      await ins('VARIANT', 'box', 'piece');
+      await expect(ins('VARIANT', 'box', 'stem')).rejects.toThrow(
+        /uom_conversion_variant_from_key|duplicate key/i,
+      );
+      // PRODUCT: same fromUom, different toUom → allowed
+      await ins('PRODUCT', 'box', 'piece');
+      await expect(ins('PRODUCT', 'box', 'stem')).resolves.toBeTruthy();
+      await expect(ins('PRODUCT', 'box', 'piece')).rejects.toThrow(
+        /uom_conversion_product_from_to_key|duplicate key/i,
+      );
+      await clean(t);
+    });
+
+    it('uom_conversion tenant-safe composite FK: cross-tenant scope rejected; ON DELETE CASCADE with the variant/product', async () => {
+      const fk = (
+        await pool.query<{ def: string }>(
+          `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+            WHERE conname = 'uom_conversion_tenant_variant_fkey'`,
+        )
+      ).rows[0]!.def;
+      expect(fk).toMatch(/FOREIGN KEY \("tenantId", "scopeVariantId"\)/);
+      expect(fk).toMatch(/ON DELETE CASCADE/);
+
+      const a = await mk(TENANT_A, 'uc-fk-a');
+      const b = await mk(TENANT_B, 'uc-fk-b');
+      await expect(
+        pool.query(
+          `INSERT INTO "uom_conversion" (id,"tenantId","scopeKind","scopeId","fromUomCode","toUomCode","num","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,'box','piece',12,now())`,
+          [TENANT_A, b.variant],
+        ),
+      ).rejects.toThrow(/uom_conversion_tenant_variant_fkey|foreign key/i);
+
+      await pool.query(
+        `INSERT INTO "uom_conversion" (id,"tenantId","scopeKind","scopeId","fromUomCode","toUomCode","num","updatedAt")
+         VALUES (uuidv7(),$1,'VARIANT',$2,'box','piece',12,now())`,
+        [TENANT_A, a.variant],
+      );
+      await pool.query(`DELETE FROM "variant" WHERE id = $1`, [a.variant]);
+      expect(
+        Number(
+          (
+            await pool.query(
+              `SELECT count(*)::int AS n FROM "uom_conversion" WHERE "scopeId" = $1`,
+              [a.variant],
+            )
+          ).rows[0].n,
+        ),
+      ).toBe(0);
+      await clean(a);
+      await clean(b);
+    });
+
+    it('uom + uom_conversion: RLS ENABLE + FORCE + policy; no-GUC read → zero rows; flower_app NOBYPASSRLS', async () => {
+      for (const table of ['uom', 'uom_conversion']) {
+        const meta = await pool.query<{ rls: boolean; force: boolean; policies: number }>(
+          `SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
+                  (SELECT count(*) FROM pg_policies p WHERE p.tablename = c.relname) AS policies
+             FROM pg_class c WHERE c.relname = $1`,
+          [table],
+        );
+        expect(meta.rows[0]!.rls, `${table} rls`).toBe(true);
+        expect(meta.rows[0]!.force, `${table} force`).toBe(true);
+        expect(Number(meta.rows[0]!.policies)).toBeGreaterThanOrEqual(1);
+      }
+      await pool.query(
+        `INSERT INTO "uom" (id,"tenantId","code","family","nameEn","updatedAt")
+         VALUES (uuidv7(),$1,'rlsbox','EACH','n',now())`,
+        [TENANT_A],
+      );
+      const c = await pool.connect();
+      try {
+        await c.query(`SET ROLE ${DB_ROLES.app}`);
+        expect(Number((await c.query(`SELECT count(*)::int AS n FROM "uom"`)).rows[0].n)).toBe(0);
+      } finally {
+        await c.query('RESET ROLE').catch(() => {});
+        c.release();
+      }
+      await pool.query(`DELETE FROM "uom" WHERE "tenantId" = $1`, [TENANT_A]);
+    });
+
+    it('flower_app has full tenant-scoped DML on uom / uom_conversion (Owner-written, NOT SELECT-only)', async () => {
+      const g = await pool.query<{ grantee: string; privilege_type: string }>(
+        `SELECT grantee, privilege_type FROM information_schema.role_table_grants
+          WHERE table_name = 'uom' AND grantee = 'flower_app'`,
+      );
+      const privs = g.rows.map((r) => r.privilege_type).sort();
+      expect(privs).toEqual(['DELETE', 'INSERT', 'SELECT', 'UPDATE']);
+    });
+
+    it('variant.baseUomCode: additive, NULLABLE, shape CHECK, and NO backfill of existing variants', async () => {
+      const col = await pool.query<{ is_nullable: string; data_type: string }>(
+        `SELECT is_nullable, data_type FROM information_schema.columns
+          WHERE table_name = 'variant' AND column_name = 'baseUomCode'`,
+      );
+      expect(col.rows[0]!.is_nullable).toBe('YES');
+
+      const t = await mk(TENANT_A, 'bu-null');
+      // an existing/new variant has NULL base UOM — the migration invented nothing
+      expect(
+        (await pool.query(`SELECT "baseUomCode" FROM "variant" WHERE id = $1`, [t.variant])).rows[0]
+          .baseUomCode,
+      ).toBeNull();
+      await expect(
+        pool.query(`UPDATE "variant" SET "baseUomCode" = 'PIECE' WHERE id = $1`, [t.variant]),
+      ).rejects.toThrow(/variant_base_uom_shape_chk/i);
+      await expect(
+        pool.query(`UPDATE "variant" SET "baseUomCode" = 'piece' WHERE id = $1`, [t.variant]),
+      ).resolves.toBeTruthy();
+      await clean(t);
+      // NO migration UPDATE touched any pre-existing variant
+      expect(
+        Number(
+          (
+            await pool.query(
+              `SELECT count(*)::int AS n FROM "variant" WHERE "baseUomCode" IS NOT NULL`,
+            )
+          ).rows[0].n,
+        ),
+      ).toBe(0);
+    });
+
+    it('item_identifier pack snapshot: additive nullable columns + triple / SKU / positive CHECKs', async () => {
+      const cols = (
+        await pool.query<{ column_name: string }>(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = 'item_identifier'`,
+        )
+      ).rows.map((r) => r.column_name);
+      for (const c of ['packUomCode', 'packQty', 'packBaseQty']) expect(cols).toContain(c);
+
+      const t = await mk(TENANT_A, 'pk-chk');
+      const ins = (
+        code: string,
+        u: string | null,
+        q: string | null,
+        b: string | null,
+      ): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO "item_identifier" (id,"tenantId","targetKind","targetId","codeType","value","packUomCode","packQty","packBaseQty","updatedAt")
+           VALUES (uuidv7(),$1,'VARIANT',$2,$3,$4,$5,$6,$7,now())`,
+          [TENANT_A, t.variant, code, `PK-${code}-${Math.random()}`, u, q, b],
+        );
+      // partial pack → rejected
+      await expect(ins('BARCODE', 'box', null, null)).rejects.toThrow(
+        /item_identifier_pack_triple_chk/i,
+      );
+      // SKU may not carry pack
+      await expect(ins('SKU', 'box', '1', '12')).rejects.toThrow(/item_identifier_pack_sku_chk/i);
+      // zero qty
+      await expect(ins('BARCODE', 'box', '0', '12')).rejects.toThrow(
+        /item_identifier_pack_positive_chk/i,
+      );
+      // a full valid pack
+      await expect(ins('BARCODE', 'box', '1', '12')).resolves.toBeTruthy();
+      // none is fine (Task 3.5 behaviour)
+      await expect(ins('BARCODE', null, null, null)).resolves.toBeTruthy();
+      await clean(t);
+    });
+
+    it('uom / uom_conversion are in TENANT_SCOPED_TABLES; no new permission_registry key', async () => {
+      expect(TENANT_SCOPED_TABLES).toContain('uom');
+      expect(TENANT_SCOPED_TABLES).toContain('uom_conversion');
+      const reg = await pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM permission_registry WHERE key LIKE 'uom%'`,
+      );
+      expect(Number(reg.rows[0]!.n)).toBe(0);
+    });
+
+    it('security_event view is UNCHANGED by task 3.6', async () => {
+      const { rows } = await pool.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('security_event'::regclass, true) AS definition`,
+      );
+      expect(rows[0]!.definition).not.toMatch(/uom/i);
       expect(rows[0]!.definition).toMatch(/catalog\.template_applied/);
     });
   });

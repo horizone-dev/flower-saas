@@ -57,6 +57,9 @@ importers:
       '@flower/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@flower/uom':
+        specifier: workspace:*
+        version: link:../../packages/uom
       '@nestjs/common':
         specifier: 12.0.1
         version: 12.0.1(reflect-metadata@0.2.2)(rxjs@7.8.2)

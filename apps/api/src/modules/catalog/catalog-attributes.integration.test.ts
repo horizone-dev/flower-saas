@@ -1003,18 +1003,19 @@ describe('typed attributes (task 3.3, integration)', () => {
   });
 
   // ══════════════════ no premature domain ════════════════════════════════
-  it('no Task 3.6 / later-domain table exists', async () => {
+  it('no Task 3.7 / later-domain table exists', async () => {
     const rows = await sql<{ tablename: string }>(
       `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
     );
     const present = new Set(rows.map((r) => r.tablename));
-    // `item_identifier` (task 3.5) is created by the migration this suite runs.
+    // `item_identifier` (task 3.5) + `uom` / `uom_conversion` (task 3.6) are
+    // created by the migration this suite runs.
     for (const forbidden of [
-      'uom',
-      'uom_conversion',
       'company_variant_uom_price',
       'branch_variant_uom_price',
       'inventory_item',
+      'inventory_movement',
+      'branch_inventory_balance',
       'order',
       'payment',
     ]) {

@@ -17,6 +17,16 @@ const createSchema = z
     codeType: identifierCodeTypeSchema,
     /** required for SKU / BARCODE; MUST be omitted for QR (server-generated) */
     value: z.string().min(1).max(128).optional(),
+    /** task 3.6 — BARCODE / QR only; forbidden on a SKU. `packBaseQty` is
+     *  computed server-side (exact-or-reject) and is NEVER client-supplied. */
+    pack: z
+      .object({
+        // canonicalized + validated (422 UOM_INVALID_CODE) in the repo layer
+        uomCode: z.string().min(1).max(40),
+        qty: z.string().min(1).max(40),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -66,6 +76,7 @@ export class IdentifierController {
       targetId: dto.targetId,
       codeType: dto.codeType,
       value: dto.value,
+      pack: dto.pack ? { uomCode: dto.pack.uomCode, qty: dto.pack.qty } : undefined,
     });
   }
 

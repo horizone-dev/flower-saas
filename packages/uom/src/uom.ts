@@ -1,5 +1,5 @@
 import { Quantity, QUANTITY_SCALE } from './quantity.js';
-import { divRound, type RoundingMode } from './rounding.js';
+import { divRound, divRoundExact, InexactError, type RoundingMode } from './rounding.js';
 
 /**
  * Unit-of-measure model (ARCHITECTURE §17).
@@ -50,7 +50,8 @@ const r = (num: number | bigint, den: number | bigint = 1n): Ratio => ({
 
 /** Built-in units. `perBase` is relative to the family base (metre, gram,
  *  millilitre, piece). No `EACH` units are built in — a tenant registers its
- *  own (foam block, wrapping sheet, gift box…). */
+ *  own (foam block, wrapping sheet, gift box…). Codes are lowercase — the one
+ *  canonical UOM-code convention (see `canonicalUomCode`). */
 const BUILTIN: Record<string, UomDef> = {
   // LENGTH — base: metre
   meter: { code: 'meter', family: 'LENGTH', perBase: r(1), maxDecimals: 4 },
@@ -67,6 +68,39 @@ const BUILTIN: Record<string, UomDef> = {
   stem: { code: 'stem', family: 'COUNT', perBase: r(1), maxDecimals: 0 },
   dozen: { code: 'dozen', family: 'COUNT', perBase: r(12), maxDecimals: 0 },
 };
+
+/**
+ * The built-in unit definitions as a frozen array — the authoritative registry
+ * a catalog layer lists / validates against without reconstructing anything
+ * (Task 3.6 OD-6). Every `UomRegistry` seeds these internally; a tenant custom
+ * `uom` row is only ever for a unit that is NOT one of these.
+ */
+export const BUILTIN_UOMS: readonly UomDef[] = Object.freeze(Object.values(BUILTIN));
+
+/**
+ * The one canonical persisted UOM-code shape (Task 3.6 MANDATORY CORRECTION 1):
+ * lowercase, starts with a letter, then letters / digits / `.` / `-` / `_`,
+ * 1–32 chars. **No `/`** — a UOM code is a REST path segment
+ * (`GET /v1/catalog/uoms/:code`). Examples: `piece`, `box`, `bag-25kg`,
+ * `bottle-100ml`, `roll.large`. Every built-in code matches.
+ */
+export const UOM_CODE_RE = /^[a-z][a-z0-9._-]{0,31}$/;
+
+/**
+ * Canonicalize a raw UOM code: trim, then lowercase (locale-independent — the
+ * permitted `[a-z0-9._-]` set is unaffected by locale). Mirror of
+ * `@flower/shared-types` `canonicalizeSku`. The caller then validates the
+ * result against `UOM_CODE_RE`; built-in-shadow detection (`isBuiltinUom`)
+ * happens AFTER this.
+ */
+export function canonicalUomCode(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+/** Whether `code` (expected already canonical) is a `@flower/uom` built-in. */
+export function isBuiltinUom(code: string): boolean {
+  return Object.prototype.hasOwnProperty.call(BUILTIN, code);
+}
 
 export class UnknownUomError extends Error {
   constructor(code: string) {
@@ -112,6 +146,22 @@ export class InvalidUomConversionError extends Error {
   constructor(from: string, to: string, reason: string) {
     super(`Invalid UOM conversion ${from} -> ${to}: ${reason}`);
     this.name = 'InvalidUomConversionError';
+  }
+}
+
+/**
+ * A `convertExact` result that is not exactly representable at scale 4 — the
+ * `from → to` ratio applied to `qty` leaves a remainder, so a rounded answer
+ * would be a silent lie. Task 3.6 surfaces this as a `422` and refuses to
+ * create the pack identifier.
+ */
+export class InexactConversionError extends Error {
+  constructor(from: string, to: string) {
+    super(
+      `Conversion ${from} -> ${to} is not exact for this quantity — a printed ` +
+        `pack identity must be exactly representable; use a different pack qty / ratio`,
+    );
+    this.name = 'InexactConversionError';
   }
 }
 
@@ -226,6 +276,59 @@ export class UomRegistry {
     const num = qty.scaled * from.perBase.num * to.perBase.den;
     const den = from.perBase.den * to.perBase.num;
     return Quantity.ofScaled(divRound(num, den, mode));
+  }
+
+  /**
+   * `convert` with **no rounding** — the same resolution order (explicit
+   * conversion either direction, then same-family `perBase` math), but the
+   * scale-4 result must divide exactly or `InexactConversionError` is thrown.
+   * Task 3.6 uses this for the printed pack-identity snapshot
+   * (`item_identifier.packBaseQty`) so a barcode never silently denotes a
+   * rounded base quantity. `UnknownUomError` / `UomFamilyMismatchError` /
+   * `UomConversionUnavailableError` still apply for an unresolvable pair.
+   */
+  convertExact(qty: Quantity, fromCode: string, toCode: string): Quantity {
+    if (fromCode === toCode) return qty;
+
+    const exact = (n: bigint, d: bigint): Quantity => {
+      try {
+        return Quantity.ofScaled(divRoundExact(n, d));
+      } catch (e) {
+        if (e instanceof InexactError) throw new InexactConversionError(fromCode, toCode);
+        throw e;
+      }
+    };
+
+    for (const c of this.conversions) {
+      const cn = BigInt(c.num);
+      const cd = BigInt(c.den ?? 1n);
+      if (c.from === fromCode && c.to === toCode) return exact(qty.scaled * cn, cd);
+      if (c.from === toCode && c.to === fromCode) return exact(qty.scaled * cd, cn);
+    }
+
+    const from = this.get(fromCode);
+    const to = this.get(toCode);
+    if (from.family !== to.family) throw new UomFamilyMismatchError(fromCode, toCode);
+    if (from.family === 'EACH') throw new UomConversionUnavailableError(fromCode, toCode);
+    const num = qty.scaled * from.perBase.num * to.perBase.den;
+    const den = from.perBase.den * to.perBase.num;
+    return exact(num, den);
+  }
+
+  /**
+   * Whether `from → to` is already resolvable by authoritative same-family
+   * `perBase` semantics (built-in OR a registered tenant physical/COUNT unit) —
+   * an EXPLICIT scoped `uom_conversion` for such a pair is redundant and Task
+   * 3.6 rejects it (`UOM_CONVERSION_REDUNDANT`). Ignores `opts.conversions`.
+   * `false` if either code is unknown, they are the same, or the pair is
+   * cross-family / EACH (which legitimately needs an explicit rule).
+   */
+  isSameFamilyResolvable(fromCode: string, toCode: string): boolean {
+    if (fromCode === toCode) return false;
+    const from = this.units.get(fromCode);
+    const to = this.units.get(toCode);
+    if (!from || !to) return false;
+    return from.family === to.family && from.family !== 'EACH';
   }
 }
 

@@ -290,6 +290,31 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
     const vs = await listVariants(token, p.id);
     return { productId: p.id, productVersion: p.version, variantId: vs[0]!.id };
   }
+  /** task 3.6 (owner OD-G) — a STOCKED / BOM variant needs a base UOM to reach
+   *  ACTIVE. Sets the built-in `piece` base (no `multi_uom` needed) then POSTs
+   *  `/activate`. */
+  async function activateVariant(token: string, variantId: string) {
+    const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
+      version: number;
+      baseUomCode: string | null;
+    };
+    let version = cur.version;
+    if (cur.baseUomCode === null) {
+      const sb = await req(
+        'PUT',
+        `/catalog/variants/${variantId}/base-uom`,
+        token,
+        { baseUomCode: 'piece' },
+        { 'if-match': `"${version}"` },
+      );
+      expect(sb.statusCode, sb.payload).toBe(200);
+      version = (sb.json() as { version: number }).version;
+    }
+    return req('POST', `/catalog/variants/${variantId}/activate`, token, undefined, {
+      'idempotency-key': ik(),
+      'if-match': `"${version}"`,
+    });
+  }
   const createId = (token: string, body: Record<string, unknown>, key = ik()) =>
     req('POST', '/catalog/identifiers', token, body, { 'idempotency-key': key });
   const resolveId = (token: string, value: string) =>
@@ -461,10 +486,7 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
       });
       expect(pAct.statusCode, pAct.payload).toBe(200);
       const vRow = (await listVariants(ownerA, p.id))[0]!;
-      const vAct = await req('POST', `/catalog/variants/${vRow.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${vRow.version}"`,
-      });
+      const vAct = await activateVariant(ownerA, vRow.id);
       expect(vAct.statusCode, vAct.payload).toBe(200);
 
       const del = await req('DELETE', `/catalog/identifiers/${id}`, ownerA);
@@ -503,10 +525,7 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
         'if-match': `"${p.version}"`,
       });
       const vRow = (await listVariants(ownerA, p.id))[0]!;
-      await req('POST', `/catalog/variants/${vRow.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${vRow.version}"`,
-      });
+      await activateVariant(ownerA, vRow.id);
       await req('DELETE', `/catalog/identifiers/${id}`, ownerA);
 
       const v2 = await makeVariant(ownerA, 'reuse-2');
@@ -574,10 +593,7 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
         'if-match': `"${p.version}"`,
       });
       const vRow = (await listVariants(ownerA, p.id))[0]!;
-      await req('POST', `/catalog/variants/${vRow.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${vRow.version}"`,
-      });
+      await activateVariant(ownerA, vRow.id);
       const vRow2 = (await listVariants(ownerA, p.id))[0]!;
       await req('POST', `/catalog/variants/${vRow.id}/archive`, ownerA, undefined, {
         'idempotency-key': ik(),
@@ -677,10 +693,7 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
         'if-match': `"${p.version}"`,
       });
       const v1 = (await listVariants(ownerA, p.id))[0]!;
-      await req('POST', `/catalog/variants/${v1.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${v1.version}"`,
-      });
+      expect((await activateVariant(ownerA, v1.id)).statusCode).toBe(200);
 
       // both ACTIVE → resolves
       expect((await resolveId(ownerA, 'ARCHPROD-BC')).statusCode).toBe(200);
@@ -1108,10 +1121,7 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
         'if-match': `"${p.version}"`,
       });
       const vRow = (await listVariants(ownerA, p.id))[0]!;
-      await req('POST', `/catalog/variants/${vRow.id}/activate`, ownerA, undefined, {
-        'idempotency-key': ik(),
-        'if-match': `"${vRow.version}"`,
-      });
+      await activateVariant(ownerA, vRow.id);
       await req('DELETE', `/catalog/identifiers/${id}`, ownerA);
       const rKey = ik();
       const r1 = await req('POST', `/catalog/identifiers/${id}/reactivate`, ownerA, undefined, {

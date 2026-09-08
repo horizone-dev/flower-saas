@@ -289,4 +289,79 @@ describe('@flower/api-client', () => {
       'http://api.test/v1/catalog/identifiers/i1/reactivate',
     );
   });
+
+  it('catalog: UOM + conversion methods carry the right preconditions (task 3.6)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ code: 'box', version: 3, rows: [] }),
+    );
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    // create UOM — Idempotency-Key, no If-Match
+    await client.createUom({ code: 'box', family: 'EACH', nameEn: 'Box' }, 'idem-uom-1');
+    expect(fetchMock.mock.calls[0]![1]!.method).toBe('POST');
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({ 'idempotency-key': 'idem-uom-1' });
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('http://api.test/v1/catalog/uoms');
+
+    // update UOM — If-Match, no Idempotency-Key
+    await client.updateUom('box', { nameEn: 'Big Box' }, 3);
+    expect(fetchMock.mock.calls[1]![1]!.method).toBe('PUT');
+    expect(fetchMock.mock.calls[1]![1]!.headers).toMatchObject({ 'if-match': '"3"' });
+    expect(fetchMock.mock.calls[1]![1]!.headers).not.toHaveProperty('idempotency-key');
+
+    // delete UOM — If-Match
+    await client.deleteUom('box', 3);
+    expect(fetchMock.mock.calls[2]![1]!.method).toBe('DELETE');
+    expect(fetchMock.mock.calls[2]![1]!.headers).toMatchObject({ 'if-match': '"3"' });
+
+    // set variant base UOM — parent If-Match
+    await client.setVariantBaseUom('var1', 'piece', 7);
+    expect(fetchMock.mock.calls[3]![1]!.method).toBe('PUT');
+    expect(fetchMock.mock.calls[3]![1]!.headers).toMatchObject({ 'if-match': '"7"' });
+    expect(String(fetchMock.mock.calls[3]![0])).toBe(
+      'http://api.test/v1/catalog/variants/var1/base-uom',
+    );
+
+    // replace variant conversions — parent If-Match, no Idempotency-Key
+    await client.replaceVariantConversions('var1', [{ fromUomCode: 'box', num: '12' }], 7);
+    expect(fetchMock.mock.calls[4]![1]!.method).toBe('PUT');
+    expect(fetchMock.mock.calls[4]![1]!.headers).toMatchObject({ 'if-match': '"7"' });
+    expect(fetchMock.mock.calls[4]![1]!.headers).not.toHaveProperty('idempotency-key');
+    expect(String(fetchMock.mock.calls[4]![0])).toBe(
+      'http://api.test/v1/catalog/variants/var1/conversions',
+    );
+
+    // product conversions GET + PUT
+    await client.getProductConversions('p1');
+    expect(String(fetchMock.mock.calls[5]![0])).toBe(
+      'http://api.test/v1/catalog/products/p1/conversions',
+    );
+    await client.replaceProductConversions(
+      'p1',
+      [{ fromUomCode: 'box', toUomCode: 'piece', num: '12' }],
+      4,
+    );
+    expect(fetchMock.mock.calls[6]![1]!.headers).toMatchObject({ 'if-match': '"4"' });
+
+    // identifier create with pack metadata still carries Idempotency-Key
+    await client.createIdentifier(
+      {
+        targetKind: 'VARIANT',
+        targetId: 'var1',
+        codeType: 'BARCODE',
+        value: 'BC-1',
+        pack: { uomCode: 'box', qty: '1' },
+      },
+      'idem-pack-1',
+    );
+    expect(fetchMock.mock.calls[7]![1]!.headers).toMatchObject({
+      'idempotency-key': 'idem-pack-1',
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[7]![1]!.body))).toMatchObject({
+      pack: { uomCode: 'box', qty: '1' },
+    });
+  });
 });

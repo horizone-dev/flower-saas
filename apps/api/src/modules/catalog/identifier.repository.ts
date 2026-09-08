@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { ScopedTx } from '@flower/db';
+import { Quantity } from '@flower/uom';
 import {
   ACTIVE_IDENTIFIER_TARGET_KINDS,
   canonicalizeSku,
@@ -11,6 +12,22 @@ import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { canonicalIdentifierValue, generateQrValue } from './identifier.helpers.js';
+import { UomRepository, loadEffectiveVariantRegistry } from './uom.repository.js';
+import { mapUomError, requireUomCode } from './uom.helpers.js';
+
+/** A raw pack-metadata input for a BARCODE / QR create (task 3.6 §I). */
+export interface IdentifierPackMeta {
+  uomCode: string;
+  qty: string;
+}
+
+/** The FROZEN printed pack-identity snapshot on a resolved identifier (§J). */
+export interface IdentifierPackSnapshot {
+  uomCode: string;
+  qty: string;
+  baseUomCode: string;
+  baseQty: string;
+}
 
 export interface ItemIdentifierRow {
   id: string;
@@ -19,6 +36,11 @@ export interface ItemIdentifierRow {
   codeType: IdentifierCodeType;
   value: string;
   status: IdentifierStatus;
+  /** task 3.6 — the immutable printed pack-identity snapshot; null for a SKU
+   *  and for a BARCODE / QR created without pack metadata. */
+  packUomCode: string | null;
+  packQty: string | null;
+  packBaseQty: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -28,6 +50,9 @@ export interface IdentifierResolution {
   target: { kind: 'VARIANT'; id: string };
   variant: { id: string; productId: string; nameEn: string; status: string };
   product: { id: string; slug: string; nameEn: string; status: string };
+  /** task 3.6 §J — the FROZEN snapshot, never recomputed from the live
+   *  conversion configuration. `null` when the identifier carries no pack. */
+  pack: IdentifierPackSnapshot | null;
 }
 
 export interface CreateIdentifierInput {
@@ -36,6 +61,8 @@ export interface CreateIdentifierInput {
   codeType: IdentifierCodeType;
   /** required for SKU / BARCODE; must be absent for QR */
   value?: string | undefined;
+  /** task 3.6 — BARCODE / QR only; forbidden on a SKU (DB CHECK + service) */
+  pack?: IdentifierPackMeta | undefined;
 }
 
 const ID_SELECT = {
@@ -45,9 +72,43 @@ const ID_SELECT = {
   codeType: true,
   value: true,
   status: true,
+  packUomCode: true,
+  packQty: true,
+  packBaseQty: true,
   createdAt: true,
   updatedAt: true,
 } as const;
+
+type RawIdRow = {
+  id: string;
+  targetKind: string;
+  targetId: string;
+  codeType: string;
+  value: string;
+  status: string;
+  packUomCode: string | null;
+  packQty: { toFixed: (n: number) => string } | null;
+  packBaseQty: { toFixed: (n: number) => string } | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+/** Map a raw Prisma row (Decimal pack qtys) to the string-encoded API shape. */
+function toIdRow(r: RawIdRow): ItemIdentifierRow {
+  return {
+    id: r.id,
+    targetKind: r.targetKind as 'VARIANT',
+    targetId: r.targetId,
+    codeType: r.codeType as IdentifierCodeType,
+    value: r.value,
+    status: r.status as IdentifierStatus,
+    packUomCode: r.packUomCode,
+    packQty: r.packQty === null ? null : r.packQty.toFixed(4),
+    packBaseQty: r.packBaseQty === null ? null : r.packBaseQty.toFixed(4),
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  };
+}
 
 interface LockedIdentifier {
   status: IdentifierStatus;
@@ -119,25 +180,26 @@ export class IdentifierRepository extends ScopedRepository {
    */
   resolveByValue(value: string): Promise<IdentifierResolution> {
     return this.scoped(async (tx) => {
-      let row = (await tx.itemIdentifier.findFirst({
+      let raw = (await tx.itemIdentifier.findFirst({
         where: { value, status: 'ACTIVE' },
         select: ID_SELECT,
-      })) as ItemIdentifierRow | null;
+      })) as RawIdRow | null;
 
-      if (!row) {
+      if (!raw) {
         const canonicalSku = canonicalizeSku(value);
         if (canonicalSku !== value) {
-          row = (await tx.itemIdentifier.findFirst({
+          raw = (await tx.itemIdentifier.findFirst({
             where: { value: canonicalSku, codeType: 'SKU', status: 'ACTIVE' },
             select: ID_SELECT,
-          })) as ItemIdentifierRow | null;
+          })) as RawIdRow | null;
         }
       }
-      if (!row) throw new NotFoundError('identifier', 'IDENTIFIER_NOT_FOUND');
+      if (!raw) throw new NotFoundError('identifier', 'IDENTIFIER_NOT_FOUND');
+      const row = toIdRow(raw);
 
       const variant = await tx.variant.findUnique({
         where: { id: row.targetId },
-        select: { id: true, productId: true, nameEn: true, status: true },
+        select: { id: true, productId: true, nameEn: true, status: true, baseUomCode: true },
       });
       if (!variant || variant.status === 'ARCHIVED') {
         throw new NotFoundError('identifier target', 'IDENTIFIER_TARGET_UNAVAILABLE');
@@ -150,17 +212,45 @@ export class IdentifierRepository extends ScopedRepository {
       if (product.status === 'ARCHIVED') {
         throw new NotFoundError('identifier target', 'IDENTIFIER_TARGET_UNAVAILABLE');
       }
+
+      // task 3.6 §J — the FROZEN pack snapshot. NEVER recomputed from the live
+      // conversion configuration; the stored `packBaseQty` is authoritative. A
+      // broken stored invariant fails CLOSED (`IDENTIFIER_PACK_INTEGRITY`, 500) —
+      // never an ambiguous usable scan.
+      let pack: IdentifierPackSnapshot | null = null;
+      if (row.packUomCode !== null) {
+        if (row.packQty === null || row.packBaseQty === null || variant.baseUomCode === null) {
+          throw new DomainError(
+            'IDENTIFIER_PACK_INTEGRITY',
+            'the stored pack identity for this identifier is inconsistent',
+            500,
+          );
+        }
+        pack = {
+          uomCode: row.packUomCode,
+          qty: row.packQty,
+          baseUomCode: variant.baseUomCode,
+          baseQty: row.packBaseQty,
+        };
+      }
+
       return {
         identifier: row,
         target: { kind: 'VARIANT', id: row.targetId },
-        variant,
+        variant: {
+          id: variant.id,
+          productId: variant.productId,
+          nameEn: variant.nameEn,
+          status: variant.status,
+        },
         product,
+        pack,
       };
     });
   }
 
   /** Management / audit view — ACTIVE **and** INACTIVE identifiers of one
-   *  variant (owner "SCAN RESOLUTION"). */
+   *  variant (owner "SCAN RESOLUTION"). Pack metadata travels with the row. */
   listForTarget(targetKind: string, targetId: string): Promise<ItemIdentifierRow[]> {
     return this.scoped(async (tx) => {
       assertVariantTargetKind(targetKind);
@@ -169,11 +259,12 @@ export class IdentifierRepository extends ScopedRepository {
         select: { id: true },
       });
       if (!variant) throw new NotFoundError('variant');
-      return tx.itemIdentifier.findMany({
+      const rows = (await tx.itemIdentifier.findMany({
         where: { targetKind, targetId },
         orderBy: [{ codeType: 'asc' }, { status: 'asc' }, { createdAt: 'asc' }],
         select: ID_SELECT,
-      }) as Promise<ItemIdentifierRow[]>;
+      })) as RawIdRow[];
+      return rows.map(toIdRow);
     });
   }
 
@@ -181,6 +272,17 @@ export class IdentifierRepository extends ScopedRepository {
     // owner decision 1 — VARIANT is the only legal target kind in Phase 3a.
     assertVariantTargetKind(input.targetKind);
     const resolved = canonicalIdentifierValue(input.codeType, input.value);
+
+    // task 3.6 §I — a SKU is a catalogue label, never a printed pack.
+    if (input.pack && input.codeType === 'SKU') {
+      throw new DomainError(
+        'IDENTIFIER_PACK_NOT_ALLOWED',
+        'pack metadata is only valid for a BARCODE or QR identifier',
+        422,
+        [{ field: 'pack', issue: 'not allowed for a SKU' }],
+      );
+    }
+    const packUom = input.pack ? requireUomCode(input.pack.uomCode) : null;
 
     return this.scoped(async (tx) => {
       const target = await lockVariant(tx, input.targetId);
@@ -195,6 +297,65 @@ export class IdentifierRepository extends ScopedRepository {
 
       await this.assertSingleActive(tx, input.codeType, input.targetKind, input.targetId);
 
+      // ── task 3.6 §I — compute the FROZEN pack-identity snapshot ────────────
+      let packQtyStr: string | null = null;
+      let packBaseQtyStr: string | null = null;
+      if (input.pack && packUom) {
+        if (target.baseUomCode === null) {
+          throw new DomainError(
+            'VARIANT_BASE_UOM_REQUIRED',
+            'set the target variant base UOM before creating a pack identifier',
+            409,
+          );
+        }
+        const base = target.baseUomCode;
+        let packQ: Quantity;
+        try {
+          packQ = Quantity.parse(input.pack.qty);
+        } catch {
+          throw new DomainError(
+            'IDENTIFIER_PACK_QTY_INVALID',
+            'packQty is not a valid quantity',
+            422,
+            [{ field: 'packQty', issue: 'invalid' }],
+          );
+        }
+        if (packQ.isNegative || packQ.isZero) {
+          throw new DomainError('IDENTIFIER_PACK_QTY_INVALID', 'packQty must be > 0', 422, [
+            { field: 'packQty', issue: 'must be > 0' },
+          ]);
+        }
+        // lock every tenant-custom code this write persists a reference to
+        await UomRepository.lockCustomUomRefs(tx, [packUom, base]);
+        const registry = await loadEffectiveVariantRegistry(tx, {
+          id: input.targetId,
+          productId: target.productId,
+          baseUomCode: base,
+        });
+        try {
+          registry.assertPermitted(packQ, packUom); // packQty valid for its own unit
+          const packBaseQ = registry.convertExact(packQ, packUom, base); // exact-or-reject
+          registry.assertPermitted(packBaseQ, base); // OD-H — respect the base unit's decimals
+          packQtyStr = packQ.toFixed4();
+          packBaseQtyStr = packBaseQ.toFixed4();
+        } catch (e) {
+          const mapped = mapUomError(e);
+          // a pack UOM that can't reach the variant base → the pack-specific code
+          if (
+            mapped.code === 'UOM_CONVERSION_UNRESOLVABLE' ||
+            mapped.code === 'UOM_NOT_REGISTERED'
+          ) {
+            throw new DomainError(
+              'IDENTIFIER_PACK_UOM_UNRESOLVABLE',
+              `pack UOM "${packUom}" cannot be converted to the variant base UOM "${base}"`,
+              422,
+              [{ field: 'pack', issue: 'unresolvable pack UOM' }],
+            );
+          }
+          throw mapped;
+        }
+      }
+
       let value: string;
       if (resolved.generateQr) {
         value = await this.mintUniqueQr(tx);
@@ -203,7 +364,7 @@ export class IdentifierRepository extends ScopedRepository {
         await this.assertValueFree(tx, value);
       }
 
-      let created: ItemIdentifierRow;
+      let created: RawIdRow;
       try {
         created = (await tx.itemIdentifier.create({
           data: {
@@ -213,28 +374,35 @@ export class IdentifierRepository extends ScopedRepository {
             codeType: input.codeType,
             value,
             status: 'ACTIVE',
+            packUomCode: packUom,
+            packQty: packQtyStr,
+            packBaseQty: packBaseQtyStr,
           },
           select: ID_SELECT,
-        })) as ItemIdentifierRow;
+        })) as RawIdRow;
       } catch (e) {
         rethrowUniqueViolation(e, value, input.codeType);
       }
+      const row = toIdRow(created);
 
       await this.audit.record(tx, {
         action: 'catalog.identifier_created',
         resourceType: 'item_identifier',
-        resourceId: created.id,
+        resourceId: row.id,
         // owner "E" — record the immutable value that was actually persisted
-        // (canonical SKU / verbatim barcode / server-generated opaque QR). A
-        // catalog identifier is a printed code, not secret material.
+        // (canonical SKU / verbatim barcode / server-generated opaque QR) plus the
+        // frozen pack identity where present (task 3.6). Not secret material.
         after: {
           targetKind: 'VARIANT',
           targetId: input.targetId,
           codeType: input.codeType,
-          value: created.value,
+          value: row.value,
+          ...(row.packUomCode !== null
+            ? { packUomCode: row.packUomCode, packQty: row.packQty, packBaseQty: row.packBaseQty }
+            : {}),
         },
       });
-      return created;
+      return row;
     });
   }
 
@@ -285,16 +453,17 @@ export class IdentifierRepository extends ScopedRepository {
     });
   }
 
-  /** The `codeType` of an identifier — the service peeks it to decide whether
-   *  the `identifiers.barcode_qr` capability gate applies to a reactivate. */
-  peekCodeType(id: string): Promise<IdentifierCodeType> {
+  /** The gate inputs for a reactivate — the service uses `codeType` for the
+   *  `identifiers.barcode_qr` gate (task 3.5) and `hasPack` for the additional
+   *  `multi_uom` gate a PACK identifier reactivation needs (task 3.6 §K / FC-5). */
+  peekForReactivate(id: string): Promise<{ codeType: IdentifierCodeType; hasPack: boolean }> {
     return this.scoped(async (tx) => {
       const row = await tx.itemIdentifier.findUnique({
         where: { id },
-        select: { codeType: true },
+        select: { codeType: true, packUomCode: true },
       });
       if (!row) throw new NotFoundError('identifier');
-      return row.codeType as IdentifierCodeType;
+      return { codeType: row.codeType as IdentifierCodeType, hasPack: row.packUomCode !== null };
     });
   }
 
@@ -339,7 +508,7 @@ export class IdentifierRepository extends ScopedRepository {
   private getInTx(tx: ScopedTx, id: string): Promise<ItemIdentifierRow> {
     return tx.itemIdentifier.findUnique({ where: { id }, select: ID_SELECT }).then((r) => {
       if (!r) throw new NotFoundError('identifier');
-      return r as ItemIdentifierRow;
+      return toIdRow(r as RawIdRow);
     });
   }
 
@@ -490,9 +659,13 @@ function assertVariantTargetKind(targetKind: string): void {
  *  `reactivate`). Held for the rest of the transaction so a concurrent variant
  *  activate/archive serialises behind it. `null` if the variant does not exist
  *  in the request tenant (RLS-scoped). */
-async function lockVariant(tx: ScopedTx, id: string): Promise<{ status: string } | null> {
-  const rows = await tx.$queryRaw<{ status: string }[]>`
-    SELECT "status" FROM "variant" WHERE "id" = ${id}::uuid FOR UPDATE`;
+async function lockVariant(
+  tx: ScopedTx,
+  id: string,
+): Promise<{ status: string; productId: string; baseUomCode: string | null } | null> {
+  const rows = await tx.$queryRaw<
+    { status: string; productId: string; baseUomCode: string | null }[]
+  >`SELECT "status", "productId", "baseUomCode" FROM "variant" WHERE "id" = ${id}::uuid FOR UPDATE`;
   return rows[0] ?? null;
 }
 

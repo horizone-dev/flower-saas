@@ -6,6 +6,14 @@ import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { versionConflict } from './catalog-write.helpers.js';
 import { assertVariantHasNoIdentifiers } from './identifier.repository.js';
+import { UomRepository } from './uom.repository.js';
+import {
+  buildRegistry,
+  isBuiltinUom,
+  mapUomError,
+  requireUomCode,
+  toUomDef,
+} from './uom.helpers.js';
 import {
   deriveVariantName,
   resolveVariantCombination,
@@ -28,6 +36,7 @@ export interface VariantRow {
   isDefault: boolean;
   optionSignature: string;
   status: string;
+  baseUomCode: string | null;
   version: number;
   createdAt: Date;
   updatedAt: Date;
@@ -46,6 +55,7 @@ const V_SELECT = {
   isDefault: true,
   optionSignature: true,
   status: true,
+  baseUomCode: true,
   version: true,
   createdAt: true,
   updatedAt: true,
@@ -74,6 +84,7 @@ interface LockedVariant {
   optionSignature: string;
   productId: string;
   nameEn: string;
+  baseUomCode: string | null;
 }
 
 interface ProductGroups {
@@ -284,13 +295,28 @@ export class VariantRepository extends ScopedRepository {
       if (next === 'ACTIVE') {
         const product = await tx.product.findUnique({
           where: { id: current.productId },
-          select: { status: true },
+          select: { status: true, fulfilmentStrategy: true },
         });
         if (!product) throw new NotFoundError('product');
         if (product.status !== 'ACTIVE') {
           throw new DomainError(
             'PRODUCT_NOT_ACTIVE',
             'the product must be ACTIVE before a variant can be activated',
+            409,
+          );
+        }
+        // task 3.6 (owner OD-G) — a STOCKED / BOM variant is quantity-tracked and
+        // needs an authoritative base UOM before it can reach ACTIVE (covers both
+        // DRAFT→ACTIVE and ARCHIVED→ACTIVE reactivation). CUSTOM may stay without
+        // a base. This reads `product.fulfilmentStrategy`, NEVER
+        // `tenant.businessTypeKey` (HG3-NO-BT-BRANCH).
+        if (
+          (product.fulfilmentStrategy === 'STOCKED' || product.fulfilmentStrategy === 'BOM') &&
+          current.baseUomCode === null
+        ) {
+          throw new DomainError(
+            'VARIANT_BASE_UOM_REQUIRED',
+            'set the variant base UOM before activating a STOCKED / BOM variant',
             409,
           );
         }
@@ -309,6 +335,99 @@ export class VariantRepository extends ScopedRepository {
         resourceId: id,
         before: { status: current.status },
         after: { status: next },
+      });
+      return this.getInTx(tx, id);
+    });
+  }
+
+  /**
+   * Set / change the variant base UOM (task 3.6 §H). Lifecycle:
+   *   - NULL → a valid code: one-time initialization — allowed for a DRAFT **or a
+   *     legacy ACTIVE** variant, but ONLY while it has zero conversions and zero
+   *     pack identifiers (ACTIVE or INACTIVE).
+   *   - non-NULL → a different non-NULL code: only while DRAFT, zero conversions,
+   *     zero pack identifiers of any status.
+   *   - non-NULL → NULL: never (`VARIANT_BASE_UOM_LOCKED`).
+   * A successful change bumps `variant.version` and emits
+   * `catalog.variant_base_uom_set` (owner OD-F). Any tenant-custom `code` is
+   * `FOR KEY SHARE`-locked (owner FINAL CORRECTION 2). The `multi_uom` gate for a
+   * custom code lives in `VariantUomService`.
+   */
+  async setBaseUom(
+    id: string,
+    expectedVersion: number,
+    rawCode: string,
+  ): Promise<VariantWithOptions> {
+    const code = requireUomCode(rawCode);
+    return this.scoped(async (tx) => {
+      const current = await lockVariant(tx, id);
+      if (expectedVersion !== current.version) {
+        throw versionConflict('variant', expectedVersion, current.version);
+      }
+      if (current.baseUomCode === code) return this.getInTx(tx, id); // idempotent no-op
+
+      const [convCount, packCount] = await Promise.all([
+        tx.uomConversion.count({ where: { scopeKind: 'VARIANT', scopeId: id } }),
+        tx.itemIdentifier.count({
+          where: { targetKind: 'VARIANT', targetId: id, packUomCode: { not: null } },
+        }),
+      ]);
+
+      if (current.baseUomCode === null) {
+        // one-time initialization — DRAFT or legacy ACTIVE, but nothing may depend on it yet
+        if (convCount > 0 || packCount > 0) {
+          throw new DomainError(
+            'VARIANT_BASE_UOM_LOCKED',
+            'this variant already has conversions or pack identifiers — its base UOM can no longer be initialized',
+            409,
+          );
+        }
+      } else {
+        // non-NULL → different non-NULL: DRAFT only, nothing depending on it
+        if (current.status !== 'DRAFT' || convCount > 0 || packCount > 0) {
+          throw new DomainError(
+            'VARIANT_BASE_UOM_LOCKED',
+            'the base UOM can only change while the variant is a DRAFT with no conversions and no pack identifiers',
+            409,
+          );
+        }
+      }
+
+      // validate the code resolves — a built-in or a registered tenant unit
+      if (!isBuiltinUom(code)) {
+        await UomRepository.lockCustomUomRefs(tx, [code]);
+      }
+      try {
+        const units = (await tx.uom.findMany({
+          select: {
+            code: true,
+            family: true,
+            perBaseNum: true,
+            perBaseDen: true,
+            maxDecimals: true,
+          },
+        })) as Array<{
+          code: string;
+          family: string;
+          perBaseNum: bigint;
+          perBaseDen: bigint;
+          maxDecimals: number;
+        }>;
+        buildRegistry(units.map(toUomDef), []).get(code);
+      } catch (e) {
+        throw mapUomError(e);
+      }
+
+      await tx.variant.update({
+        where: { id },
+        data: { baseUomCode: code, version: { increment: 1 } },
+      });
+      await this.audit.record(tx, {
+        action: 'catalog.variant_base_uom_set',
+        resourceType: 'variant',
+        resourceId: id,
+        before: { baseUomCode: current.baseUomCode },
+        after: { baseUomCode: code },
       });
       return this.getInTx(tx, id);
     });
@@ -410,7 +529,7 @@ async function assertProductExists(tx: ScopedTx, productId: string): Promise<voi
 
 async function lockVariant(tx: ScopedTx, id: string): Promise<LockedVariant> {
   const rows = await tx.$queryRaw<LockedVariant[]>`
-    SELECT "version", "status", "isDefault", "optionSignature", "productId", "nameEn"
+    SELECT "version", "status", "isDefault", "optionSignature", "productId", "nameEn", "baseUomCode"
       FROM "variant" WHERE "id" = ${id}::uuid FOR UPDATE`;
   if (rows.length === 0) throw new NotFoundError('variant');
   return rows[0]!;

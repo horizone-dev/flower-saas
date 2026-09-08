@@ -20,6 +20,14 @@ export {
   quantityDtoSchema,
   type QuantityDtoShape as QuantityDto,
   type QuantityDTO,
+  // Phase 3 task 3.6 — canonical UOM-code semantics + the built-in registry live
+  // in the authoritative UOM package; re-exported here as the shared FE/BE surface.
+  BUILTIN_UOMS,
+  UOM_CODE_RE,
+  canonicalUomCode,
+  isBuiltinUom,
+  type UomDef,
+  type UomFamily,
 } from '@flower/uom';
 
 // --- API error envelope (API-CONVENTIONS) ---
@@ -388,6 +396,51 @@ export function isValidBarcodeValue(trimmed: string): boolean {
     !/\p{Cc}/u.test(trimmed)
   );
 }
+
+// --- UOM / pack conversion (Phase 3 task 3.6) — PHASE-3-PLAN §C.7 / ADR-0018 ---
+
+/**
+ * The UOM families (mirrors `@flower/uom` `UomFamily` + the `uom_family_chk` DB
+ * CHECK). `LENGTH` / `MASS` / `VOLUME` / `COUNT` resolve globally via each
+ * unit's exact `perBase` ratio; `EACH` units are semantically unrelated — a
+ * conversion between two of them (or across families) needs an explicit
+ * product-/variant-scoped `uom_conversion` (D0-1).
+ */
+export const UOM_FAMILIES = ['LENGTH', 'MASS', 'VOLUME', 'COUNT', 'EACH'] as const;
+export type UomFamilyKey = (typeof UOM_FAMILIES)[number];
+export const uomFamilySchema = z.enum(UOM_FAMILIES);
+
+/**
+ * `uom_conversion.scope_kind` — a conversion row is ALWAYS anchored to one
+ * variant or one product (D0-1). There is deliberately **no `GLOBAL` value** —
+ * cross-family / pack ratios exist only as explicitly-scoped rows. Mirrors the
+ * `uom_conversion_scope_kind_chk` DB CHECK.
+ */
+export const UOM_CONVERSION_SCOPE_KINDS = ['VARIANT', 'PRODUCT'] as const;
+export type UomConversionScopeKind = (typeof UOM_CONVERSION_SCOPE_KINDS)[number];
+export const uomConversionScopeKindSchema = z.enum(UOM_CONVERSION_SCOPE_KINDS);
+
+/** Max decimal places any UOM quantity may carry — the `Quantity` scale
+ *  (NUMERIC(18,4)) and the `uom_max_decimals_chk` upper bound. */
+export const UOM_MAX_DECIMALS = 4;
+
+/** Upper bound on the number of scoped conversion rows one replace-set may
+ *  submit (a bounded catalog-config write, mirrors the option-set caps). */
+export const UOM_CONVERSION_REPLACE_MAX = 100;
+
+/**
+ * A raw pack-metadata input for a BARCODE / QR identifier (Task 3.6 §I). The
+ * frozen base quantity (`packBaseQty`) is computed server-side with
+ * `@flower/uom` `convertExact` and is never client-supplied.
+ */
+export const identifierPackInputSchema = z
+  .object({
+    packUomCode: z.string().min(1).max(32),
+    /** decimal string, ≤ 4 fractional places, > 0 — validated as a Quantity server-side */
+    packQty: z.string().min(1).max(40),
+  })
+  .strict();
+export type IdentifierPackInput = z.infer<typeof identifierPackInputSchema>;
 
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct

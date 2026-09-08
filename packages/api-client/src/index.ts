@@ -524,6 +524,11 @@ export interface ItemIdentifierRow {
   codeType: IdentifierCodeType;
   value: string;
   status: IdentifierStatus;
+  /** task 3.6 — the immutable printed pack-identity snapshot; null unless this
+   *  is a BARCODE / QR created with pack metadata */
+  packUomCode: string | null;
+  packQty: string | null;
+  packBaseQty: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -535,6 +540,17 @@ export interface IdentifierCreateInput {
   /** required for SKU / BARCODE; omit for QR (the server generates an opaque
    *  value and rejects a client-supplied one) */
   value?: string;
+  /** task 3.6 — BARCODE / QR only; forbidden on a SKU. `packBaseQty` is
+   *  computed server-side (exact-or-reject) and is never client-supplied. */
+  pack?: { uomCode: string; qty: string };
+}
+
+/** the FROZEN pack snapshot returned on a scan resolve (task 3.6 §J) */
+export interface IdentifierPackSnapshot {
+  uomCode: string;
+  qty: string;
+  baseUomCode: string;
+  baseQty: string;
 }
 
 /** the scan-resolve projection — one ACTIVE identifier + its target summary */
@@ -543,6 +559,72 @@ export interface IdentifierResolution {
   target: { kind: 'VARIANT'; id: string };
   variant: { id: string; productId: string; nameEn: string; status: VariantStatus };
   product: { id: string; slug: string; nameEn: string; status: string };
+  /** null when the identifier carries no pack; never recomputed live */
+  pack: IdentifierPackSnapshot | null;
+}
+
+// ── UOM registry + pack conversions (task 3.6) ──────────────────────────────
+export type UomFamily = 'LENGTH' | 'MASS' | 'VOLUME' | 'COUNT' | 'EACH';
+
+export interface UomListEntry {
+  code: string;
+  family: UomFamily;
+  perBaseNum: string;
+  perBaseDen: string;
+  maxDecimals: number;
+  nameEn: string;
+  nameAr: string | null;
+  /** true for a `@flower/uom` built-in (read-only); false for a tenant unit */
+  builtin: boolean;
+  /** null for a built-in; the optimistic-concurrency handle for a tenant unit */
+  version: number | null;
+}
+
+export interface UomCreateInput {
+  code: string;
+  family: UomFamily;
+  perBaseNum?: string;
+  perBaseDen?: string;
+  maxDecimals?: number;
+  nameEn: string;
+  nameAr?: string | null;
+}
+
+export interface VariantConversionEntry {
+  fromUomCode: string;
+  num: string;
+  den?: string;
+}
+export interface ProductConversionEntry {
+  fromUomCode: string;
+  toUomCode: string;
+  num: string;
+  den?: string;
+}
+export interface EffectiveConversionRow {
+  fromUomCode: string;
+  toUomCode: string;
+  num: string;
+  den: string;
+  source: 'VARIANT' | 'PRODUCT';
+  inherited: boolean;
+}
+export interface StoredProductConversionRow {
+  id: string;
+  fromUomCode: string;
+  toUomCode: string;
+  num: string;
+  den: string;
+  appliesToVariantCount: number;
+}
+export interface VariantConversionsView {
+  variantVersion: number;
+  baseUomCode: string | null;
+  rows: EffectiveConversionRow[];
+}
+export interface ProductConversionsView {
+  productVersion: number;
+  rows: StoredProductConversionRow[];
 }
 
 export interface ProvisionTenantResponse {
@@ -1153,6 +1235,78 @@ export class ApiClient {
   }
   reactivateIdentifier(id: string, idempotencyKey: string): Promise<ItemIdentifierRow> {
     return this.send('POST', `/v1/catalog/identifiers/${id}/reactivate`, undefined, idempotencyKey);
+  }
+
+  // ── UOM registry + pack conversions (task 3.6) ────────────────────────────
+  //   catalog:view reads / catalog:manage (uoms) · variants:manage (base-uom +
+  //   conversions) writes. Every write except a built-in base-UOM assignment
+  //   also requires the `multi_uom` capability. POST → Idempotency-Key; PUT →
+  //   If-Match (uom.version for /uoms, variant/product version for conversions).
+  listUoms(): Promise<UomListEntry[]> {
+    return this.get('/v1/catalog/uoms');
+  }
+  getUom(code: string): Promise<UomListEntry> {
+    return this.get(`/v1/catalog/uoms/${encodeURIComponent(code)}`);
+  }
+  createUom(input: UomCreateInput, idempotencyKey: string): Promise<UomListEntry> {
+    return this.send('POST', '/v1/catalog/uoms', input, idempotencyKey);
+  }
+  updateUom(
+    code: string,
+    input: { nameEn?: string; nameAr?: string | null },
+    expectedVersion: number,
+  ): Promise<UomListEntry> {
+    return this.call(
+      `/v1/catalog/uoms/${encodeURIComponent(code)}`,
+      { method: 'PUT', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as UomListEntry,
+    );
+  }
+  deleteUom(code: string, expectedVersion: number): Promise<{ status: 'deleted' }> {
+    return this.call(
+      `/v1/catalog/uoms/${encodeURIComponent(code)}`,
+      { method: 'DELETE', ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as { status: 'deleted' },
+    );
+  }
+  setVariantBaseUom(
+    variantId: string,
+    baseUomCode: string,
+    expectedVersion: number,
+  ): Promise<VariantWithOptions> {
+    return this.call(
+      `/v1/catalog/variants/${variantId}/base-uom`,
+      { method: 'PUT', body: { baseUomCode }, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as VariantWithOptions,
+    );
+  }
+  getVariantConversions(variantId: string): Promise<VariantConversionsView> {
+    return this.get(`/v1/catalog/variants/${variantId}/conversions`);
+  }
+  replaceVariantConversions(
+    variantId: string,
+    conversions: VariantConversionEntry[],
+    expectedVariantVersion: number,
+  ): Promise<VariantConversionsView> {
+    return this.call(
+      `/v1/catalog/variants/${variantId}/conversions`,
+      { method: 'PUT', body: { conversions }, ifMatch: `"${expectedVariantVersion}"` },
+      (raw) => raw as VariantConversionsView,
+    );
+  }
+  getProductConversions(productId: string): Promise<ProductConversionsView> {
+    return this.get(`/v1/catalog/products/${productId}/conversions`);
+  }
+  replaceProductConversions(
+    productId: string,
+    conversions: ProductConversionEntry[],
+    expectedProductVersion: number,
+  ): Promise<ProductConversionsView> {
+    return this.call(
+      `/v1/catalog/products/${productId}/conversions`,
+      { method: 'PUT', body: { conversions }, ifMatch: `"${expectedProductVersion}"` },
+      (raw) => raw as ProductConversionsView,
+    );
   }
 
   overrideTenantLimit(

@@ -56,6 +56,13 @@ describe('auditable-action registry', () => {
       'catalog.identifier_deactivated',
       'catalog.identifier_reactivated',
       'catalog.identifier_deleted',
+      // task 3.6 — UOM registry + pack conversions
+      'catalog.uom_created',
+      'catalog.uom_updated',
+      'catalog.uom_deleted',
+      'catalog.variant_base_uom_set',
+      'catalog.variant_conversions_changed',
+      'catalog.product_conversions_changed',
     ]) {
       expect(isSecurityEventAction(a), a).toBe(false);
     }
