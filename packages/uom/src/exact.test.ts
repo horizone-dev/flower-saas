@@ -5,6 +5,7 @@ import {
   UomRegistry,
   InexactConversionError,
   UomFamilyMismatchError,
+  UomConversionUnavailableError,
   BUILTIN_UOMS,
   UOM_CODE_RE,
   canonicalUomCode,
@@ -146,6 +147,69 @@ describe('@flower/uom — UomRegistry.convertExact (Task 3.6 pack identity)', ()
     expect(() => reg.convertExact(Quantity.parse('1'), 'meter', 'gram')).toThrow(
       UomFamilyMismatchError,
     );
+  });
+});
+
+describe('@flower/uom — EACH never auto-converts by perBase (Task 3.6 scope check)', () => {
+  // Two distinct EACH units, both perBase 1/1 — the ONLY reason they could look
+  // "1:1 convertible". They must NOT be, absent an explicit conversion.
+  const mkReg = (conversions: { from: string; to: string; num: number; den?: number }[] = []) =>
+    new UomRegistry({
+      units: [
+        { code: 'crate', family: 'EACH', perBase: { num: 1n, den: 1n }, maxDecimals: 0 },
+        { code: 'pallet', family: 'EACH', perBase: { num: 1n, den: 1n }, maxDecimals: 0 },
+        { code: 'halfdozen', family: 'COUNT', perBase: { num: 6n, den: 1n }, maxDecimals: 0 },
+      ],
+      conversions,
+    });
+
+  it('A. EACH A → EACH B, no explicit conversion → unresolvable in convert() AND convertExact()', () => {
+    const reg = mkReg();
+    expect(() => reg.convert(Quantity.parse('1'), 'crate', 'pallet')).toThrow(
+      UomConversionUnavailableError,
+    );
+    expect(() => reg.convertExact(Quantity.parse('1'), 'crate', 'pallet')).toThrow(
+      UomConversionUnavailableError,
+    );
+    // and the reverse direction
+    expect(() => reg.convertExact(Quantity.parse('1'), 'pallet', 'crate')).toThrow(
+      UomConversionUnavailableError,
+    );
+  });
+
+  it('B. EACH A → EACH B with an explicit conversion → resolves using THAT ratio, not 1:1', () => {
+    const reg = mkReg([{ from: 'pallet', to: 'crate', num: 40 }]);
+    expect(reg.convert(Quantity.parse('2'), 'pallet', 'crate').toString()).toBe('80');
+    expect(reg.convertExact(Quantity.parse('2'), 'pallet', 'crate').toString()).toBe('80');
+    // reverse direction of the same explicit row
+    expect(reg.convertExact(Quantity.parse('80'), 'crate', 'pallet').toString()).toBe('2');
+  });
+
+  it('C. physical same-family units still use the perBase fallback', () => {
+    const reg = new UomRegistry();
+    expect(reg.convert(Quantity.parse('2.5'), 'kilogram', 'gram').toString()).toBe('2500');
+    expect(reg.convertExact(Quantity.parse('3'), 'meter', 'millimeter').toString()).toBe('3000');
+  });
+
+  it('D. COUNT units still follow the frozen discrete perBase semantics', () => {
+    const reg = mkReg();
+    expect(reg.convert(Quantity.parse('2'), 'dozen', 'piece').toString()).toBe('24');
+    expect(reg.convertExact(Quantity.parse('2'), 'halfdozen', 'piece').toString()).toBe('12');
+    // a tenant COUNT unit vs a built-in COUNT unit resolves without an explicit row
+    expect(reg.convertExact(Quantity.parse('1'), 'halfdozen', 'dozen')).toBeDefined();
+  });
+
+  it('E. isSameFamilyResolvable agrees with convert()/convertExact() on every case above', () => {
+    const reg = mkReg();
+    // EACH pair: NOT resolvable (matches the throw in A)
+    expect(reg.isSameFamilyResolvable('crate', 'pallet')).toBe(false);
+    // physical + COUNT: resolvable (matches C / D)
+    expect(reg.isSameFamilyResolvable('kilogram', 'gram')).toBe(true);
+    expect(reg.isSameFamilyResolvable('halfdozen', 'piece')).toBe(true);
+    expect(reg.isSameFamilyResolvable('halfdozen', 'dozen')).toBe(true);
+    // cross-family + identity: NOT resolvable
+    expect(reg.isSameFamilyResolvable('meter', 'gram')).toBe(false);
+    expect(reg.isSameFamilyResolvable('crate', 'crate')).toBe(false);
   });
 });
 

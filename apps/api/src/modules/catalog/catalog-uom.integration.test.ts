@@ -487,6 +487,40 @@ describe('UOM / pack conversion (task 3.6, integration)', () => {
       expect(eff.rows.find((r) => r.fromUomCode === 'carton')!.toUomCode).toBe('piece');
     });
 
+    it('a VARIANT-scoped conversion is base-anchored — a stray toUomCode is rejected, never stored against another target', async () => {
+      await mkUom(ownerA, { code: 'box', family: 'EACH', nameEn: 'Box' }).catch(() => {});
+      const s = await mkStocked(ownerA, 'anchored');
+      await setBase(ownerA, s.variantId, 'piece');
+
+      // a client trying to author `box -> milliliter` on VARIANT scope: `.strict()`
+      // rejects the unknown key deterministically (400) — it is NOT silently
+      // dropped and it is NOT stored as `box -> milliliter`.
+      const stray = await putVariantConv(ownerA, s.variantId, [
+        { fromUomCode: 'box', num: '12', toUomCode: 'milliliter' },
+      ]);
+      expect(stray.statusCode).toBe(400);
+
+      // the legitimate base-anchored form succeeds …
+      const ok = await putVariantConv(ownerA, s.variantId, [{ fromUomCode: 'box', num: '12' }]);
+      expect(ok.statusCode, ok.payload).toBe(200);
+
+      // … and EVERY stored/effective VARIANT-source row targets exactly the base
+      const eff = (
+        await req('GET', `/catalog/variants/${s.variantId}/conversions`, ownerA)
+      ).json() as { baseUomCode: string; rows: { toUomCode: string; source: string }[] };
+      for (const row of eff.rows.filter((r) => r.source === 'VARIANT')) {
+        expect(row.toUomCode).toBe(eff.baseUomCode);
+      }
+      // DB-level proof: no VARIANT row for this variant points anywhere but base
+      expect(
+        await count(
+          `SELECT count(*)::int AS n FROM "uom_conversion"
+             WHERE "scopeKind"='VARIANT' AND "scopeId"=$1 AND "toUomCode" <> 'piece'`,
+          [s.variantId],
+        ),
+      ).toBe(0);
+    });
+
     it('PRODUCT conversion is inherited only when toUomCode == variant base; a variant override wins; inert rows show only on the product GET', async () => {
       await mkUom(ownerA, { code: 'tray', family: 'EACH', nameEn: 'Tray' });
       const p = await mkProduct(ownerA, 'prod-conv', 'STOCKED');
@@ -885,6 +919,24 @@ describe('UOM / pack conversion (task 3.6, integration)', () => {
         });
         expect(re.statusCode).toBe(409);
         expect(errCode(re)).toBe('CAPABILITY_NOT_ENABLED');
+        // custom-UOM administration is a `multi_uom` write too — the capability
+        // gate runs BEFORE the version / in-use checks in the repo, so a rename
+        // or a delete of an in-use custom unit still fails closed as CAPABILITY,
+        // not UOM_IN_USE / a version conflict (owner §K — no UOM-delete exception).
+        const renameOff = await req(
+          'PUT',
+          `/catalog/uoms/box`,
+          ownerB,
+          { nameEn: 'Renamed while off' },
+          { 'if-match': '"1"' },
+        );
+        expect(renameOff.statusCode).toBe(409);
+        expect(errCode(renameOff)).toBe('CAPABILITY_NOT_ENABLED');
+        const delOff = await req('DELETE', `/catalog/uoms/box`, ownerB, undefined, {
+          'if-match': '"1"',
+        });
+        expect(delOff.statusCode).toBe(409);
+        expect(errCode(delOff)).toBe('CAPABILITY_NOT_ENABLED');
       } finally {
         await setCap(tenantB, 'multi_uom', true);
       }

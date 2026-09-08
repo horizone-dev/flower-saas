@@ -35,30 +35,42 @@ const updateUomSchema = z
   .strict()
   .refine((o) => Object.keys(o).length > 0, { message: 'at least one field is required' });
 
-const variantConversionsSchema = z.object({
-  conversions: z
-    .array(
-      z.object({
-        fromUomCode: rawCode,
-        num: ratioPart,
-        den: ratioPart.optional(),
-      }),
-    )
-    .max(UOM_CONVERSION_REPLACE_MAX),
-});
+// A VARIANT-scoped conversion is base-anchored — its target is ALWAYS the
+// variant base UOM (owner §F), so the entry carries NO `toUomCode`. `.strict()`
+// rejects a stray `toUomCode` with a deterministic 400 rather than silently
+// dropping it and letting the caller believe they authored a different target.
+const variantConversionsSchema = z
+  .object({
+    conversions: z
+      .array(
+        z
+          .object({
+            fromUomCode: rawCode,
+            num: ratioPart,
+            den: ratioPart.optional(),
+          })
+          .strict(),
+      )
+      .max(UOM_CONVERSION_REPLACE_MAX),
+  })
+  .strict();
 
-const productConversionsSchema = z.object({
-  conversions: z
-    .array(
-      z.object({
-        fromUomCode: rawCode,
-        toUomCode: rawCode,
-        num: ratioPart,
-        den: ratioPart.optional(),
-      }),
-    )
-    .max(UOM_CONVERSION_REPLACE_MAX),
-});
+const productConversionsSchema = z
+  .object({
+    conversions: z
+      .array(
+        z
+          .object({
+            fromUomCode: rawCode,
+            toUomCode: rawCode,
+            num: ratioPart,
+            den: ratioPart.optional(),
+          })
+          .strict(),
+      )
+      .max(UOM_CONVERSION_REPLACE_MAX),
+  })
+  .strict();
 
 const baseUomSchema = z.object({ baseUomCode: rawCode }).strict();
 
