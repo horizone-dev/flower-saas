@@ -432,6 +432,34 @@ describe('@flower/shared-types — catalog tax-category + rate resolution (task 
     expect(m.TAX_CATEGORY_KEY_RE.test('a')).toBe(false);
   });
 
+  it('isFiscalDate: strict YYYY-MM-DD civil date, real calendar dates only, no time / no timezone', async () => {
+    const m = await import('./index.js');
+    // valid civil dates
+    for (const s of ['2026-07-01', '2026-06-30', '2000-02-29', '2024-02-29', '2026-12-31']) {
+      expect(m.isFiscalDate(s), s).toBe(true);
+    }
+    // any time / offset / instant → rejected (never truncated to the date prefix)
+    for (const s of [
+      '2026-07-01T00:30:00+04:00',
+      '2026-07-01T00:30:00+03:00',
+      '2026-06-30T20:30:00Z',
+      '2026-07-01T00:00:00.000Z',
+      '2026-07-01 ',
+      ' 2026-07-01',
+    ]) {
+      expect(m.isFiscalDate(s), s).toBe(false);
+    }
+    // wrong shape
+    for (const s of ['07/01/2026', '2026-7-1', '2026-07-1', '26-07-01', '2026/07/01', '']) {
+      expect(m.isFiscalDate(s), s).toBe(false);
+    }
+    // impossible calendar dates
+    for (const s of ['2026-02-30', '2026-13-01', '2026-00-10', '2026-04-31', '2025-02-29']) {
+      expect(m.isFiscalDate(s), s).toBe(false);
+    }
+    expect(m.FISCAL_DATE_RE.test('2026-07-01')).toBe(true);
+  });
+
   it('closed category-source + resolution-reason enums; NONE / reasons are distinct states', async () => {
     const m = await import('./index.js');
     expect(m.TAX_CATEGORY_SOURCES).toEqual(['VARIANT', 'PRODUCT', 'NONE']);

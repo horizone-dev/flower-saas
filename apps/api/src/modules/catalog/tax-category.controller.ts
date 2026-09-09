@@ -2,6 +2,7 @@ import { Body, Controller, Get, Headers, Param, Put, Query, Res } from '@nestjs/
 import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 import {
+  isFiscalDate,
   setTaxCategorySchema,
   type TaxCategoryAssignmentView,
   type TaxResolutionResult,
@@ -14,19 +15,26 @@ import { assertUuid, parseIfMatch, requireIfMatch } from './catalog-write.helper
 import { TaxCategoryRepository } from './tax-category.repository.js';
 import { TaxResolutionService } from './tax-resolution.service.js';
 
-/** `?at=` — an optional ISO-8601 instant (or bare `YYYY-MM-DD`); nothing else is
- *  accepted. An unknown query key → `400 VALIDATION_FAILED`; a malformed `at` →
- *  `400 INVALID_DATE` (mirrors `LocalizationController`). The fiscal reference
- *  bounds are civil `DATE`s, so `at` is matched on its UTC calendar date
- *  (deterministic across offsets — CHECK 2 / `toFiscalDate`). */
-const resolveQuerySchema = z.object({ at: z.string().optional() }).strict();
+/**
+ * `?date=YYYY-MM-DD` — **REQUIRED**. A civil calendar date and nothing else: NO
+ * time, NO timezone, NO ISO instant. The fiscal reference bounds (`tax_rate`,
+ * `country_tax_config`) are PostgreSQL `DATE` (a civil boundary), so resolution
+ * takes a civil date directly — there is no instant→date reduction and no
+ * timezone anywhere in Task 3.9 (it is a reference resolver, not a transaction
+ * clock). A missing `date` or an unknown query key → `400 VALIDATION_FAILED`;
+ * a value that is not a real `YYYY-MM-DD` — an ISO instant, a `+04:00` / `Z`
+ * offset, `07/01/2026`, `2026-2-3`, an impossible date like `2026-02-30` →
+ * `400 INVALID_DATE`. An ISO timestamp is NEVER silently truncated to its date
+ * prefix.
+ */
+const resolveQuerySchema = z.object({ date: z.string() }).strict();
 
-function parseResolveQuery(raw: Record<string, string>): Date {
+function parseResolveQuery(raw: Record<string, string>): string {
   const r = resolveQuerySchema.safeParse(raw);
   if (!r.success) {
     throw new DomainError(
       'VALIDATION_FAILED',
-      'the query string is invalid',
+      'the query string is invalid — `?date=YYYY-MM-DD` is required',
       400,
       r.error.issues.map((i) => {
         const field = i.path.join('.');
@@ -34,12 +42,14 @@ function parseResolveQuery(raw: Record<string, string>): Date {
       }),
     );
   }
-  if (r.data.at === undefined) return new Date();
-  const at = new Date(r.data.at);
-  if (Number.isNaN(at.getTime())) {
-    throw new DomainError('INVALID_DATE', '"at" must be a valid ISO-8601 datetime', 400);
+  if (!isFiscalDate(r.data.date)) {
+    throw new DomainError(
+      'INVALID_DATE',
+      '"date" must be a civil calendar date in YYYY-MM-DD form (no time, no timezone)',
+      400,
+    );
   }
-  return at;
+  return r.data.date;
 }
 
 function assignmentEtag(
@@ -118,9 +128,10 @@ export class VariantTaxCategoryController {
  * `GET /v1/catalog/companies/:companyId/variants/:variantId/tax` — the effective
  * tax category (variant -> product -> NONE) + the applicable effective
  * `tax_rate` for the company's AUTHORITATIVE country (`company.country_code`) on
- * the civil date of `?at=` (an optional ISO-8601 instant / `YYYY-MM-DD`, default
- * now — matched on its UTC calendar date, deterministic across offsets: CHECK 2)
- * (task 3.9). `catalog:view`, `@ScopedParam({ company: 'companyId' })` (a company
+ * a **required** `?date=YYYY-MM-DD` civil calendar date (task 3.9). No time, no
+ * timezone, no ISO instant — Task 3.9 is a reference resolver, not a transaction
+ * clock, and there is no company / branch / POS / UTC timezone conversion path
+ * at all. `catalog:view`, `@ScopedParam({ company: 'companyId' })` (a company
  * outside the caller's scope → `404`, `COMPANY_OUT_OF_SCOPE` masked). Reads Task
  * 2.7 reference data via `TaxResolutionService` / `LocalizationService`.
  * **Returns metadata + `rateBps` only — NEVER a computed tax amount** (D2-8).
@@ -143,7 +154,7 @@ export class CatalogTaxController {
   ): Promise<TaxResolutionResult> {
     assertUuid(companyId, 'company');
     assertUuid(variantId, 'variant');
-    const at = parseResolveQuery(raw);
-    return this.svc.resolve({ companyId, variantId, at });
+    const date = parseResolveQuery(raw);
+    return this.svc.resolve({ companyId, variantId, date });
   }
 }

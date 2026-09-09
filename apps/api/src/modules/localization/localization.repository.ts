@@ -136,14 +136,15 @@ export class LocalizationRepository extends ScopedRepository {
 
   /**
    * The `tax_rate` rows in force for ONE `(countryCode, taxCategoryKey)` on the
-   * CIVIL DATE `onDate` (`YYYY-MM-DD`), newest `effectiveFrom` first. Task 3.9.
+   * civil calendar date `onDate` (`YYYY-MM-DD`), newest `effectiveFrom` first.
+   * Task 3.9.
    *
-   * CHECK 2 — a **`$queryRaw` with an explicit `::date` cast**, NOT a Prisma
-   * `Date`-typed filter: `"effectiveFrom" <= $3::date` is a pure `DATE` vs `DATE`
-   * comparison, immune to the DB session `TimeZone` and to any
-   * `TIMESTAMPTZ`-vs-`DATE` implicit-cast drift a `Date` filter value can cause
-   * near a civil-date boundary. `onDate` is always the caller's UTC calendar
-   * date (`toFiscalDate` → `slice(0,10)`).
+   * A **`$queryRaw` with an explicit `::date` cast**, NOT a Prisma `Date`-typed
+   * filter: `"effectiveFrom" <= $3::date` is a pure `DATE` vs `DATE` comparison,
+   * immune to the DB session `TimeZone` and to any `TIMESTAMPTZ`-vs-`DATE`
+   * implicit-cast drift a `Date` filter value can cause near a civil-date
+   * boundary. `onDate` is a canonical `YYYY-MM-DD` civil date validated at the
+   * controller and passed straight through — no `Date`, no timezone.
    *
    * The caller (`LocalizationService.resolveTaxRate`) fails CLOSED on `> 1` row
    * (CHECK 1). `orderBy effectiveFrom desc` is kept only for a stable error
@@ -168,10 +169,11 @@ export class LocalizationRepository extends ScopedRepository {
   }
 
   /**
-   * The `country_tax_config` rows in force for `countryCode` on the CIVIL DATE
-   * `onDate` (`YYYY-MM-DD`), newest first. Task 3.9. Same `::date`-cast raw-SQL
-   * predicate as {@link findTaxRatesForCategory} (CHECK 2 — DB-session-timezone
-   * immune). The caller fails CLOSED on `> 1` row.
+   * The `country_tax_config` rows in force for `countryCode` on the civil
+   * calendar date `onDate` (`YYYY-MM-DD`), newest first. Task 3.9. Same
+   * `::date`-cast raw-SQL predicate as {@link findTaxRatesForCategory}
+   * (DB-session-timezone immune, no `Date`). The caller fails CLOSED on `> 1`
+   * row.
    */
   findCountryTaxRegimeOn(countryCode: string, onDate: string): Promise<TaxRegimeRow[]> {
     return this.scoped(

@@ -516,18 +516,18 @@ describe('@flower/api-client', () => {
     expect(fetchMock.mock.calls[1]![1]!.headers).toMatchObject({ 'if-match': '"2"' });
     expect(JSON.parse(String(fetchMock.mock.calls[1]![1]!.body))).toEqual({ taxCategoryKey: null });
 
-    // resolution — company-scoped GET, optional ?at=, NO branchId in the path/query
-    await client.resolveVariantTax('c1', 'v1');
+    // resolution — company-scoped GET, REQUIRED ?date=YYYY-MM-DD, NO branchId
+    await client.resolveVariantTax('c1', 'v1', '2026-07-01');
     expect(String(fetchMock.mock.calls[2]![0])).toBe(
-      'http://api.test/v1/catalog/companies/c1/variants/v1/tax',
+      'http://api.test/v1/catalog/companies/c1/variants/v1/tax?date=2026-07-01',
     );
     expect(fetchMock.mock.calls[2]![1]!.method ?? 'GET').toBe('GET');
 
-    await client.resolveVariantTax('c1', 'v1', '2020-07-01T00:00:00.000Z');
+    await client.resolveVariantTax('c1', 'v1', '2020-07-01');
     expect(String(fetchMock.mock.calls[3]![0])).toBe(
-      'http://api.test/v1/catalog/companies/c1/variants/v1/tax?at=2020-07-01T00%3A00%3A00.000Z',
+      'http://api.test/v1/catalog/companies/c1/variants/v1/tax?date=2020-07-01',
     );
-    expect(String(fetchMock.mock.calls[3]![0])).not.toMatch(/branchId|posTerminal/i);
+    expect(String(fetchMock.mock.calls[3]![0])).not.toMatch(/branchId|posTerminal|[?&]at=/i);
 
     // no tax-amount / compute helper on the client
     expect((client as unknown as Record<string, unknown>)['computeVariantTax']).toBeUndefined();

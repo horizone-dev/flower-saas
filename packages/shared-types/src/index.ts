@@ -697,6 +697,30 @@ export interface TaxCategoryAssignmentView {
   version: number;
 }
 
+/**
+ * A civil calendar date, `YYYY-MM-DD` — NO time, NO timezone. The canonical
+ * input for DATE-backed fiscal reference resolution (task 3.9): `tax_rate` and
+ * `country_tax_config` effective bounds are PostgreSQL `DATE` (a civil
+ * boundary), so resolution takes a civil date directly. There is no
+ * instant→date reduction and no timezone anywhere in Task 3.9.
+ */
+export const FISCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `true` iff `s` is syntactically `YYYY-MM-DD` AND a real calendar date —
+ * rejects `2026-02-30`, `2026-13-01`, `2026-00-10`, `2026-2-3`, and any string
+ * carrying a time or offset. Pure arithmetic: no `Date`, no `Date.parse`, no
+ * timezone, no silent truncation of an ISO timestamp to its date prefix.
+ */
+export function isFiscalDate(s: string): boolean {
+  if (!FISCAL_DATE_RE.test(s)) return false;
+  const [y, mo, d] = s.split('-').map(Number) as [number, number, number];
+  if (mo < 1 || mo > 12 || d < 1) return false;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1]!;
+  return d <= daysInMonth;
+}
+
 /** Where the effective tax category came from in the `variant -> product -> NONE`
  *  precedence chain. `NONE` ⇒ neither the variant nor its product has a category
  *  assigned — "not configured", which is NEVER 0% tax (§11). */
@@ -709,9 +733,10 @@ export type TaxCategorySource = (typeof TAX_CATEGORY_SOURCES)[number];
  * `EXEMPT`). A non-null reason ⇔ `rateBps` is `null` and the state is
  * **unresolved**, never "0%":
  *   - `NO_CATEGORY_ASSIGNED` — product & variant both unassigned (`NONE`).
- *   - `REGIME_NONE`          — the company's country has no VAT regime at `at`.
+ *   - `REGIME_NONE`          — the company's country has no VAT regime on the
+ *                              requested civil date.
  *   - `NO_RATE_FOR_CATEGORY` — VAT regime, but no `tax_rate` row for the
- *                              resolved category is in force at `at`.
+ *                              resolved category is in force on that date.
  */
 export const TAX_RESOLUTION_REASONS = [
   'NO_CATEGORY_ASSIGNED',
@@ -723,26 +748,27 @@ export type TaxResolutionReason = (typeof TAX_RESOLUTION_REASONS)[number];
 /**
  * `GET /v1/catalog/companies/:companyId/variants/:variantId/tax` — the effective
  * tax category + the applicable effective `tax_rate` for the company's
- * authoritative country on the civil date of `at`. **Metadata + reference
+ * authoritative country on a civil calendar date. **Metadata + reference
  * resolution only — NEVER a calculated tax amount** (D2-8;
  * `Money.percentage(rateBps)` is Phase 3b). `countryCode` is always
  * `company.country_code` (authoritative — never a client value, never derived
  * from branch / POS terminal).
  *
  * DATE CONTRACT: the fiscal `effective_from` / `effective_to` bounds are
- * PostgreSQL `DATE`s (civil boundaries). `?at=` is an optional ISO-8601 instant
- * (default now); it is reduced to its **UTC calendar date** for matching, so
- * resolution is deterministic across timezone offsets — two ISO strings for the
- * same instant always resolve to the same rate. Pass a bare `YYYY-MM-DD` to
- * name a civil date directly. `> 1` in-force rate row for one
- * `(country, category, date)` (overlap of any shape) → `500 TAX_RATE_AMBIGUOUS`.
+ * PostgreSQL `DATE`s (civil boundaries). The resolution input is a **required**
+ * `?date=YYYY-MM-DD` civil calendar date — NO time, NO timezone, NO ISO
+ * instant (a value carrying a time or `+HH:MM` / `Z` offset → `400`). There is
+ * no instant→date reduction and no timezone conversion anywhere in Task 3.9 —
+ * it is a reference resolver, not a transaction clock. `> 1` in-force rate row
+ * for one `(country, category, date)` (overlap of any shape) →
+ * `500 TAX_RATE_AMBIGUOUS`.
  */
 export interface TaxResolutionResult {
   variantId: string;
   companyId: string;
   /** `company.country_code` — the sole fiscal authority. */
   countryCode: string;
-  /** the `country_tax_config` regime in force on the civil date of `at`. */
+  /** the `country_tax_config` regime in force on the requested civil date. */
   regime: 'VAT' | 'NONE';
   /** the resolved effective category key, or `null` when `categorySource` is `NONE`. */
   taxCategoryKey: string | null;
@@ -753,10 +779,9 @@ export interface TaxResolutionResult {
   /** the matched `tax_rate` window (ISO date `YYYY-MM-DD`), or `null` when unresolved. */
   effectiveFrom: string | null;
   effectiveTo: string | null;
-  /** the instant asked about — the exact `?at=` value (or the server "now"),
-   *  echoed as an ISO-8601 datetime. The civil date used for matching is its
-   *  UTC calendar date. */
-  resolvedAt: string;
+  /** the civil calendar date the resolution was performed for — the exact
+   *  `?date=` value, echoed as `YYYY-MM-DD`. No time, no timezone. */
+  resolvedDate: string;
   reason: TaxResolutionReason | null;
 }
 

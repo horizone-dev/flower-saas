@@ -1449,8 +1449,9 @@ export class ApiClient {
   // ── catalog tax-category assignment + rate resolution (task 3.9) ───────────
   // Assignment: `catalog:manage` (product) / `variants:manage` (variant), tenant
   // scoped, `If-Match: "<version>"`. `taxCategoryKey: null` clears. Resolution:
-  // `catalog:view`, company-scoped, optional `?at=`. NO tax amount is ever
-  // computed or returned (D2-8). NO branchId anywhere.
+  // `catalog:view`, company-scoped, REQUIRED `?date=YYYY-MM-DD` civil calendar
+  // date (no time, no timezone, no ISO instant). NO tax amount is ever computed
+  // or returned (D2-8). NO branchId anywhere.
   setProductTaxCategory(
     productId: string,
     taxCategoryKey: string | null,
@@ -1473,15 +1474,15 @@ export class ApiClient {
       (raw) => raw as TaxCategoryAssignmentView,
     );
   }
+  /** `date` is a REQUIRED civil calendar date, `YYYY-MM-DD` — no time, no
+   *  timezone. The fiscal reference bounds are PostgreSQL `DATE`; Task 3.9 does
+   *  no instant→date reduction and no timezone conversion. */
   resolveVariantTax(
     companyId: string,
     variantId: string,
-    at?: string,
+    date: string,
   ): Promise<TaxResolutionResult> {
-    return this.get(
-      `/v1/catalog/companies/${companyId}/variants/${variantId}/tax`,
-      at !== undefined ? { at } : undefined,
-    );
+    return this.get(`/v1/catalog/companies/${companyId}/variants/${variantId}/tax`, { date });
   }
 
   overrideTenantLimit(

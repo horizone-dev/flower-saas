@@ -69,9 +69,9 @@ export interface CompanyLocalizationProfileDto {
 
 /**
  * `LocalizationService.resolveTaxRate(...)` — THE single effective `tax_rate`
- * for ONE `(countryCode, taxCategoryKey)` on the civil (UTC) date of `at`
- * (task 3.9). Reference resolution only — carries `rateBps`, never a computed
- * amount.
+ * for ONE `(countryCode, taxCategoryKey)` on a civil calendar date
+ * (`YYYY-MM-DD`, no time / no timezone) (task 3.9). Reference resolution only —
+ * carries `rateBps`, never a computed amount.
  *   - `regime: 'NONE'`      → `rate: null`, `reason: 'REGIME_NONE'`.
  *   - VAT, no in-force row  → `rate: null`, `reason: 'NO_RATE_FOR_CATEGORY'`.
  *   - VAT, ONE in-force row → `rate: {...}`, `reason: null` (incl. a real `0`).

@@ -92,7 +92,8 @@ export class LocalizationService {
    * COMPANY_LOCALIZATION_NOT_CONFIGURED` if the company has no country. Task 3.9
    * `TaxResolutionService` uses this (not `forCompany`) so tax resolution never
    * depends on `forCompany`'s regime/rate/currency assembly — the regime and
-   * rate are resolved on the civil date via `resolveRegimeOn` / `resolveTaxRate`.
+   * rate are resolved on a civil calendar date via `resolveRegimeOn` /
+   * `resolveTaxRate`.
    */
   async resolveCompanyCountry(companyId: string): Promise<string> {
     const company = await this.repo.findCompanyProfile(companyId);
@@ -107,13 +108,14 @@ export class LocalizationService {
   }
 
   /**
-   * The single `country_tax_config` regime for `countryCode` on the CIVIL DATE
-   * of `at` (its UTC calendar date — CHECK 2, {@link toFiscalDate}). FAIL CLOSED:
-   * no row → `500 TAX_REGIME_NOT_CONFIGURED`; `> 1` overlapping in-force row
-   * (any shape) → `500 TAX_REGIME_AMBIGUOUS` (CHECK 1 — never silently picked).
+   * The single `country_tax_config` regime for `countryCode` on the civil
+   * calendar date `onDate` (`YYYY-MM-DD`, passed straight to `::date`-cast SQL —
+   * no `Date`, no timezone). FAIL CLOSED: no row → `500 TAX_REGIME_NOT_CONFIGURED`;
+   * `> 1` overlapping in-force row (any shape — same/different `effectiveFrom`,
+   * finite/open-ended) → `500 TAX_REGIME_AMBIGUOUS` (CHECK 1 — never silently
+   * picked).
    */
-  async resolveRegimeOn(countryCode: string, at: Date = new Date()): Promise<'VAT' | 'NONE'> {
-    const onDate = toFiscalDate(at).toISOString().slice(0, 10);
+  async resolveRegimeOn(countryCode: string, onDate: string): Promise<'VAT' | 'NONE'> {
     const rows = await this.repo.findCountryTaxRegimeOn(countryCode, onDate);
     if (rows.length === 0) {
       throw new DomainError(
@@ -134,18 +136,17 @@ export class LocalizationService {
 
   /**
    * The single effective `tax_rate` for `(countryCode, categoryKey)` on the
-   * CIVIL DATE of `at` (task 3.9 — the fiscal half of tax resolution; the
-   * catalog category precedence is `TaxResolutionService`'s).
+   * civil calendar date `onDate` (task 3.9 — the fiscal half of tax resolution;
+   * the catalog category precedence is `TaxResolutionService`'s).
    *
-   * DATE CONTRACT (CHECK 2): `tax_rate` / `country_tax_config` `effective_from` /
+   * DATE CONTRACT: `tax_rate` / `country_tax_config` `effective_from` /
    * `effective_to` are PostgreSQL `DATE` columns — a civil-calendar boundary,
-   * not an instant. `at` (an instant) is reduced to its **UTC calendar date**
-   * via {@link toFiscalDate} BEFORE any comparison, so the result is fully
-   * deterministic across timezone offsets: two ISO strings denoting the same
-   * instant always resolve to the same rate, and no accidental ±1-day drift can
-   * arise from a `TIMESTAMPTZ`-vs-`DATE` implicit cast or the DB session
-   * timezone. A caller who means "civil date X" passes a bare `YYYY-MM-DD` (or
-   * `X`T12:00:00Z). No jurisdiction-specific timezone is ever applied.
+   * not an instant. `onDate` is a canonical `YYYY-MM-DD` string (validated at
+   * the controller) and is passed verbatim to `::date`-cast raw SQL — a pure
+   * `DATE` vs `DATE` comparison, immune to the DB session timezone. There is NO
+   * instant, NO offset, NO UTC normalization, NO JavaScript `Date` in the
+   * rate-window selection, and NO jurisdiction / company / branch / POS
+   * timezone. Task 3.9 is a reference resolver, not a transaction clock.
    *
    * Deterministic + FAIL CLOSED:
    *   - no `country_tax_config` on that date → `500 TAX_REGIME_NOT_CONFIGURED`.
@@ -167,10 +168,9 @@ export class LocalizationService {
   async resolveTaxRate(
     countryCode: string,
     categoryKey: string,
-    at: Date = new Date(),
+    onDate: string,
   ): Promise<ResolvedTaxRateDto> {
-    const onDate = toFiscalDate(at).toISOString().slice(0, 10);
-    const regime = await this.resolveRegimeOn(countryCode, at);
+    const regime = await this.resolveRegimeOn(countryCode, onDate);
     if (regime === 'NONE') {
       return { regime: 'NONE', rate: null, reason: 'REGIME_NONE' };
     }
@@ -275,23 +275,4 @@ function currencyDto(c: {
     nameEn: c.nameEn,
     nameAr: c.nameAr,
   };
-}
-
-/**
- * Reduce an INSTANT to the civil CALENDAR DATE used to match the `DATE`-typed
- * fiscal reference columns (`tax_rate` / `country_tax_config`), as its **UTC**
- * date at 00:00:00.000Z (task 3.9 CHECK 2).
- *
- * The `?at=` wire contract stays "an optional ISO-8601 instant, default now"
- * (frozen scope §15 / §20 / O7); this pins the previously-unspecified
- * instant→civil-date reduction so it is DETERMINISTIC across timezone offsets:
- * `2026-07-01T00:30:00+04:00` and `2026-06-30T20:30:00Z` are the SAME instant
- * and both resolve to the civil date `2026-06-30` — no ±1-day drift from a
- * `TIMESTAMPTZ`-vs-`DATE` implicit cast or the DB session timezone, and no
- * jurisdiction-specific timezone is ever applied. A caller who means "civil
- * date X in country Y" passes a bare `YYYY-MM-DD` (parsed as `X`T00:00:00Z →
- * civil date X) or `X`T12:00:00Z.
- */
-export function toFiscalDate(at: Date): Date {
-  return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
 }
