@@ -884,28 +884,96 @@ describe('branch price override + availability (task 3.8, integration)', () => {
       });
     });
 
-    it('availability writes are NOT capability-gated (work with branch_pricing disabled)', async () => {
+    it('branch_pricing capability gates EVERY branch write — price AND availability (owner ruling 2026-09-09)', async () => {
+      // an EXISTING availability row that must survive a capability disable (F)
+      const surviving = await mkVariant(ownerA, 'avsurvive');
+      const pre = await setAvail(dubai, [{ variantId: surviving, available: false }], ik());
+      expect(pre.statusCode, pre.payload).toBe(200);
+      const auditsBefore = Number(
+        (
+          await sql<{ n: string }>(
+            `SELECT count(*)::text AS n FROM audit_log WHERE action='catalog.branch_availability_changed' AND "resourceId"=$1`,
+            [dubai],
+          )
+        )[0]!.n,
+      );
+
       await setCap(tenantA, 'branch_pricing', false);
       try {
         const v = await mkVariant(ownerA, 'avnocap', { base: 'piece' });
-        // price write is blocked
         await companyPrice(coA, v, [{ uomCode: 'piece', sell: money('500', 'AED', 2) }]);
+
+        // (B) availability PUT is now BLOCKED → 409 CAPABILITY_NOT_ENABLED
+        const availBlocked = await setAvail(dubai, [{ variantId: v, available: false }], ik());
+        expect(availBlocked.statusCode).toBe(409);
+        expect(errCode(availBlocked)).toBe('CAPABILITY_NOT_ENABLED');
+        // ...and it produced NO business mutation and NO audit row
+        expect(
+          Number(
+            (
+              await sql<{ n: string }>(
+                `SELECT count(*)::text AS n FROM branch_variant_availability WHERE "branchId"=$1 AND "variantId"=$2`,
+                [dubai, v],
+              )
+            )[0]!.n,
+          ),
+        ).toBe(0);
+        expect(
+          Number(
+            (
+              await sql<{ n: string }>(
+                `SELECT count(*)::text AS n FROM audit_log WHERE action='catalog.branch_availability_changed' AND "resourceId"=$1`,
+                [dubai],
+              )
+            )[0]!.n,
+          ),
+        ).toBe(auditsBefore);
+
+        // (also) price writes still blocked, incl. PUT []
         const priceBlocked = await putBranchPrices(
           dubai,
           v,
           [{ uomCode: 'piece', sell: money('450', 'AED', 2) }],
           '"0"',
         );
-        expect(priceBlocked.statusCode).toBe(409);
         expect(errCode(priceBlocked)).toBe('CAPABILITY_NOT_ENABLED');
-        // even PUT [] is blocked
         expect((await putBranchPrices(dubai, v, [], '"0"')).statusCode).toBe(409);
-        // availability still works
-        const avail = await setAvail(dubai, [{ variantId: v, available: false }], ik());
-        expect(avail.statusCode, avail.payload).toBe(200);
+
+        // (C) availability READ still works
+        expect((await getAvail(dubai, `?variantId=${v}`)).statusCode).toBe(200);
+        // (D) branch effective-catalog READ still works
+        expect((await effCatalog(dubai)).statusCode).toBe(200);
+        // (E) branch price GET + resolve READS still work
+        expect((await getBranchPrices(dubai, v)).statusCode).toBe(200);
+        expect((await resolveBranch(dubai, v, 'uomCode=piece')).statusCode).toBe(200);
+
+        // (F) the pre-existing availability row is untouched
+        const still = await getAvail(dubai, `?variantId=${surviving}`);
+        expect(still.json()).toEqual([{ variantId: surviving, available: false, explicit: true }]);
       } finally {
         await setCap(tenantA, 'branch_pricing', true);
       }
+
+      // (A) capability re-enabled → availability PUT succeeds
+      const v2 = await mkVariant(ownerA, 'avnocap2');
+      const ok = await setAvail(dubai, [{ variantId: v2, available: false }], ik());
+      expect(ok.statusCode, ok.payload).toBe(200);
+    });
+
+    it('a capability-blocked availability retry (same key) re-executes after the capability is re-enabled — the 409 released the idempotency claim', async () => {
+      const v = await mkVariant(ownerA, 'avretry');
+      const key = ik();
+      await setCap(tenantA, 'branch_pricing', false);
+      const blocked = await setAvail(dubai, [{ variantId: v, available: false }], key);
+      expect(blocked.statusCode).toBe(409);
+      expect(errCode(blocked)).toBe('CAPABILITY_NOT_ENABLED');
+      await setCap(tenantA, 'branch_pricing', true);
+      // same key — a non-2xx released the claim, so the retry EXECUTES (not IN_PROGRESS / not a stale replay)
+      const retry = await setAvail(dubai, [{ variantId: v, available: false }], key);
+      expect(retry.statusCode, retry.payload).toBe(200);
+      expect((retry.json() as { entries: { available: boolean }[] }).entries[0]!.available).toBe(
+        false,
+      );
     });
   });
 
@@ -1136,6 +1204,105 @@ describe('branch price override + availability (task 3.8, integration)', () => {
       ]);
       // no product name / attributes / identifiers / media / inventory
       expect(JSON.stringify(entry)).not.toMatch(/nameEn|attributes|identifiers|media|onHand/i);
+    });
+
+    it('effective-catalog pagination is over UNIQUE variants, not price rows (CHECK 2) — a multi-UOM variant consumes exactly ONE page slot; no skips, no dupes, stable nextCursor', async () => {
+      // a DEDICATED company + branch so this test's variant set is isolated
+      const pgCo = (
+        await sql<{ id: string }>(
+          `INSERT INTO company (id,"tenantId","legalNameEn","countryCode","defaultCurrency","status","updatedAt")
+           VALUES (uuidv7(),$1,'PgCo','AE','AED','ACTIVE',now()) RETURNING id`,
+          [tenantA],
+        )
+      )[0]!.id;
+      const pgBranch = (
+        await sql<{ id: string }>(
+          `INSERT INTO branch (id,"tenantId","companyId",name,"updatedAt")
+           VALUES (uuidv7(),$1,$2,'PgBranch',now()) RETURNING id`,
+          [tenantA, pgCo],
+        )
+      )[0]!.id;
+
+      // three variants created IN ORDER — variantId is uuidv7 ⇒ a < b < c
+      const a = await mkVariant(ownerA, 'pgva');
+      const b = await mkVariant(ownerA, 'pgvb');
+      const c = await mkVariant(ownerA, 'pgvc');
+      // price them at the COMPANY level (direct SQL — this test is about paging,
+      // not the pricing API): A has 3 UOM rows, B has 1, C has 2.
+      for (const [vid, uoms] of [
+        [a, ['piece', 'ecdozen', 'eccarton']],
+        [b, ['piece']],
+        [c, ['piece', 'ecdozen']],
+      ] as [string, string[]][]) {
+        await sql(
+          `INSERT INTO company_variant_price_set (id,"tenantId","companyId","variantId","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,now())`,
+          [tenantA, pgCo, vid],
+        );
+        for (const u of uoms) {
+          await sql(
+            `INSERT INTO company_variant_uom_price
+               (id,"tenantId","companyId","variantId","uomCode","sellAmountMinor","sellCurrencyCode","sellCurrencyExponent","updatedAt")
+             VALUES (uuidv7(),$1,$2,$3,$4,100,'AED',2,now())`,
+            [tenantA, pgCo, vid, u],
+          );
+        }
+      }
+      // a BRANCH override on A/piece (direct SQL — A has no base UOM here) — the
+      // projection must still count A exactly ONCE and prefer the branch tier.
+      await sql(
+        `INSERT INTO branch_variant_price_set (id,"tenantId","companyId","branchId","variantId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,$4,now())`,
+        [tenantA, pgCo, pgBranch, a],
+      );
+      await sql(
+        `INSERT INTO branch_variant_uom_price
+           (id,"tenantId","companyId","branchId","variantId","uomCode","overrideAmountMinor","overrideCurrencyCode","overrideCurrencyExponent","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,$4,'piece',90,'AED',2,now())`,
+        [tenantA, pgCo, pgBranch, a],
+      );
+
+      type Page = {
+        entries: { variantId: string; prices: { uomCode: string; source: string }[] }[];
+        nextCursor: string | null;
+      };
+      const pageOf = async (cursor?: string): Promise<Page> =>
+        (await effCatalog(pgBranch, `?limit=1${cursor ? `&cursor=${cursor}` : ''}`)).json() as Page;
+
+      // the effective-catalog page order is variantId ASC; A has 3 company UOM
+      // rows, B has 1, C has 2 — a multi-UOM variant must consume exactly ONE
+      // page slot (the DISTINCT collapses the extra rows before LIMIT).
+      const tierCount: Record<string, number> = { [a]: 3, [b]: 1, [c]: 2 };
+      const ordered = [a, b, c].sort();
+      const seen = new Set<string>();
+
+      let cursor: string | null | undefined = undefined;
+      for (let i = 0; i < ordered.length; i++) {
+        const pg: Page = await pageOf(cursor ?? undefined);
+        expect(pg.entries, `page ${i + 1} must hold exactly one unique variant`).toHaveLength(1);
+        const e = pg.entries[0]!;
+        expect(e.variantId, `page ${i + 1}`).toBe(ordered[i]);
+        expect(seen.has(e.variantId), 'no variant repeats across pages').toBe(false);
+        seen.add(e.variantId);
+        expect(e.prices, `${e.variantId} tier count`).toHaveLength(tierCount[e.variantId]!);
+        expect(pg.nextCursor, 'nextCursor is the last emitted variantId').toBe(ordered[i]);
+        cursor = pg.nextCursor;
+      }
+      // page 4 → empty, nextCursor null
+      const p4 = await pageOf(cursor ?? undefined);
+      expect(p4.entries).toEqual([]);
+      expect(p4.nextCursor).toBeNull();
+      // every variant seen exactly once — no skips
+      expect([...seen].sort()).toEqual(ordered);
+
+      // the 3-UOM variant's page carried all 3 tiers (branch override on `piece`,
+      // company fallback on the other two) — its extra rows never split the page.
+      const bigPage = (await effCatalog(pgBranch, '?limit=200')).json() as Page;
+      expect(bigPage.entries.map((x) => x.variantId)).toEqual(ordered);
+      const aEntry = bigPage.entries.find((x) => x.variantId === a)!;
+      expect(aEntry.prices.map((x) => x.uomCode).sort()).toEqual(['eccarton', 'ecdozen', 'piece']);
+      expect(aEntry.prices.find((x) => x.uomCode === 'piece')!.source).toBe('BRANCH');
+      expect(aEntry.prices.find((x) => x.uomCode === 'ecdozen')!.source).toBe('COMPANY');
     });
 
     it('a catalog:view-only user → 403 on writes; branch reads work', async () => {

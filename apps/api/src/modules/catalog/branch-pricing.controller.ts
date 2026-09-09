@@ -120,12 +120,14 @@ const availabilityListQuerySchema = z.object({ variantId: z.string().uuid().opti
 
 /**
  * `/v1/catalog/branches/:branchId/availability` — Task 3.8 branch merchandising
- * flag. `branch_price:manage` for writes (NO capability gate — BD-11) /
- * `catalog:view` for reads. Bulk declarative `PUT` — `Idempotency-Key` (no
- * `If-Match`, no version). Structural DTO validation → `400`; the semantic checks
- * (duplicate `variantId` → `422 BRANCH_AVAILABILITY_DUPLICATE_VARIANT`,
- * non-ascending → `400`, unknown tenant variant → `422`) run here as explicit
- * typed domain errors (Correction H — NOT a Zod refinement).
+ * flag. Writes require `branch_price:manage` (permission) AND `branch_pricing`
+ * (capability — checked in `BranchPricingService.setAvailability`, owner ruling
+ * 2026-09-09); reads require only `catalog:view` and are never capability-gated.
+ * Bulk declarative `PUT` — `Idempotency-Key` (no `If-Match`, no version).
+ * Structural DTO validation → `400`; the semantic checks (duplicate `variantId`
+ * → `422 BRANCH_AVAILABILITY_DUPLICATE_VARIANT`, non-ascending → `400`, unknown
+ * tenant variant → `422`) run here as explicit typed domain errors (Correction H
+ * — NOT a Zod refinement).
  */
 @Controller('catalog/branches/:branchId/availability')
 export class BranchAvailabilityController {

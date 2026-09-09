@@ -640,21 +640,39 @@ export class BranchPricingRepository extends ScopedRepository {
       // one entry per variant for which THIS company has ≥ 1 current company
       // price row — there is no "company-owned variant" concept; this is purely
       // "the branch's company has priced this variant" (BD-14 / effective-catalog
-      // wording). Ordered + cursored by variantId for a stable page.
-      const distinctRows = await tx.companyVariantUomPrice.findMany({
-        where: {
-          companyId,
-          ...(cursor !== undefined ? { variantId: { gt: cursor } } : {}),
-        },
-        distinct: ['variantId'],
-        orderBy: { variantId: 'asc' },
-        take: limit + 1,
-        select: { variantId: true },
-      });
+      // wording).
+      //
+      // CURSOR PAGINATION IS OVER UNIQUE VARIANTS, NOT PRICE ROWS. A variant may
+      // have several `company_variant_uom_price` rows (piece / dozen / carton);
+      // it must consume exactly ONE page slot. `SELECT DISTINCT "variantId" …
+      // ORDER BY "variantId" ASC LIMIT n` is a DB-GUARANTEED unique-variant page
+      // in PostgreSQL (DISTINCT collapses the duplicate UOM rows before LIMIT) —
+      // it does not rely on any Prisma `distinct` + `take` interaction. The
+      // cursor is a `variantId`; the next page starts strictly after it, so no
+      // variant is skipped and none repeats across pages. `nextCursor` is the
+      // last emitted `variantId` (the caller keeps paging until `entries` is
+      // empty).
+      const tenantId = requireTenantContext().tenantId;
+      const distinctRows =
+        cursor === undefined
+          ? await tx.$queryRaw<{ variantId: string }[]>`
+              SELECT DISTINCT "variantId"
+                FROM "company_variant_uom_price"
+               WHERE "tenantId" = ${tenantId}::uuid
+                 AND "companyId" = ${companyId}::uuid
+               ORDER BY "variantId" ASC
+               LIMIT ${limit + 1}`
+          : await tx.$queryRaw<{ variantId: string }[]>`
+              SELECT DISTINCT "variantId"
+                FROM "company_variant_uom_price"
+               WHERE "tenantId" = ${tenantId}::uuid
+                 AND "companyId" = ${companyId}::uuid
+                 AND "variantId" > ${cursor}::uuid
+               ORDER BY "variantId" ASC
+               LIMIT ${limit + 1}`;
       const page = distinctRows.slice(0, limit);
-      const nextCursor =
-        distinctRows.length > limit ? (page[page.length - 1]?.variantId ?? null) : null;
       if (page.length === 0) return { entries: [], nextCursor: null };
+      const nextCursor = page[page.length - 1]!.variantId;
 
       const variantIds = page.map((p) => p.variantId);
       const [variants, companyRows, branchRows, availRows] = await Promise.all([

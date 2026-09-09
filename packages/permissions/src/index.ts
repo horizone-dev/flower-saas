@@ -255,12 +255,12 @@ export type Phase37TenantPermission = (typeof PHASE_3_7_TENANT_PERMISSIONS)[numb
  * roles (`manager` does NOT get it by default — mirrors `catalog:manage` /
  * `variants:manage` / `identifiers:manage` / `pricing:manage`; a custom role may
  * receive it normally). No key is renamed, duplicated or invented (D2-6 /
- * HG3-PERMISSION-STABILITY). It gates BOTH branch-price writes (`PUT …/prices`,
- * which ALSO need the `branch_pricing` catalog capability) AND branch-availability
- * writes (`PUT …/availability`, which have NO capability gate — BD-11).
- * `catalog:view` covers every branch read. Not in `MODULE_OF_PERMISSION` —
- * `catalog` is a foundation module. NOT step-up (BD-12). There is NO separate
- * `branch_availability` permission or capability.
+ * HG3-PERMISSION-STABILITY). It gates BOTH branch-price writes (`PUT …/prices`)
+ * AND branch-availability writes (`PUT …/availability`); BOTH also require the
+ * `branch_pricing` catalog capability (owner ruling 2026-09-09). `catalog:view`
+ * covers every branch read — reads are never capability-gated. Not in
+ * `MODULE_OF_PERMISSION` — `catalog` is a foundation module. NOT step-up (BD-12).
+ * There is NO separate `branch_availability` permission or capability.
  */
 export const PHASE_3_8_TENANT_PERMISSIONS = [
   'branch_price:manage',

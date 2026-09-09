@@ -67,7 +67,7 @@ import {
  *     + `branch_variant_availability` (a boolean merchandising flag, NOT a
  *     quantity). `branch_price:manage` writes / `catalog:view` reads; branch
  *     scoped (`@ScopedParam({ branch })`); the `branch_pricing` capability gates
- *     PRICE writes only — availability writes have no capability gate.
+ *     EVERY branch write (price + availability); reads are never capability-gated.
  *     Company↔branch price-row integrity is synchronized on the Task 3.7
  *     `company_variant_price_set` lock; the additive company-price-removal guard
  *     + the tenant-wide branch-price dependency counts (custom-UOM delete /

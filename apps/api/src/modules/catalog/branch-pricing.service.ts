@@ -11,17 +11,25 @@ import { BranchPricingRepository } from './branch-pricing.repository.js';
 import type { BranchPriceEntryInput } from './branch-pricing.helpers.js';
 
 /**
- * Task 3.8 — the `branch_pricing` catalog-capability gate (owner BD-11).
+ * Task 3.8 — the `branch_pricing` catalog-capability gate (owner ruling
+ * 2026-09-09, superseding the earlier BD-11 wording).
  *
- *   - It guards ONLY branch PRICE writes (`PUT …/prices`, incl. `PUT { prices: [] }`).
- *   - It NEVER guards branch AVAILABILITY writes — branch availability is
- *     foundational branch merchandising control and stays usable even when
- *     branch-specific pricing is disabled.
- *   - It NEVER guards a read.
- *   - Disabling `branch_pricing` blocks new branch-price mutations (409
- *     `CAPABILITY_NOT_ENABLED`) but never hides / destroys existing branch price
- *     rows, and never disables the Task 3.7 company-price-removal integrity guard
- *     (which lives in `CompanyPricingRepository` and runs regardless).
+ *   - It guards **every branch write** — branch PRICE writes (`PUT …/prices`,
+ *     incl. `PUT { prices: [] }`) AND branch AVAILABILITY writes
+ *     (`PUT …/availability`). Both require `branch_price:manage` (the permission)
+ *     AND `branch_pricing` (this capability).
+ *   - It NEVER guards a read (`GET …/prices`, `GET …/prices/resolve`,
+ *     `GET …/availability`, `GET …/catalog`) — reads stay ungated so a POS /
+ *     Owner client can always see the current state even with the capability off.
+ *   - Disabling `branch_pricing` blocks new branch price + availability
+ *     mutations (409 `CAPABILITY_NOT_ENABLED`) but never hides / destroys
+ *     existing `branch_variant_*` rows, and never disables the Task 3.7
+ *     company-price-removal integrity guard (which lives in
+ *     `CompanyPricingRepository` and runs regardless).
+ *   - The gate is the application-layer `assertEnabled(...)` — it runs inside
+ *     the handler, so on a `409` the idempotency interceptor RELEASES the claim
+ *     (a non-2xx never marks the key DONE): no business mutation, no audit row,
+ *     and a retry after the capability is re-enabled re-executes cleanly.
  *
  * `branch_pricing` needs no entitlement module, so only `assertEnabled` is
  * called. Business Type is never consulted (HG3-NO-BT-BRANCH). All data access /
@@ -52,11 +60,13 @@ export class BranchPricingService {
     return this.repo.resolve(branchId, variantId, uomCode);
   }
 
-  setAvailability(
+  async setAvailability(
     branchId: string,
     entries: readonly { variantId: string; available: boolean }[],
   ): Promise<BranchAvailabilitySetResult> {
-    // NO capability gate (BD-11).
+    // capability-gated like a branch price write (owner ruling 2026-09-09) —
+    // the SAME application-layer pattern used by `replacePrices` above.
+    await this.caps.assertEnabled('branch_pricing');
     return this.repo.setAvailability(branchId, entries);
   }
 
