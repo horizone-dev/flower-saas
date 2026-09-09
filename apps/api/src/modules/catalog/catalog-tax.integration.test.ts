@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
@@ -692,6 +692,270 @@ describe('catalog tax-category + rate resolution (task 3.9, integration)', () =>
       ).map((r) => r.column_name);
       expect(cols).toEqual(['taxCategoryKey']);
     }
+  });
+
+  // ════════════ CHECK 1 — overlapping tax-rate windows (fail closed) ═════════
+  // Owner ruling (CHECK 1-B): for ONE (country, taxCategoryKey, civil date) there
+  // must be AT MOST ONE applicable tax_rate. `> 1` in-force row — of ANY shape —
+  // is corrupt reference data and is NEVER silently resolved by picking one.
+  describe('overlapping tax-rate windows', () => {
+    // a synthetic isolated country so these mutations never touch the AE/SA seed
+    let coTC = '';
+    let variantTC = '';
+    const CAT = 'CHK1_STD';
+
+    beforeAll(async () => {
+      await sql(
+        `INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
+         VALUES ('XTS', 2, 'XTS', 'x', 'x') ON CONFLICT (code) DO NOTHING`,
+      );
+      await sql(
+        `INSERT INTO country (code,"nameEn","nameAr",region,"defaultCurrencyCode","weekendModel",active,"updatedAt")
+         VALUES ('TC','Testland','x','gcc','XTS','SAT_SUN',true,now()) ON CONFLICT (code) DO NOTHING`,
+      );
+      await sql(
+        `INSERT INTO country_tax_config ("countryCode","effectiveFrom","effectiveTo","regime")
+         VALUES ('TC','2000-01-01',NULL,'VAT')`,
+      );
+      await sql(
+        `INSERT INTO tax_category (key,"nameEn","nameAr") VALUES ($1,'x','x') ON CONFLICT (key) DO NOTHING`,
+        [CAT],
+      );
+      coTC = await mkCompany(tenantA, 'Testland Co', 'TC', 'XTS');
+      const v = await mkVariant(ownerA, 'chk1');
+      variantTC = v.variantId;
+      await setProductTax(v.productId, CAT, `"${v.productVersion}"`);
+    });
+
+    afterEach(async () => {
+      await sql(`DELETE FROM tax_rate WHERE "countryCode"='TC' AND "taxCategoryKey"=$1`, [CAT]);
+    });
+
+    const addRate = (from: string, to: string | null, bps: number) =>
+      sql(
+        `INSERT INTO tax_rate ("countryCode","taxCategoryKey","rateBps","effectiveFrom","effectiveTo")
+         VALUES ('TC',$1,$2,$3,$4)`,
+        [CAT, bps, from, to],
+      );
+    const at = (d: string) => resolveTax(coTC, variantTC, `?at=${d}T12:00:00.000Z`);
+
+    it('1. same effectiveFrom, both active → 500 TAX_RATE_AMBIGUOUS', async () => {
+      await addRate('2026-01-01', '2026-12-31', 500);
+      await addRate('2026-01-01', null, 600);
+      const r = await at('2026-07-01');
+      expect(r.statusCode).toBe(500);
+      expect(errCode(r)).toBe('TAX_RATE_AMBIGUOUS');
+    });
+
+    it('2. different effectiveFrom, overlapping finite ranges → 500 TAX_RATE_AMBIGUOUS (never "newest wins")', async () => {
+      await addRate('2026-01-01', '2026-12-31', 500);
+      await addRate('2026-06-01', '2027-06-30', 600); // starts later, still overlaps on 2026-07-01
+      const r = await at('2026-07-01');
+      expect(r.statusCode, r.payload).toBe(500);
+      expect(errCode(r)).toBe('TAX_RATE_AMBIGUOUS');
+      // outside the overlap (2026-02-01) only the first row is in force → resolves
+      const before = await at('2026-02-01');
+      expect(before.statusCode).toBe(200);
+      expect((before.json() as Resolution).rateBps).toBe(500);
+    });
+
+    it('3. old open-ended row + newer active row (Rate A 500 finite, Rate B 600 open) → 500 at the overlap', async () => {
+      await addRate('2026-01-01', '2026-12-31', 500); // Rate A
+      await addRate('2026-06-01', null, 600); // Rate B — the owner\'s example
+      const both = await at('2026-07-01'); // both active
+      expect(both.statusCode).toBe(500);
+      expect(errCode(both)).toBe('TAX_RATE_AMBIGUOUS');
+      // after A expires (2027-01-01) only B is in force → 600
+      const onlyB = await at('2027-01-01');
+      expect(onlyB.statusCode).toBe(200);
+      expect((onlyB.json() as Resolution).rateBps).toBe(600);
+    });
+
+    it('4. adjacent NON-overlapping ranges resolve deterministically at the civil-date boundary', async () => {
+      await addRate('2026-01-01', '2026-06-30', 500); // old
+      await addRate('2026-07-01', null, 1500); // new
+      const oldDay = await at('2026-06-30');
+      expect(oldDay.statusCode).toBe(200);
+      expect((oldDay.json() as Resolution).rateBps).toBe(500);
+      const newDay = await at('2026-07-01');
+      expect(newDay.statusCode).toBe(200);
+      expect((newDay.json() as Resolution).rateBps).toBe(1500);
+    });
+
+    it('5. exactly one applicable row → success', async () => {
+      await addRate('2026-01-01', null, 700);
+      const r = await at('2026-09-09');
+      expect(r.statusCode).toBe(200);
+      expect(r.json() as Resolution).toMatchObject({
+        rateBps: 700,
+        reason: null,
+        effectiveFrom: '2026-01-01',
+        effectiveTo: null,
+      });
+    });
+
+    it('6. no applicable row → 200 NO_RATE_FOR_CATEGORY', async () => {
+      await addRate('2030-01-01', null, 800); // future-dated only
+      const r = await at('2026-01-01');
+      expect(r.statusCode).toBe(200);
+      expect(r.json() as Resolution).toMatchObject({
+        rateBps: null,
+        reason: 'NO_RATE_FOR_CATEGORY',
+      });
+    });
+  });
+
+  // ════════════ CHECK 2 — DATE vs ISO-datetime / timezone boundary ══════════
+  // The fiscal reference bounds are PostgreSQL DATE (civil). `?at=` is an ISO
+  // instant; it is reduced to its UTC calendar date (`toFiscalDate`) and matched
+  // via `::date`-cast raw SQL — deterministic across offsets AND across the DB
+  // session timezone, no ±1-day drift, no jurisdiction timezone.
+  describe('civil-date / timezone boundary', () => {
+    let coTX = ''; // VAT throughout — for the rate-transition boundary (A–D)
+    let variantTX = '';
+    let coTY = ''; // NONE → VAT at 2026-07-01 — for the regime boundary (E–F)
+    let variantTY = '';
+    const CAT = 'CHK2_STD';
+
+    beforeAll(async () => {
+      await sql(
+        `INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES
+           ('XTX', 2, 'XTX', 'x', 'x'), ('XTY', 2, 'XTY', 'x', 'x')
+         ON CONFLICT (code) DO NOTHING`,
+      );
+      await sql(
+        `INSERT INTO country (code,"nameEn","nameAr",region,"defaultCurrencyCode","weekendModel",active,"updatedAt") VALUES
+           ('TX','TZ-rate','x','gcc','XTX','SAT_SUN',true,now()),
+           ('TY','TZ-regime','x','gcc','XTY','SAT_SUN',true,now())
+         ON CONFLICT (code) DO NOTHING`,
+      );
+      await sql(
+        `INSERT INTO tax_category (key,"nameEn","nameAr") VALUES ($1,'x','x') ON CONFLICT (key) DO NOTHING`,
+        [CAT],
+      );
+      // TX: VAT throughout; rate transition old 2026-01-01..2026-06-30 = 500,
+      // new 2026-07-01.. = 1500 (adjacent, NON-overlapping).
+      await sql(
+        `INSERT INTO country_tax_config ("countryCode","effectiveFrom","effectiveTo","regime")
+         VALUES ('TX','2000-01-01',NULL,'VAT')`,
+      );
+      await sql(
+        `INSERT INTO tax_rate ("countryCode","taxCategoryKey","rateBps","effectiveFrom","effectiveTo") VALUES
+           ('TX',$1,500,'2026-01-01','2026-06-30'),
+           ('TX',$1,1500,'2026-07-01',NULL)`,
+        [CAT],
+      );
+      // TY: CountryTaxConfig ALSO civil-date-effective — NONE until 2026-06-30,
+      // VAT from 2026-07-01 (adjacent). One rate for the VAT window.
+      await sql(
+        `INSERT INTO country_tax_config ("countryCode","effectiveFrom","effectiveTo","regime") VALUES
+           ('TY','2000-01-01','2026-06-30','NONE'),
+           ('TY','2026-07-01',NULL,'VAT')`,
+      );
+      await sql(
+        `INSERT INTO tax_rate ("countryCode","taxCategoryKey","rateBps","effectiveFrom","effectiveTo")
+         VALUES ('TY',$1,1500,'2026-07-01',NULL)`,
+        [CAT],
+      );
+
+      coTX = await mkCompany(tenantA, 'TX Co', 'TX', 'XTX');
+      const vx = await mkVariant(ownerA, 'chk2x');
+      variantTX = vx.variantId;
+      await setProductTax(vx.productId, CAT, `"${vx.productVersion}"`);
+
+      coTY = await mkCompany(tenantA, 'TY Co', 'TY', 'XTY');
+      const vy = await mkVariant(ownerA, 'chk2y');
+      variantTY = vy.variantId;
+      await setProductTax(vy.productId, CAT, `"${vy.productVersion}"`);
+    });
+
+    // `query` object → light-my-request URL-encodes it correctly, so a `+HH:MM`
+    // offset in the ISO string survives verbatim to the controller.
+    const rawResolve = (companyId: string, variantId: string, iso: string) =>
+      app.inject({
+        method: 'GET',
+        url: `/v1/catalog/companies/${companyId}/variants/${variantId}/tax`,
+        query: { at: iso },
+        headers: { authorization: `Bearer ${ownerA}` },
+      });
+    const atTX = (iso: string) => rawResolve(coTX, variantTX, iso);
+    const atTY = (iso: string) => rawResolve(coTY, variantTY, iso);
+
+    it('A. civil date 2026-06-30 → old rate 500 (effectiveTo inclusive)', async () => {
+      const r = await atTX('2026-06-30T12:00:00.000Z');
+      expect(r.statusCode, r.payload).toBe(200);
+      expect(r.json() as Resolution).toMatchObject({
+        rateBps: 500,
+        regime: 'VAT',
+        effectiveFrom: '2026-01-01',
+        effectiveTo: '2026-06-30',
+      });
+    });
+
+    it('B. civil date 2026-07-01 → new rate 1500', async () => {
+      const r = await atTX('2026-07-01T12:00:00.000Z');
+      expect(r.statusCode).toBe(200);
+      expect(r.json() as Resolution).toMatchObject({ rateBps: 1500, effectiveTo: null });
+    });
+
+    it('C. UAE offset 2026-07-01T00:30:00+04:00 (== 2026-06-30T20:30Z) → civil 2026-06-30 → 500, deterministically', async () => {
+      const r = await atTX('2026-07-01T00:30:00+04:00');
+      expect(r.statusCode, r.payload).toBe(200);
+      expect((r.json() as Resolution).rateBps).toBe(500); // same instant, same UTC date, same rate
+      // the equal pure-UTC representation of the SAME instant resolves byte-for-byte
+      // identically — no drift, no ambiguity; `resolvedAt` is that same instant.
+      const utc = await atTX('2026-06-30T20:30:00.000Z');
+      expect(r.json()).toEqual(utc.json());
+      expect((utc.json() as Resolution).rateBps).toBe(500);
+    });
+
+    it('D. Saudi offset 2026-07-01T00:30:00+03:00 (== 2026-06-30T21:30Z) → civil 2026-06-30 → 500', async () => {
+      const r = await atTX('2026-07-01T00:30:00+03:00');
+      expect(r.statusCode).toBe(200);
+      expect((r.json() as Resolution).rateBps).toBe(500);
+    });
+
+    it('E. CountryTaxConfig boundary: civil 2026-06-30 → REGIME_NONE; civil 2026-07-01 → VAT + 1500 (incl. offset instants)', async () => {
+      // just before the civil boundary (any representation of civil 2026-06-30)
+      // instants whose UTC calendar date is 2026-06-30 → civil 2026-06-30 → NONE.
+      // A `+04:00` "July 1" wall-clock before 04:00 is still June 30 in UTC — the
+      // contract is the UTC calendar date, applied deterministically.
+      for (const iso of [
+        '2026-06-30T23:59:59.000Z',
+        '2026-07-01T02:00:00+04:00', // == 2026-06-30T22:00Z → UTC date 2026-06-30
+        '2026-07-01T03:00:00+04:00', // == 2026-06-30T23:00Z → UTC date 2026-06-30
+        '2026-06-30',
+      ]) {
+        const r = await atTY(iso);
+        expect(r.statusCode, `${iso}: ${r.payload}`).toBe(200);
+        expect(r.json() as Resolution, iso).toMatchObject({
+          regime: 'NONE',
+          rateBps: null,
+          reason: 'REGIME_NONE',
+        });
+      }
+      // instants whose UTC calendar date is 2026-07-01 → civil 2026-07-01 → VAT
+      for (const iso of [
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T12:00:00+04:00', // == 2026-07-01T08:00Z → UTC date 2026-07-01
+        '2026-07-01',
+      ]) {
+        const r = await atTY(iso);
+        expect(r.statusCode, `${iso}: ${r.payload}`).toBe(200);
+        expect(r.json() as Resolution, iso).toMatchObject({ regime: 'VAT', rateBps: 1500 });
+      }
+    });
+
+    it('F. effectiveTo is inclusive; bare YYYY-MM-DD works; resolvedAt echoes the instant, not the civil date', async () => {
+      const oldDay = await atTX('2026-06-30'); // == 2026-06-30T00:00:00Z
+      expect(oldDay.json() as Resolution).toMatchObject({
+        rateBps: 500,
+        effectiveTo: '2026-06-30',
+      });
+      expect((oldDay.json() as Resolution).resolvedAt).toBe(new Date('2026-06-30').toISOString());
+      const newDay = await atTX('2026-07-01');
+      expect(newDay.json() as Resolution).toMatchObject({ rateBps: 1500 });
+    });
   });
 });
 

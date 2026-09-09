@@ -723,17 +723,26 @@ export type TaxResolutionReason = (typeof TAX_RESOLUTION_REASONS)[number];
 /**
  * `GET /v1/catalog/companies/:companyId/variants/:variantId/tax` — the effective
  * tax category + the applicable effective `tax_rate` for the company's
- * authoritative country at `at`. **Metadata + reference resolution only — NEVER a
- * calculated tax amount** (D2-8; `Money.percentage(rateBps)` is Phase 3b).
- * `countryCode` is always `company.country_code` (authoritative — never a client
- * value, never derived from branch / POS terminal).
+ * authoritative country on the civil date of `at`. **Metadata + reference
+ * resolution only — NEVER a calculated tax amount** (D2-8;
+ * `Money.percentage(rateBps)` is Phase 3b). `countryCode` is always
+ * `company.country_code` (authoritative — never a client value, never derived
+ * from branch / POS terminal).
+ *
+ * DATE CONTRACT: the fiscal `effective_from` / `effective_to` bounds are
+ * PostgreSQL `DATE`s (civil boundaries). `?at=` is an optional ISO-8601 instant
+ * (default now); it is reduced to its **UTC calendar date** for matching, so
+ * resolution is deterministic across timezone offsets — two ISO strings for the
+ * same instant always resolve to the same rate. Pass a bare `YYYY-MM-DD` to
+ * name a civil date directly. `> 1` in-force rate row for one
+ * `(country, category, date)` (overlap of any shape) → `500 TAX_RATE_AMBIGUOUS`.
  */
 export interface TaxResolutionResult {
   variantId: string;
   companyId: string;
-  /** `company.country_code` at `at` — the sole fiscal authority. */
+  /** `company.country_code` — the sole fiscal authority. */
   countryCode: string;
-  /** the `country_tax_config` regime in force at `at`. */
+  /** the `country_tax_config` regime in force on the civil date of `at`. */
   regime: 'VAT' | 'NONE';
   /** the resolved effective category key, or `null` when `categorySource` is `NONE`. */
   taxCategoryKey: string | null;
@@ -744,7 +753,9 @@ export interface TaxResolutionResult {
   /** the matched `tax_rate` window (ISO date `YYYY-MM-DD`), or `null` when unresolved. */
   effectiveFrom: string | null;
   effectiveTo: string | null;
-  /** the resolution instant (ISO-8601 datetime). */
+  /** the instant asked about — the exact `?at=` value (or the server "now"),
+   *  echoed as an ISO-8601 datetime. The civil date used for matching is its
+   *  UTC calendar date. */
   resolvedAt: string;
   reason: TaxResolutionReason | null;
 }

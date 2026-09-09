@@ -14,9 +14,11 @@ import { assertUuid, parseIfMatch, requireIfMatch } from './catalog-write.helper
 import { TaxCategoryRepository } from './tax-category.repository.js';
 import { TaxResolutionService } from './tax-resolution.service.js';
 
-/** `?at=` — an optional ISO-8601 datetime; nothing else is accepted. An unknown
- *  query key → `400 VALIDATION_FAILED`; a malformed `at` → `400 INVALID_DATE`
- *  (mirrors `LocalizationController`). */
+/** `?at=` — an optional ISO-8601 instant (or bare `YYYY-MM-DD`); nothing else is
+ *  accepted. An unknown query key → `400 VALIDATION_FAILED`; a malformed `at` →
+ *  `400 INVALID_DATE` (mirrors `LocalizationController`). The fiscal reference
+ *  bounds are civil `DATE`s, so `at` is matched on its UTC calendar date
+ *  (deterministic across offsets — CHECK 2 / `toFiscalDate`). */
 const resolveQuerySchema = z.object({ at: z.string().optional() }).strict();
 
 function parseResolveQuery(raw: Record<string, string>): Date {
@@ -115,14 +117,17 @@ export class VariantTaxCategoryController {
 /**
  * `GET /v1/catalog/companies/:companyId/variants/:variantId/tax` — the effective
  * tax category (variant -> product -> NONE) + the applicable effective
- * `tax_rate` for the company's AUTHORITATIVE country (`company.country_code`) at
- * `?at=` (default now) (task 3.9). `catalog:view`,
- * `@ScopedParam({ company: 'companyId' })` (a company outside the caller's scope
- * → `404`, `COMPANY_OUT_OF_SCOPE` masked). Reads Task 2.7 reference data via
- * `TaxResolutionService` / `LocalizationService`. **Returns metadata + `rateBps`
- * only — NEVER a computed tax amount** (D2-8). Missing category / missing rate /
- * regime NONE are `200` with a `reason`, never `422`. No audit row. No
- * `branchId` / `posTerminalId` — branch is not a tax authority.
+ * `tax_rate` for the company's AUTHORITATIVE country (`company.country_code`) on
+ * the civil date of `?at=` (an optional ISO-8601 instant / `YYYY-MM-DD`, default
+ * now — matched on its UTC calendar date, deterministic across offsets: CHECK 2)
+ * (task 3.9). `catalog:view`, `@ScopedParam({ company: 'companyId' })` (a company
+ * outside the caller's scope → `404`, `COMPANY_OUT_OF_SCOPE` masked). Reads Task
+ * 2.7 reference data via `TaxResolutionService` / `LocalizationService`.
+ * **Returns metadata + `rateBps` only — NEVER a computed tax amount** (D2-8).
+ * Missing category / missing rate / regime NONE are `200` with a `reason`, never
+ * `422`; `> 1` in-force `tax_rate` for one `(country, category, date)` →
+ * `500 TAX_RATE_AMBIGUOUS` (fail closed — CHECK 1). No audit row. No `branchId` /
+ * `posTerminalId` — branch is not a tax authority.
  */
 @Controller('catalog/companies/:companyId/variants/:variantId/tax')
 export class CatalogTaxController {

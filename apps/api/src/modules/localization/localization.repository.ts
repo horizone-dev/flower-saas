@@ -134,29 +134,55 @@ export class LocalizationRepository extends ScopedRepository {
     );
   }
 
-  /** The `tax_rate` rows in force for ONE `(countryCode, taxCategoryKey)` at
-   *  `at`, newest `effectiveFrom` first. Task 3.9 tax-category resolution — the
-   *  seed guarantees at most one row per date, but the DB permits overlaps, so
-   *  the caller (`LocalizationService.resolveTaxRate`) tie-breaks on
-   *  `effectiveFrom` and fails closed on a true tie. Same effective-date
-   *  predicate as `findTaxRates` (`effectiveFrom <= at AND (effectiveTo IS NULL
-   *  OR effectiveTo >= at)`) — a future-dated or expired row is not returned. */
+  /**
+   * The `tax_rate` rows in force for ONE `(countryCode, taxCategoryKey)` on the
+   * CIVIL DATE `onDate` (`YYYY-MM-DD`), newest `effectiveFrom` first. Task 3.9.
+   *
+   * CHECK 2 — a **`$queryRaw` with an explicit `::date` cast**, NOT a Prisma
+   * `Date`-typed filter: `"effectiveFrom" <= $3::date` is a pure `DATE` vs `DATE`
+   * comparison, immune to the DB session `TimeZone` and to any
+   * `TIMESTAMPTZ`-vs-`DATE` implicit-cast drift a `Date` filter value can cause
+   * near a civil-date boundary. `onDate` is always the caller's UTC calendar
+   * date (`toFiscalDate` → `slice(0,10)`).
+   *
+   * The caller (`LocalizationService.resolveTaxRate`) fails CLOSED on `> 1` row
+   * (CHECK 1). `orderBy effectiveFrom desc` is kept only for a stable error
+   * message — it is NEVER used to pick a winner.
+   */
   findTaxRatesForCategory(
     countryCode: string,
     taxCategoryKey: string,
-    at: Date,
+    onDate: string,
   ): Promise<TaxRateRow[]> {
-    return this.scoped((tx) =>
-      tx.taxRate.findMany({
-        where: {
-          countryCode,
-          taxCategoryKey,
-          effectiveFrom: { lte: at },
-          OR: [{ effectiveTo: null }, { effectiveTo: { gte: at } }],
-        },
-        orderBy: { effectiveFrom: 'desc' },
-        select: { taxCategoryKey: true, rateBps: true, effectiveFrom: true, effectiveTo: true },
-      }),
+    return this.scoped(
+      (tx) =>
+        tx.$queryRaw<TaxRateRow[]>`
+        SELECT "taxCategoryKey", "rateBps", "effectiveFrom", "effectiveTo"
+          FROM "tax_rate"
+         WHERE "countryCode" = ${countryCode}
+           AND "taxCategoryKey" = ${taxCategoryKey}
+           AND "effectiveFrom" <= ${onDate}::date
+           AND ("effectiveTo" IS NULL OR "effectiveTo" >= ${onDate}::date)
+         ORDER BY "effectiveFrom" DESC`,
+    );
+  }
+
+  /**
+   * The `country_tax_config` rows in force for `countryCode` on the CIVIL DATE
+   * `onDate` (`YYYY-MM-DD`), newest first. Task 3.9. Same `::date`-cast raw-SQL
+   * predicate as {@link findTaxRatesForCategory} (CHECK 2 — DB-session-timezone
+   * immune). The caller fails CLOSED on `> 1` row.
+   */
+  findCountryTaxRegimeOn(countryCode: string, onDate: string): Promise<TaxRegimeRow[]> {
+    return this.scoped(
+      (tx) =>
+        tx.$queryRaw<TaxRegimeRow[]>`
+        SELECT "regime", "effectiveFrom", "effectiveTo"
+          FROM "country_tax_config"
+         WHERE "countryCode" = ${countryCode}
+           AND "effectiveFrom" <= ${onDate}::date
+           AND ("effectiveTo" IS NULL OR "effectiveTo" >= ${onDate}::date)
+         ORDER BY "effectiveFrom" DESC`,
     );
   }
 
