@@ -762,6 +762,76 @@ productId, available, prices: [{ uomCode, sell, source, resolvable }] }` —
 | `branch_variant_uom_price`    | ENABLE+FORCE (+ branch GUC filter where single-branch) | `(tenant_id, company_id, branch_id, variant_id, uom_code)` | `branch_id` FK → `branch`; **the branch must belong to `company_id`** (FK path + a service check); `override_amount_minor` / `override_currency_code` / `override_currency_exponent` (same currency as the company); `version` / timestamps. Deletable (audited) — a pure override. Gated by `branch_price:manage`, `@ScopedParam({ branch: 'branchId' })`.            |
 | `branch_variant_availability` | ENABLE+FORCE (+ branch GUC filter)                     | `(tenant_id, company_id, branch_id, variant_id)`           | `available boolean NOT NULL` — a **merchandising flag**, **not** a quantity (D2-11 / HG3-CATALOG-SCOPE-SEPARATION). Absence of a row = **available** wherever the owning company prices the variant. `branch_id` must belong to `company_id`. Gated by `branch_price:manage`, `@ScopedParam`. Indexes `(tenant_id, company_id, branch_id)`, `(tenant_id, variant_id)`. |
 
+### C.9a Task 3.9 — catalog tax category (tenant-scoped; resolution company-scoped)
+
+> **Owner-approved frozen scope (scope review + decisions O1–O7, 2026-09-09).**
+> Catalog **tax-category assignment** + **effective tax-rate resolution** — metadata
+>
+> - reference resolution only, NEVER transactional tax calculation (D2-8; a tax
+>   amount is Phase 3b).
+>
+> 1. **D1 = Product default + Variant override.** Precedence
+>    `variant.tax_category_key` → `product.tax_category_key` → **NONE**. There is
+>    **no further fallback** — no jurisdiction / company / tenant default tax
+>    category exists in the current model (`tax_category` has no default flag;
+>    `country_tax_config.config` and `company.fiscal_config` are `{}`). `NONE` is a
+>    real terminal state.
+> 2. **Schema — two additive nullable columns, NO new table.**
+>    `product.tax_category_key text NULL` + `variant.tax_category_key text NULL`,
+>    each a textual FK → `tax_category.key` (`ON UPDATE CASCADE ON DELETE
+RESTRICT`; the tenant-table → platform-global pattern of
+>    `company.country_code → country.code`) + a partial index
+>    `WHERE tax_category_key IS NOT NULL`. **No backfill. No NOT NULL.** No RLS /
+>    policy / grant change (`product` / `variant` already ENABLE+FORCE). The
+>    existing Task-2.7 `tax_category` / `tax_rate` / `country_tax_config` tables are
+>    reused as-is; no fiscal migration is rewritten.
+> 3. **NULL semantics — three distinct unresolved states, none is `0%`:**
+>    `NO_CATEGORY_ASSIGNED` (product & variant both NULL) · `REGIME_NONE` (company
+>    country has no VAT regime at `at`, e.g. QA / KW) · `NO_RATE_FOR_CATEGORY` (VAT
+>    regime but no in-force `tax_rate` row for the resolved category). A configured
+>    `ZERO_RATED` / `EXEMPT` is a **real** `rate_bps: 0` with `reason: null`.
+> 4. **Assignment API** — `PUT /v1/catalog/products/:productId/tax-category`
+>    (`catalog:manage`, O1) and `PUT /v1/catalog/variants/:variantId/tax-category`
+>    (`variants:manage`, O1 — a variant-owned mutation follows the variant
+>    permission boundary). Tenant-scoped, `If-Match: "<product|variant version>"`
+>    mandatory (`428` if absent, `409 *_VERSION_CONFLICT` if stale — the existing
+>    catalog optimistic-concurrency convention; the column lives on
+>    `product` / `variant` so `.version` IS the handle, no dedicated aggregate).
+>    Body `{ tax_category_key: <KEY> | null }` strict — `null` clears; a
+>    well-formed-but-unknown key → `422 TAX_CATEGORY_UNKNOWN` (the DB FK is the
+>    backstop); malformed → `400`. Response `{ tax_category_key, version }` + ETag.
+>    **ARCHIVED product / variant → `409 PRODUCT_ARCHIVED` / `VARIANT_ARCHIVED`**
+>    (O2 — reactivate through the existing lifecycle first). NO `Idempotency-Key`,
+>    NO capability (O7).
+> 5. **Resolution API** — `GET /v1/catalog/companies/:companyId/variants/:variantId/tax`
+>    (`catalog:view`, `@ScopedParam({ company: 'companyId' })`), optional
+>    `?at=<ISO>` (default now). Country comes ONLY from `company.country_code`
+>    (authoritative — never a client value, query param, header, `branch_id` or
+>    `pos_terminal_id`; branch has **no** tax state and is not a tax authority).
+>    Reuses `LocalizationService.forCompany` (fail closed:
+>    `409 COMPANY_LOCALIZATION_NOT_CONFIGURED` if the company has no country;
+>    `500 TAX_REGIME_NOT_CONFIGURED` if the country has no regime row) +
+>    `LocalizationService.resolveTaxRate` (deterministic effective-date window;
+>    newest `effective_from` wins a bad-data overlap; a true tie →
+>    `500 TAX_RATE_AMBIGUOUS`). Response
+>    `{ variant_id, company_id, country_code, regime, tax_category_key,
+category_source: VARIANT|PRODUCT|NONE, rate_bps: int|null, effective_from,
+effective_to, resolved_at, reason }`. Missing category / missing rate /
+>    regime NONE are `200` with a `reason`, **never `422`**. **No tax amount, no
+>    `Money`, `rate_bps` raw.** No audit row on GET.
+> 6. **Audit** — `catalog.product_tax_category_changed` /
+>    `catalog.variant_tax_category_changed` (`resource_type` `product` / `variant`,
+>    `security: false`, `{ tax_category_key }` before/after). Exactly ONE row per
+>    successful assignment `PUT`; a stale / ARCHIVED / unknown-key write leaves NO
+>    row. **No outbox / realtime** — Task 3.10 owns catalog events.
+> 7. **`TaxResolutionService`** (catalog module, imports `LocalizationModule`)
+>    owns ONLY category precedence + response assembly. NO fiscal architecture is
+>    duplicated; NO business-type / GCC-specific runtime branching.
+
+One additive, forward-only migration `20260913120000_catalog_tax_category` —
+`product.tax_category_key` + `variant.tax_category_key` (+ FK + partial index).
+No new table, no backfill, no NOT NULL, no fiscal-migration rewrite.
+
 ### C.10 Money / UOM ↔ column mapping (binding)
 
 | Value object | Columns                                                                                 | Read                                                                                                                                                                                                    | Write                                                                                                                                                                                                                                                                                 |
@@ -825,8 +895,8 @@ inject a scope filter, never reject. **Concurrency contract: D2-9.**
 | 3.7  | `PUT /v1/catalog/companies/:companyId/variants/:variantId/prices` (replace-set — SELL only) · `GET …/prices` (stored rows + version) · `GET …/prices/resolve?uomCode=…` (**company-only** resolved price)        | `pricing:manage` / `catalog:view`                                                                | **`@ScopedParam({ company: 'companyId' })`** | replace-set → `If-Match: "<price-set version>"` (**not** `variant.version`; `"0"` = create); `428` if absent. `422` on cross-currency / non-authoritative exponent / currency ≠ company `default_currency` / `PRICE_UOM_UNREACHABLE` / zero price; `409 PRICE_SET_VERSION_CONFLICT`. **No `branchId`** (→ `400`); **no `purchase`** in the body (→ `400`). Missing price → `200 { price: null }`. Audit only, no outbox.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 3.8  | `PUT /v1/catalog/branches/:branchId/availability` (bulk declarative set) · `GET …/availability[?variantId=]` · `GET /v1/catalog/branches/:branchId/catalog` (cursor-paginated branch-effective projection)       | `branch_price:manage` + the `branch_pricing` capability (write) / `catalog:view` (read, ungated) | **`@ScopedParam({ branch: 'branchId' })`**   | availability `PUT` → **`Idempotency-Key`** (scope `catalog.branch.availability.set`), atomic all-or-nothing, **no `If-Match`, no version**; principal-scoped + branch-bound; `branch_pricing` off → `409 CAPABILITY_NOT_ENABLED` (no mutation, no audit, idempotency claim released); structural DTO → `400`, duplicate `variantId` → `422 BRANCH_AVAILABILITY_DUPLICATE_VARIANT` (domain error, not a Zod refinement), non-ascending → `400`, unknown tenant variant → `422 BRANCH_AVAILABILITY_VARIANT_NOT_FOUND`. Filtered `GET` for an unknown / cross-tenant variant → `404`. The `…/catalog` candidate-variant page is a DB-guaranteed `SELECT DISTINCT "variantId" … ORDER BY "variantId" ASC LIMIT n+1` — unique-variant pagination, not price-row pagination; the `n+1` lookahead sets `hasMore`, `nextCursor` = last emitted `variantId` when `hasMore` else `null` (no trailing empty page). |
 | 3.8  | `PUT /v1/catalog/branches/:branchId/variants/:variantId/prices` (branch override replace-set) · `GET …/prices` · `GET …/prices/resolve?uomCode=` (dedicated branch resolver) — **no `DELETE`** (BD-4)            | `branch_price:manage` + the `branch_pricing` capability (writes) / `catalog:view` (reads)        | `@ScopedParam({ branch: 'branchId' })`       | `PUT` → `If-Match: "<branch price-set version>"` (**the dedicated `branch_variant_price_set.version`**, NOT `variant.version`; `"0"` = create; `428` if absent; monotonic — never reset). `PUT { prices: [] }` unprices (deletes rows, retains aggregate, bumps version). A first empty PUT creates `v1` with no company pricing. `422` on `BRANCH_PRICE_NO_COMPANY_PRICE` / `BRANCH_PRICE_UOM_UNREACHABLE` / `BRANCH_PRICE_UOM_NOT_REGISTERED` / `BRANCH_PRICE_CURRENCY_*` / `BRANCH_PRICE_MUST_BE_POSITIVE`; `409 BRANCH_PRICE_SET_VERSION_CONFLICT` / `COMPANY_CURRENCY_UNSET` / `VARIANT_BASE_UOM_REQUIRED`. No `Idempotency-Key`, no `branchId` / `companyId` / `purchase` in the body. `/resolve` strict query (`uomCode` only; an extra `branchId` → `400`); the Task 3.7 company `/resolve` is unchanged and still rejects `branchId`.                                                          |
-| 3.9  | `GET /v1/catalog/companies/:companyId/variants/:variantId/tax` (resolved category + current rate for the company's country/date)                                                                                 | `catalog:view`                                                                                   | `@ScopedParam({ company: 'companyId' })`     | — — reads Task 2.7 data via `TaxResolutionService`; **no computation on an amount** (D2-8)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| 3.9  | `PUT /v1/catalog/products/:id/tax-category` / `.../variants/:id/tax-category`                                                                                                                                    | `catalog:manage`                                                                                 | tenant                                       | `If-Match: <version>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 3.9  | `GET /v1/catalog/companies/:companyId/variants/:variantId/tax` (effective category + effective `tax_rate` for `company.country_code` at `?at=`)                                                                  | `catalog:view`                                                                                   | `@ScopedParam({ company: 'companyId' })`     | reads Task 2.7 reference data via `TaxResolutionService` / `LocalizationService`; **`rate_bps` only, NO amount** (D2-8). `?at=` optional (default now); malformed → `400 INVALID_DATE`; any other query key → `400`. Missing category / regime NONE / no in-force rate → `200` with `reason ∈ NO_CATEGORY_ASSIGNED \| REGIME_NONE \| NO_RATE_FOR_CATEGORY` (never `422`); a configured `0` is `rate_bps: 0, reason: null`. `country_code` is `company.country_code` only — never client / branch / POS. `409 COMPANY_LOCALIZATION_NOT_CONFIGURED` if the company has no country; `500 TAX_REGIME_NOT_CONFIGURED` / `TAX_RATE_AMBIGUOUS` fail closed. No audit row.                                                                                                                                                                                                                                      |
+| 3.9  | `PUT /v1/catalog/products/:productId/tax-category` (**`catalog:manage`**) · `PUT /v1/catalog/variants/:variantId/tax-category` (**`variants:manage`** — O1)                                                      | see cell (product vs variant differ)                                                             | tenant                                       | `If-Match: "<product\|variant version>"` mandatory (`428` absent, `409 *_VERSION_CONFLICT` stale); body `{ tax_category_key: <KEY> \| null }` strict (`null` clears); unknown key → `422 TAX_CATEGORY_UNKNOWN`; malformed → `400`. Precedence `variant → product → NONE`. **ARCHIVED product/variant → `409 PRODUCT_ARCHIVED` / `VARIANT_ARCHIVED`** (O2). Bumps `product.version` / `variant.version`. One audit row (`catalog.product_tax_category_changed` / `catalog.variant_tax_category_changed`, `security: false`). No `Idempotency-Key`, no capability, no outbox / realtime.                                                                                                                                                                                                                                                                                                                  |
 | 3.10 | `POST /v1/platform/tenants/:tenantId/apply-business-type-template`                                                                                                                                               | `platform:catalog_capability:manage` (platform, step-up)                                         | —                                            | `Idempotency-Key` (`catalog.template.apply`). Body carries explicit **replace / merge** semantics (D2-4); additive by default, never deletes/disables existing config.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ---

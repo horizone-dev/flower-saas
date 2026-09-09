@@ -6,6 +6,7 @@ import type {
   CountryDto,
   CurrencyDto,
   LocalizationReferenceDto,
+  ResolvedTaxRateDto,
   TaxRegimeDto,
 } from './localization.dto.js';
 
@@ -82,6 +83,67 @@ export class LocalizationService {
       taxRegime: country.taxRegime,
       weekendModel: country.weekendModel,
       resolvedAt: at.toISOString(),
+    };
+  }
+
+  /**
+   * The single effective `tax_rate` for `(countryCode, categoryKey)` at `at`
+   * (task 3.9 — the fiscal half of tax resolution; the catalog category
+   * precedence is `TaxResolutionService`'s). Deterministic + fail-closed:
+   *   - no `country_tax_config` at `at` → `500 TAX_REGIME_NOT_CONFIGURED`.
+   *   - `regime = NONE` (Qatar / Kuwait) → `{ regime: 'NONE', rate: null,
+   *     reason: 'REGIME_NONE' }` — the ABSENCE of a VAT law, never a 0% rate.
+   *   - VAT, no in-force `tax_rate` row for the category → `{ regime: 'VAT',
+   *     rate: null, reason: 'NO_RATE_FOR_CATEGORY' }`.
+   *   - VAT, exactly one in-force row → `{ regime: 'VAT', rate: {...},
+   *     reason: null }` — `rateBps: 0` here (`ZERO_RATED` / `EXEMPT`) is a
+   *     REAL configured zero-rate, distinct from the two `null` cases above.
+   *   - VAT, >1 in-force row (only via bad platform data): the newest
+   *     `effectiveFrom` wins; a true tie (same `effectiveFrom`) →
+   *     `500 TAX_RATE_AMBIGUOUS`.
+   * `countryCode` MUST already be authoritative (`company.country_code`) — this
+   * method never accepts one from a client.
+   */
+  async resolveTaxRate(
+    countryCode: string,
+    categoryKey: string,
+    at: Date = new Date(),
+  ): Promise<ResolvedTaxRateDto> {
+    const regime = await this.repo.findTaxRegime(countryCode, at);
+    if (!regime) {
+      throw new DomainError(
+        'TAX_REGIME_NOT_CONFIGURED',
+        `no tax regime is configured for ${countryCode} at ${at.toISOString()}`,
+        500,
+      );
+    }
+    if (regime.regime === 'NONE') {
+      return { regime: 'NONE', rate: null, reason: 'REGIME_NONE' };
+    }
+
+    const rows = await this.repo.findTaxRatesForCategory(countryCode, categoryKey, at);
+    if (rows.length === 0) {
+      return { regime: 'VAT', rate: null, reason: 'NO_RATE_FOR_CATEGORY' };
+    }
+    // rows are ordered `effectiveFrom desc`; the seed guarantees non-overlap, so
+    // >1 in-force is a data-quality fault. Newest window wins; a genuine tie on
+    // `effectiveFrom` cannot be resolved deterministically → fail closed.
+    if (rows.length > 1 && rows[0]!.effectiveFrom.getTime() === rows[1]!.effectiveFrom.getTime()) {
+      throw new DomainError(
+        'TAX_RATE_AMBIGUOUS',
+        `more than one tax rate is in force for ${countryCode}/${categoryKey} at ${at.toISOString()}`,
+        500,
+      );
+    }
+    const r = rows[0]!;
+    return {
+      regime: 'VAT',
+      rate: {
+        rateBps: r.rateBps,
+        effectiveFrom: r.effectiveFrom.toISOString().slice(0, 10),
+        effectiveTo: r.effectiveTo ? r.effectiveTo.toISOString().slice(0, 10) : null,
+      },
+      reason: null,
     };
   }
 

@@ -485,4 +485,51 @@ describe('@flower/api-client', () => {
     ).toThrow(/duplicate variantId/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('catalog: tax-category assignment + resolution methods carry the right preconditions (task 3.9)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ taxCategoryKey: 'STANDARD', version: 4 }),
+    );
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    // product assignment — PUT, If-Match: "<version>", no Idempotency-Key, tenant path
+    await client.setProductTaxCategory('p1', 'STANDARD', 3);
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'http://api.test/v1/catalog/products/p1/tax-category',
+    );
+    expect(fetchMock.mock.calls[0]![1]!.method).toBe('PUT');
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({ 'if-match': '"3"' });
+    expect(fetchMock.mock.calls[0]![1]!.headers).not.toHaveProperty('idempotency-key');
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]!.body))).toEqual({
+      taxCategoryKey: 'STANDARD',
+    });
+
+    // variant assignment — clearing with an explicit null
+    await client.setVariantTaxCategory('v1', null, 2);
+    expect(String(fetchMock.mock.calls[1]![0])).toBe(
+      'http://api.test/v1/catalog/variants/v1/tax-category',
+    );
+    expect(fetchMock.mock.calls[1]![1]!.headers).toMatchObject({ 'if-match': '"2"' });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1]!.body))).toEqual({ taxCategoryKey: null });
+
+    // resolution — company-scoped GET, optional ?at=, NO branchId in the path/query
+    await client.resolveVariantTax('c1', 'v1');
+    expect(String(fetchMock.mock.calls[2]![0])).toBe(
+      'http://api.test/v1/catalog/companies/c1/variants/v1/tax',
+    );
+    expect(fetchMock.mock.calls[2]![1]!.method ?? 'GET').toBe('GET');
+
+    await client.resolveVariantTax('c1', 'v1', '2020-07-01T00:00:00.000Z');
+    expect(String(fetchMock.mock.calls[3]![0])).toBe(
+      'http://api.test/v1/catalog/companies/c1/variants/v1/tax?at=2020-07-01T00%3A00%3A00.000Z',
+    );
+    expect(String(fetchMock.mock.calls[3]![0])).not.toMatch(/branchId|posTerminal/i);
+
+    // no tax-amount / compute helper on the client
+    expect((client as unknown as Record<string, unknown>)['computeVariantTax']).toBeUndefined();
+  });
 });

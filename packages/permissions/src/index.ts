@@ -269,6 +269,23 @@ export const PHASE_3_8_TENANT_PERMISSIONS = [
 export type Phase38TenantPermission = (typeof PHASE_3_8_TENANT_PERMISSIONS)[number];
 
 /**
+ * Phase 3 task 3.9 (catalog tax-category assignment + rate resolution) activates
+ * **NO new permission key and NO capability** (owner O1 / O7 / D2-6 /
+ * HG3-PERMISSION-STABILITY). It reuses keys already registered since Task 3.2 /
+ * 3.4:
+ *   - `PUT /v1/catalog/products/:id/tax-category`  → `catalog:manage`
+ *   - `PUT /v1/catalog/variants/:id/tax-category`  → `variants:manage`
+ *   - `GET …/companies/:companyId/variants/:variantId/tax` → `catalog:view`
+ *     (+ existing `@ScopedParam({ company })` scope authorization)
+ * No `permission_registry` insert, no `role_permission` backfill, no
+ * `SYSTEM_ROLE_TEMPLATES` / seed change. This constant exists only to make the
+ * "nothing new" decision explicit and test-checkable.
+ */
+export const PHASE_3_9_TENANT_PERMISSIONS = [] as const satisfies readonly PermissionKey[];
+
+export type Phase39TenantPermission = (typeof PHASE_3_9_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the

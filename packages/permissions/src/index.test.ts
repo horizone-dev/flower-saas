@@ -9,6 +9,7 @@ import {
   PHASE_3_5_TENANT_PERMISSIONS,
   PHASE_3_7_TENANT_PERMISSIONS,
   PHASE_3_8_TENANT_PERMISSIONS,
+  PHASE_3_9_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   MODULE_OF_PERMISSION,
   STEP_UP_PERMISSIONS,
@@ -162,6 +163,19 @@ describe('@flower/permissions registry', () => {
     expect(MODULE_OF_PERMISSION['branch_price:manage']).toBeUndefined();
     expect(requiresStepUp('branch_price:manage')).toBe(false);
     expect(isPermissionKey('branch_availability:manage')).toBe(false);
+  });
+
+  // ── task 3.9 — HG3-PERMISSION-STABILITY ─────────────────────────────────
+  it('task 3.9 activates NO new permission key and NO capability', () => {
+    expect([...PHASE_3_9_TENANT_PERMISSIONS]).toEqual([]);
+    // the routes reuse keys registered since Task 3.2 / 3.4
+    for (const k of ['catalog:manage', 'variants:manage', 'catalog:view'] as const) {
+      expect(isPermissionKey(k)).toBe(true);
+      expect(PERMISSION_GROUP_OF[k]).toBe('catalog');
+    }
+    // no invented tax key / capability
+    expect(isPermissionKey('tax:manage')).toBe(false);
+    expect(isPermissionKey('tax_category:manage')).toBe(false);
   });
 });
 

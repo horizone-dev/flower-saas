@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { LocalizationModule } from '../localization/localization.module.js';
 import { CatalogCapabilityRepository } from './catalog-capability.repository.js';
 import { CatalogCapabilityService } from './catalog-capability.service.js';
 import { CatalogCapabilityController } from './catalog-capability.controller.js';
@@ -34,6 +35,13 @@ import {
   BranchAvailabilityController,
   BranchEffectiveCatalogController,
 } from './branch-pricing.controller.js';
+import { TaxCategoryRepository } from './tax-category.repository.js';
+import { TaxResolutionService } from './tax-resolution.service.js';
+import {
+  ProductTaxCategoryController,
+  VariantTaxCategoryController,
+  CatalogTaxController,
+} from './tax-category.controller.js';
 
 /**
  * `catalog` module (Phase 3).
@@ -74,9 +82,19 @@ import {
  *     base-UOM change) live in `company-pricing.repository` / `uom.repository` /
  *     `variant.repository` via the three narrow read helpers in
  *     `branch-price-integrity.repo`.
+ *   - Task 3.9: catalog tax-category assignment + effective tax-rate resolution.
+ *     `product.taxCategoryKey` / `variant.taxCategoryKey` (additive nullable,
+ *     FK -> `tax_category.key`). Precedence `variant -> product -> NONE` (NONE is
+ *     a terminal "not configured" state — NEVER 0%). `catalog:manage` (product
+ *     assignment) / `variants:manage` (variant assignment) / `catalog:view`
+ *     (resolution, company-scoped). `TaxResolutionService` reuses the Task 2.7
+ *     `LocalizationService` (authoritative `company.country_code`, effective
+ *     `country_tax_config` regime + `tax_rate`); NO new fiscal table, NO tax
+ *     computation on an amount (Phase 3b), NO capability, audit-only.
  * No tax computation / discount / inventory / realtime — later Task 3.x / Phase 5.
  */
 @Module({
+  imports: [LocalizationModule],
   providers: [
     CatalogCapabilityRepository,
     CatalogCapabilityService,
@@ -99,6 +117,8 @@ import {
     CompanyPricingRepository,
     BranchPricingRepository,
     BranchPricingService,
+    TaxCategoryRepository,
+    TaxResolutionService,
   ],
   controllers: [
     CatalogCapabilityController,
@@ -117,6 +137,9 @@ import {
     BranchPricingController,
     BranchAvailabilityController,
     BranchEffectiveCatalogController,
+    ProductTaxCategoryController,
+    VariantTaxCategoryController,
+    CatalogTaxController,
   ],
   exports: [CatalogCapabilityService],
 })

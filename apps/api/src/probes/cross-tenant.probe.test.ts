@@ -1060,6 +1060,52 @@ describe('cross-tenant isolation probe suite', () => {
           { 'idempotency-key': 'probe-b-avail' },
         ),
       },
+      // ── task 3.9: catalog tax-category assignment (tenant-scoped) + tax
+      // resolution (company-scoped). B cannot assign A's product/variant tax
+      // category, and cannot resolve A's variant tax in A's company context.
+      {
+        name: "PUT A product tax-category as ownerB (A's product id)",
+        axis: 'tenant',
+        expectDenied: [403, 404, 409, 422],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/products/${A.productId}/tax-category`,
+          ownerBTok,
+          { taxCategoryKey: 'STANDARD' },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: "PUT A variant tax-category as ownerB (A's variant id)",
+        axis: 'tenant',
+        expectDenied: [403, 404, 409, 422],
+        attempt: asStatus(
+          'PUT',
+          `/v1/catalog/variants/${A.variantId}/tax-category`,
+          ownerBTok,
+          { taxCategoryKey: 'STANDARD' },
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'GET A variant tax resolution as ownerB (A company + A variant)',
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/catalog/companies/${A.companyId}/variants/${A.variantId}/tax`,
+            ownerBTok,
+          );
+          const denied = [403, 404].includes(res.statusCode);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: denied ? 404 : res.statusCode,
+            leaked:
+              !denied &&
+              [A.companyId, A.variantId, 'A-ONLY-PRODUCT-SECRET'].some((s) => blob.includes(s)),
+          };
+        },
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 

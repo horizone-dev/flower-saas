@@ -61,6 +61,11 @@ const DOMAIN_FILES = [
   'branch-pricing.service.ts',
   'branch-pricing.helpers.ts',
   'branch-price-integrity.repo.ts',
+
+  // task 3.9 — tax-category assignment + rate resolution
+  'tax-category.repository.ts',
+  'tax-category.controller.ts',
+  'tax-resolution.service.ts',
 ];
 
 /** strip `//` line comments and `/* *\/` block comments */
@@ -68,7 +73,7 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
-describe('HG3-NO-BT-BRANCH — catalog domain code (tasks 3.2–3.8) never branches on Business Type', () => {
+describe('HG3-NO-BT-BRANCH — catalog domain code (tasks 3.2–3.9) never branches on Business Type', () => {
   for (const file of DOMAIN_FILES) {
     it(`${file} has no business-type reference in executable code`, () => {
       const code = stripComments(readFileSync(path.join(here, file), 'utf8'));

@@ -14,6 +14,8 @@ import {
   type BranchAvailabilityView,
   type BranchAvailabilitySetResult,
   type BranchEffectiveCatalogEntry,
+  type TaxCategoryAssignmentView,
+  type TaxResolutionResult,
 } from '@flower/shared-types';
 
 export type {
@@ -32,6 +34,11 @@ export type {
   BranchAvailabilityView,
   BranchAvailabilitySetResult,
   BranchEffectiveCatalogEntry,
+  SetTaxCategoryBody,
+  TaxCategoryAssignmentView,
+  TaxCategorySource,
+  TaxResolutionReason,
+  TaxResolutionResult,
 } from '@flower/shared-types';
 
 /**
@@ -1437,6 +1444,44 @@ export class ApiClient {
     if (query?.cursor !== undefined) q['cursor'] = query.cursor;
     if (query?.limit !== undefined) q['limit'] = query.limit;
     return this.get(`/v1/catalog/branches/${branchId}/catalog`, q);
+  }
+
+  // ── catalog tax-category assignment + rate resolution (task 3.9) ───────────
+  // Assignment: `catalog:manage` (product) / `variants:manage` (variant), tenant
+  // scoped, `If-Match: "<version>"`. `taxCategoryKey: null` clears. Resolution:
+  // `catalog:view`, company-scoped, optional `?at=`. NO tax amount is ever
+  // computed or returned (D2-8). NO branchId anywhere.
+  setProductTaxCategory(
+    productId: string,
+    taxCategoryKey: string | null,
+    expectedVersion: number,
+  ): Promise<TaxCategoryAssignmentView> {
+    return this.call(
+      `/v1/catalog/products/${productId}/tax-category`,
+      { method: 'PUT', body: { taxCategoryKey }, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as TaxCategoryAssignmentView,
+    );
+  }
+  setVariantTaxCategory(
+    variantId: string,
+    taxCategoryKey: string | null,
+    expectedVersion: number,
+  ): Promise<TaxCategoryAssignmentView> {
+    return this.call(
+      `/v1/catalog/variants/${variantId}/tax-category`,
+      { method: 'PUT', body: { taxCategoryKey }, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as TaxCategoryAssignmentView,
+    );
+  }
+  resolveVariantTax(
+    companyId: string,
+    variantId: string,
+    at?: string,
+  ): Promise<TaxResolutionResult> {
+    return this.get(
+      `/v1/catalog/companies/${companyId}/variants/${variantId}/tax`,
+      at !== undefined ? { at } : undefined,
+    );
   }
 
   overrideTenantLimit(

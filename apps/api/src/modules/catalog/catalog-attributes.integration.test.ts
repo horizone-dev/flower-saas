@@ -1003,14 +1003,16 @@ describe('typed attributes (task 3.3, integration)', () => {
   });
 
   // ══════════════════ no premature domain ════════════════════════════════
-  it('no Task 3.9 / later-domain table exists', async () => {
+  it('no Task 3.10+ / later-domain table exists', async () => {
     const rows = await sql<{ tablename: string }>(
       `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
     );
     const present = new Set(rows.map((r) => r.tablename));
     // `item_identifier` (3.5) + `uom` / `uom_conversion` (3.6) +
     // `company_variant_*` (3.7) + `branch_variant_*` (3.8) are created by the
-    // migration this suite runs. `inventory_*` / `order` / `payment` = Phase 3b / 5.
+    // migration this suite runs; Task 3.9 adds NO table (only nullable
+    // `product`/`variant.tax_category_key` columns). `inventory_*` / `order` /
+    // `payment` = Phase 3b / 5.
     for (const forbidden of [
       'inventory_item',
       'inventory_movement',

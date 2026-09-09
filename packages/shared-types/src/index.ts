@@ -668,6 +668,87 @@ export interface BranchEffectiveCatalogEntry {
   }[];
 }
 
+// --- catalog tax-category assignment + rate resolution (Phase 3 task 3.9) — PHASE-3-PLAN §C.10 ---
+
+/** A `tax_category.key` is a platform-defined SCREAMING_SNAKE token (task 2.7
+ *  seeds `STANDARD` / `ZERO_RATED` / `EXEMPT`). Shape only — an unknown but
+ *  well-formed key is a server-side `422 TAX_CATEGORY_UNKNOWN`, not a `400`. */
+export const TAX_CATEGORY_KEY_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * `PUT /v1/catalog/products/:id/tax-category` and
+ * `PUT /v1/catalog/variants/:id/tax-category` body — **structure only**, strict.
+ * `taxCategoryKey` is always PRESENT: a valid key assigns/reassigns; an explicit
+ * `null` clears the assignment (D8 clearing semantics). Omission / unknown key /
+ * wrong type → `400`. A well-formed key that is not a real `tax_category` row →
+ * `422 TAX_CATEGORY_UNKNOWN` (checked server-side; the DB FK is the backstop).
+ */
+export const setTaxCategorySchema = z
+  .object({
+    taxCategoryKey: z.string().regex(TAX_CATEGORY_KEY_RE).max(64).nullable(),
+  })
+  .strict();
+export type SetTaxCategoryBody = z.infer<typeof setTaxCategorySchema>;
+
+/** `PUT …/tax-category` response — the persisted assignment + the new parent
+ *  (`product` | `variant`) `version` (also on the `ETag`). */
+export interface TaxCategoryAssignmentView {
+  taxCategoryKey: string | null;
+  version: number;
+}
+
+/** Where the effective tax category came from in the `variant -> product -> NONE`
+ *  precedence chain. `NONE` ⇒ neither the variant nor its product has a category
+ *  assigned — "not configured", which is NEVER 0% tax (§11). */
+export const TAX_CATEGORY_SOURCES = ['VARIANT', 'PRODUCT', 'NONE'] as const;
+export type TaxCategorySource = (typeof TAX_CATEGORY_SOURCES)[number];
+
+/**
+ * Why `rateBps` is `null` on a `GET …/tax` resolution. `null` (the `reason`) ⇔
+ * a rate WAS resolved — including a genuine configured `0` (`ZERO_RATED` /
+ * `EXEMPT`). A non-null reason ⇔ `rateBps` is `null` and the state is
+ * **unresolved**, never "0%":
+ *   - `NO_CATEGORY_ASSIGNED` — product & variant both unassigned (`NONE`).
+ *   - `REGIME_NONE`          — the company's country has no VAT regime at `at`.
+ *   - `NO_RATE_FOR_CATEGORY` — VAT regime, but no `tax_rate` row for the
+ *                              resolved category is in force at `at`.
+ */
+export const TAX_RESOLUTION_REASONS = [
+  'NO_CATEGORY_ASSIGNED',
+  'REGIME_NONE',
+  'NO_RATE_FOR_CATEGORY',
+] as const;
+export type TaxResolutionReason = (typeof TAX_RESOLUTION_REASONS)[number];
+
+/**
+ * `GET /v1/catalog/companies/:companyId/variants/:variantId/tax` — the effective
+ * tax category + the applicable effective `tax_rate` for the company's
+ * authoritative country at `at`. **Metadata + reference resolution only — NEVER a
+ * calculated tax amount** (D2-8; `Money.percentage(rateBps)` is Phase 3b).
+ * `countryCode` is always `company.country_code` (authoritative — never a client
+ * value, never derived from branch / POS terminal).
+ */
+export interface TaxResolutionResult {
+  variantId: string;
+  companyId: string;
+  /** `company.country_code` at `at` — the sole fiscal authority. */
+  countryCode: string;
+  /** the `country_tax_config` regime in force at `at`. */
+  regime: 'VAT' | 'NONE';
+  /** the resolved effective category key, or `null` when `categorySource` is `NONE`. */
+  taxCategoryKey: string | null;
+  categorySource: TaxCategorySource;
+  /** basis points (`500` = 5.00%); `0` is a real configured zero-rate. `null`
+   *  ⇔ `reason` is non-null (unresolved — NOT 0%). */
+  rateBps: number | null;
+  /** the matched `tax_rate` window (ISO date `YYYY-MM-DD`), or `null` when unresolved. */
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  /** the resolution instant (ISO-8601 datetime). */
+  resolvedAt: string;
+  reason: TaxResolutionReason | null;
+}
+
 /**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
  * counts"). Enforced by `LimitService` on create / activate / login.

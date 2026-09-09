@@ -68,6 +68,9 @@ describe('auditable-action registry', () => {
       // task 3.8 — branch price override + branch availability
       'catalog.branch_price_changed',
       'catalog.branch_availability_changed',
+      // task 3.9 — catalog tax-category assignment
+      'catalog.product_tax_category_changed',
+      'catalog.variant_tax_category_changed',
     ]) {
       expect(isSecurityEventAction(a), a).toBe(false);
     }

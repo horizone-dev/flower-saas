@@ -104,7 +104,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_catalog_identifiers'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_uom'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_company_pricing'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_branch_pricing$/);
+    expect(names.some((n) => n.endsWith('_catalog_branch_pricing'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_tax_category$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -877,6 +878,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
           'description',
           'fulfilmentStrategy',
           'hidePrice',
+          // `taxCategoryKey` (nullable) is added by task 3.9's additive migration
+          'taxCategoryKey',
           'status',
           'version',
           'createdAt',
@@ -884,7 +887,9 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         ].sort(),
       );
       // owner §11 / HG3-CATALOG-SCOPE-SEPARATION — no money / company / branch /
-      // stock / media / tax / attribute / variant / uom / identifier column
+      // stock / media / attribute / variant / uom / identifier column. (The
+      // nullable `taxCategoryKey` VAT-category reference is the ONE deliberate
+      // additive fiscal column — task 3.9 / D2-8; it carries no rate / amount.)
       for (const forbidden of [
         'companyId',
         'branchId',
@@ -897,11 +902,13 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         'inventoryBalance',
         'media',
         'mediaJson',
-        'taxCategory',
-        'taxCategoryKey',
+        'taxRateBps',
+        'rateBps',
+        'taxAmount',
       ]) {
         expect(p[forbidden], `product.${forbidden} must not exist`).toBeUndefined();
       }
+      expect(p['taxCategoryKey'], 'product.taxCategoryKey is nullable (task 3.9)').toBe('YES');
     });
 
     it('pg_trgm is installed with GIN trigram indexes on product name(s)', async () => {
@@ -1532,12 +1539,14 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
           'status',
           // `baseUomCode` (nullable) is added by task 3.6's additive migration
           'baseUomCode',
+          // `taxCategoryKey` (nullable) is added by task 3.9's additive migration
+          'taxCategoryKey',
           'version',
           'createdAt',
           'updatedAt',
         ].sort(),
       );
-      // no price / currency / sku / stock / availability column — ever
+      // no price / currency / sku / stock / availability / tax-rate column — ever
       for (const c of [
         'price',
         'sellPrice',
@@ -1549,6 +1558,9 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         'available',
         'companyId',
         'branchId',
+        'taxRateBps',
+        'rateBps',
+        'taxAmount',
       ]) {
         expect(v, `variant.${c} must not exist`).not.toContain(c);
       }
@@ -2887,13 +2899,13 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
 
     beforeAll(seedCurrencies);
 
-    it('records the migration (task 3.8 is now the last one)', async () => {
+    it('records the migration (task 3.9 is now the last one)', async () => {
       const { rows } = await pool.query<{ migration_name: string }>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
       );
       const names = rows.map((r) => r.migration_name);
       expect(names.some((n) => n.endsWith('_catalog_company_pricing'))).toBe(true);
-      expect(names.at(-1)).toMatch(/_catalog_branch_pricing$/);
+      expect(names.at(-1)).toMatch(/_catalog_tax_category$/);
     });
 
     it('creates exactly company_variant_price_set / company_variant_uom_price — no discount / list-price / tax / effective-date / branch / stock column', async () => {
@@ -3563,6 +3575,140 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         `SELECT migration_name FROM _prisma_migrations WHERE migration_name LIKE '%catalog_branch_pricing%'`,
       );
       expect(rows).toHaveLength(1);
+    });
+  });
+
+  // ── catalog tax-category (task 3.9) — additive columns only, NO new table ──
+  // ONE additive forward-only migration: nullable `product.taxCategoryKey` +
+  // `variant.taxCategoryKey`, each FK -> `tax_category.key` (ON UPDATE CASCADE
+  // ON DELETE RESTRICT), + a partial index. No backfill, no NOT NULL, no new
+  // table, no RLS/policy change, no fiscal-migration rewrite, no grant change.
+  describe('tax-category schema (task 3.9)', () => {
+    const T = TENANT_A;
+    const mk = async (): Promise<{ product: string; variant: string }> => {
+      const cat = (
+        await pool.query(
+          `INSERT INTO category (id,"tenantId","slug","nameEn","updatedAt")
+           VALUES (uuidv7(),$1,$2,'Cat',now()) RETURNING id`,
+          [T, `tc-${Math.random().toString(36).slice(2)}`],
+        )
+      ).rows[0].id as string;
+      const product = (
+        await pool.query(
+          `INSERT INTO product (id,"tenantId","categoryId","slug","nameEn","fulfilmentStrategy","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'P','STOCKED',now()) RETURNING id`,
+          [T, cat, `tp-${Math.random().toString(36).slice(2)}`],
+        )
+      ).rows[0].id as string;
+      const variant = (
+        await pool.query(
+          `INSERT INTO variant (id,"tenantId","productId","nameEn","status","updatedAt")
+           VALUES (uuidv7(),$1,$2,'V','DRAFT',now()) RETURNING id`,
+          [T, product],
+        )
+      ).rows[0].id as string;
+      return { product, variant };
+    };
+
+    it('exactly ONE new task 3.9 migration; it is the last one', async () => {
+      const { rows } = await pool.query<{ migration_name: string }>(
+        `SELECT migration_name FROM _prisma_migrations WHERE migration_name LIKE '%catalog_tax_category%'`,
+      );
+      expect(rows).toHaveLength(1);
+      const all = await pool.query<{ migration_name: string }>(
+        `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
+      );
+      expect(all.rows.at(-1)!.migration_name).toMatch(/_catalog_tax_category$/);
+    });
+
+    it('adds NO new table (existing tax_category is reused as-is)', async () => {
+      const { rows } = await pool.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name LIKE '%tax%'`,
+      );
+      expect(rows.map((r) => r.table_name).sort()).toEqual(
+        ['country_tax_config', 'tax_category', 'tax_rate'].sort(),
+      );
+    });
+
+    it('product.taxCategoryKey + variant.taxCategoryKey: additive, NULLABLE, NO backfill', async () => {
+      for (const t of ['product', 'variant']) {
+        const col = await pool.query<{ is_nullable: string; data_type: string }>(
+          `SELECT is_nullable, data_type FROM information_schema.columns
+            WHERE table_name = $1 AND column_name = 'taxCategoryKey'`,
+          [t],
+        );
+        expect(col.rows[0]).toMatchObject({ is_nullable: 'YES', data_type: 'text' });
+      }
+      const { product, variant } = await mk();
+      // new columns default to NULL for pre-existing rows (no backfill)
+      const pd = await pool.query(`SELECT "taxCategoryKey" FROM product WHERE id = $1`, [product]);
+      expect(pd.rows[0].taxCategoryKey).toBeNull();
+      const vd = await pool.query(`SELECT "taxCategoryKey" FROM variant WHERE id = $1`, [variant]);
+      expect(vd.rows[0].taxCategoryKey).toBeNull();
+      const n = await pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM product WHERE "taxCategoryKey" IS NOT NULL`,
+      );
+      expect(Number(n.rows[0]!.n)).toBe(0);
+    });
+
+    it('FK -> tax_category.key: a real key is accepted; an unknown key is rejected (23503); ON DELETE RESTRICT', async () => {
+      await pool.query(
+        `INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES ('STANDARD','x','x')
+         ON CONFLICT (key) DO NOTHING`,
+      );
+      const { product, variant } = await mk();
+      await expect(
+        pool.query(`UPDATE product SET "taxCategoryKey" = 'STANDARD' WHERE id = $1`, [product]),
+      ).resolves.toBeTruthy();
+      await expect(
+        pool.query(`UPDATE variant SET "taxCategoryKey" = 'STANDARD' WHERE id = $1`, [variant]),
+      ).resolves.toBeTruthy();
+      await expect(
+        pool.query(`UPDATE product SET "taxCategoryKey" = 'NOPE_UNKNOWN' WHERE id = $1`, [product]),
+      ).rejects.toThrow(/foreign key|23503/i);
+      // RESTRICT: a referenced category cannot be deleted
+      await expect(pool.query(`DELETE FROM tax_category WHERE key = 'STANDARD'`)).rejects.toThrow(
+        /foreign key|23503|violates/i,
+      );
+    });
+
+    it('partial indexes exist on (taxCategoryKey) WHERE NOT NULL', async () => {
+      const { rows } = await pool.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes
+          WHERE indexname IN ('product_taxCategoryKey_idx', 'variant_taxCategoryKey_idx')`,
+      );
+      expect(rows).toHaveLength(2);
+      for (const r of rows) expect(r.indexdef).toMatch(/WHERE .*"taxCategoryKey" IS NOT NULL/i);
+    });
+
+    it('NO RLS / policy / grant change on product or variant (already ENABLE + FORCE since 3.2/3.4)', async () => {
+      const meta = await pool.query<{ relname: string; rls: boolean; force: boolean }>(
+        `SELECT c.relname, c.relrowsecurity AS rls, c.relforcerowsecurity AS force
+           FROM pg_class c WHERE c.relname IN ('product', 'variant')`,
+      );
+      for (const m of meta.rows) {
+        expect(m.rls, `${m.relname} RLS`).toBe(true);
+        expect(m.force, `${m.relname} FORCE`).toBe(true);
+      }
+      // tax_category stays RLS-exempt platform-global reference data
+      const tc = await pool.query<{ rls: boolean }>(
+        `SELECT c.relrowsecurity AS rls FROM pg_class c WHERE c.relname = 'tax_category'`,
+      );
+      expect(tc.rows[0]!.rls).toBe(false);
+    });
+
+    it('NO new tax rate / amount column anywhere on catalog tables (D2-8)', async () => {
+      for (const t of ['product', 'variant', 'category', 'product_type']) {
+        const { rows } = await pool.query<{ column_name: string }>(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+          [t],
+        );
+        const cols = rows.map((r) => r.column_name);
+        for (const bad of ['rateBps', 'taxRateBps', 'taxAmount', 'vatAmount', 'taxAmountMinor']) {
+          expect(cols, `${t}.${bad}`).not.toContain(bad);
+        }
+      }
     });
   });
 

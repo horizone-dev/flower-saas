@@ -1142,6 +1142,13 @@ model Product {
   fulfilmentStrategy String
   /// merchandising display flag — NOT a price (plan §C.3)
   hidePrice Boolean @default(false)
+  /// task 3.9 — the VAT tax-category default for this product's variants
+  /// (D1 = product default + variant override). Nullable: no backfill, no
+  /// NOT NULL. Textual reference to `tax_category.key` (platform-global); the FK
+  /// (`ON UPDATE CASCADE ON DELETE RESTRICT`) lives in the additive migration
+  /// only, exactly like `company.country_code -> country.code`. Absence at BOTH
+  /// product and variant level = "not configured" — NEVER 0% tax (§11).
+  taxCategoryKey String?
   /// DRAFT | ACTIVE | ARCHIVED (CHECK)
   status    String  @default("DRAFT")
   version   Int     @default(1)
@@ -1377,6 +1384,12 @@ model Variant {
   /// to reach ACTIVE. Locked once a conversion or a pack identifier depends on
   /// it. Shape CHECK, NO FK (OD-5).
   baseUomCode     String?
+  /// task 3.9 — the VAT tax-category OVERRIDE for this variant. Nullable; when
+  /// NULL the variant inherits `product.taxCategoryKey` (D1 precedence:
+  /// variant -> product -> NONE). Textual reference to `tax_category.key`; the FK
+  /// is added by the additive task-3.9 migration only. NULL at both levels =
+  /// "not configured", NEVER 0% tax.
+  taxCategoryKey  String?
   version         Int      @default(1)
   createdAt       DateTime @default(now()) @db.Timestamptz(6)
   updatedAt       DateTime @updatedAt @db.Timestamptz(6)

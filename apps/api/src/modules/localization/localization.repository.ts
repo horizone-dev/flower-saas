@@ -134,6 +134,32 @@ export class LocalizationRepository extends ScopedRepository {
     );
   }
 
+  /** The `tax_rate` rows in force for ONE `(countryCode, taxCategoryKey)` at
+   *  `at`, newest `effectiveFrom` first. Task 3.9 tax-category resolution — the
+   *  seed guarantees at most one row per date, but the DB permits overlaps, so
+   *  the caller (`LocalizationService.resolveTaxRate`) tie-breaks on
+   *  `effectiveFrom` and fails closed on a true tie. Same effective-date
+   *  predicate as `findTaxRates` (`effectiveFrom <= at AND (effectiveTo IS NULL
+   *  OR effectiveTo >= at)`) — a future-dated or expired row is not returned. */
+  findTaxRatesForCategory(
+    countryCode: string,
+    taxCategoryKey: string,
+    at: Date,
+  ): Promise<TaxRateRow[]> {
+    return this.scoped((tx) =>
+      tx.taxRate.findMany({
+        where: {
+          countryCode,
+          taxCategoryKey,
+          effectiveFrom: { lte: at },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: at } }],
+        },
+        orderBy: { effectiveFrom: 'desc' },
+        select: { taxCategoryKey: true, rateBps: true, effectiveFrom: true, effectiveTo: true },
+      }),
+    );
+  }
+
   /** A company's own row — RLS already restricts this to the caller's tenant;
    *  the controller additionally declares `@ScopedParam({ company: 'companyId' })`
    *  so the guard pipeline rejects a companyId outside the caller's own scope

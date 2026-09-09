@@ -148,6 +148,17 @@ export const AUDITABLE_ACTIONS = {
   'catalog.branch_price_changed': { resourceType: 'branch_variant_price_set', security: false },
   'catalog.branch_availability_changed': { resourceType: 'branch', security: false },
 
+  // ── catalog tax-category assignment (task 3.9) ────────────────────────────
+  // Ordinary tenant catalog metadata — a business event, NOT a security event
+  // (D2-10). `catalog.` is not a `security_event` prefix, so no view change.
+  // ONE row per successful assignment `PUT` (assign / reassign / clear), payload
+  // = the `{ taxCategoryKey }` before/after; a stale / failed / ARCHIVED-blocked
+  // write leaves NO row. It is CATALOG metadata — it never mutates a historical
+  // invoice / sale / fiscal document. NO realtime / outbox (task 3.10). The
+  // resolution `GET …/tax` writes NO audit row.
+  'catalog.product_tax_category_changed': { resourceType: 'product', security: false },
+  'catalog.variant_tax_category_changed': { resourceType: 'variant', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

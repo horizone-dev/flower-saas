@@ -407,3 +407,48 @@ describe('@flower/shared-types — branch price override + availability (task 3.
     expect(m['deleteBranchPricesSchema']).toBeUndefined();
   });
 });
+
+describe('@flower/shared-types — catalog tax-category + rate resolution (task 3.9)', () => {
+  it('setTaxCategorySchema: strict, key present, explicit null clears, unknown-shape → fail', async () => {
+    const m = await import('./index.js');
+    const s = m.setTaxCategorySchema;
+    expect(s.safeParse({ taxCategoryKey: 'STANDARD' }).success).toBe(true);
+    expect(s.safeParse({ taxCategoryKey: null }).success).toBe(true);
+    // omission is not allowed — the caller must send an explicit null to clear
+    expect(s.safeParse({}).success).toBe(false);
+    // malformed key shape → structural 400 (a well-formed-but-unknown key is a
+    // server-side 422, not tested here)
+    expect(s.safeParse({ taxCategoryKey: 'lower_case' }).success).toBe(false);
+    expect(s.safeParse({ taxCategoryKey: 5 }).success).toBe(false);
+    expect(s.safeParse({ taxCategoryKey: 'STANDARD', extra: 1 }).success).toBe(false);
+  });
+
+  it('TAX_CATEGORY_KEY_RE matches the seeded platform keys', async () => {
+    const m = await import('./index.js');
+    for (const k of ['STANDARD', 'ZERO_RATED', 'EXEMPT']) {
+      expect(m.TAX_CATEGORY_KEY_RE.test(k)).toBe(true);
+    }
+    expect(m.TAX_CATEGORY_KEY_RE.test('1STANDARD')).toBe(false);
+    expect(m.TAX_CATEGORY_KEY_RE.test('a')).toBe(false);
+  });
+
+  it('closed category-source + resolution-reason enums; NONE / reasons are distinct states', async () => {
+    const m = await import('./index.js');
+    expect(m.TAX_CATEGORY_SOURCES).toEqual(['VARIANT', 'PRODUCT', 'NONE']);
+    expect(m.TAX_RESOLUTION_REASONS).toEqual([
+      'NO_CATEGORY_ASSIGNED',
+      'REGIME_NONE',
+      'NO_RATE_FOR_CATEGORY',
+    ]);
+    // a configured zero-rate is NOT a reason — reason === null carries rateBps: 0
+    expect(m.TAX_RESOLUTION_REASONS).not.toContain('ZERO_RATE');
+  });
+
+  it('TaxResolutionResult carries no money amount field (metadata + rateBps only)', async () => {
+    const m = (await import('./index.js')) as Record<string, unknown>;
+    // there is no schema/validator that would emit an amount; the type is a
+    // read-only shape — assert the wire helpers that WOULD compute one are absent
+    expect(m['taxResolutionSchema']).toBeUndefined();
+    expect(m['computeTax']).toBeUndefined();
+  });
+});

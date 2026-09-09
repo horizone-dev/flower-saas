@@ -66,3 +66,19 @@ export interface CompanyLocalizationProfileDto {
   weekendModel: string;
   resolvedAt: string;
 }
+
+/**
+ * `LocalizationService.resolveTaxRate(...)` — the single effective `tax_rate`
+ * for ONE `(countryCode, taxCategoryKey)` at `at` (task 3.9). Reference
+ * resolution only — carries `rateBps`, never a computed amount.
+ *   - `regime: 'NONE'`      → `rate: null`, `reason: 'REGIME_NONE'`.
+ *   - VAT, no in-force row  → `rate: null`, `reason: 'NO_RATE_FOR_CATEGORY'`.
+ *   - VAT, one in-force row → `rate: {...}`, `reason: null` (incl. a real `0`).
+ * A missing regime throws `500 TAX_REGIME_NOT_CONFIGURED`; two in-force rows
+ * with the SAME `effectiveFrom` throw `500 TAX_RATE_AMBIGUOUS` (fail closed).
+ */
+export interface ResolvedTaxRateDto {
+  regime: 'VAT' | 'NONE';
+  rate: { rateBps: number; effectiveFrom: string; effectiveTo: string | null } | null;
+  reason: 'REGIME_NONE' | 'NO_RATE_FOR_CATEGORY' | null;
+}
