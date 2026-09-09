@@ -1,0 +1,34 @@
+-- Phase 3 task 3.10 — Business-Type capability-template re-apply + catalog
+-- transactional outbox events + company-scoped realtime authorization.
+-- Additive, forward-only. THE ONLY schema change for task 3.10.
+--
+-- Scope of THIS migration (the entire schema change for task 3.10):
+--   * outbox.companyId  UUID NULL  — an OPTIONAL ADR-0017 §3 envelope scope
+--     field (additive Phase-3 amendment). Mirrors the additive `branchId` /
+--     `resourceVersion` / `actorSummary` columns added by task 2.4
+--     (20260904180000_outbox_dispatcher). Set by the trusted domain producer
+--     for a company-scoped catalog event (`catalog.company.price_changed`) and
+--     for a branch-scoped one (`catalog.branch.*` carry BOTH companyId +
+--     branchId — defence in depth). The realtime gateway authorises a socket
+--     against it CUMULATIVELY with tenant_id + branch_id (session.companyScope
+--     must be 'ALL' or include it). NEVER derived from a client value; NEVER
+--     read from `outbox.payload`.
+--
+-- NO new table. NO FK (mirrors `branchId` — the dispatcher joins nothing; a
+-- company row is never deleted while a tenant is live, and a stale companyId in
+-- a historical event row is harmless provenance). NO RLS / policy change
+-- (`outbox` has no RLS — it is tenant-scoped by the `tenantId` COLUMN, written
+-- by `flower_app`, drained by the tenant-scoped dispatcher). NO grant change
+-- (`flower_app` already INSERTs `outbox`; `flower_dispatcher` already has
+-- SELECT+UPDATE — the new column is covered by the table-level grant). NO
+-- index — `companyId` is NOT a dispatcher scan key (the dispatcher selects by
+-- `tenantId` + `seq` + `dispatchedAt`); the gateway filters per-socket in
+-- memory after receiving the trusted envelope. NO backfill. NO NOT NULL.
+--
+-- NO catalog-entity / capability / pricing / inventory / accounting table or
+-- column. Task 3.10 adds NO `business_type_template_category` / `_attribute` /
+-- `_uom` / `template_payload` — the shipped Business-Type template mechanism is
+-- capability-only (owner D-7).
+
+-- AlterTable (partitioned parent — ADD COLUMN propagates to every partition)
+ALTER TABLE "outbox" ADD COLUMN "companyId" UUID;

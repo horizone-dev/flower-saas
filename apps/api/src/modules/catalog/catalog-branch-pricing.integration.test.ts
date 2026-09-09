@@ -1411,6 +1411,117 @@ describe('branch price override + availability (task 3.8, integration)', () => {
     );
     expect(cols.map((c) => c.column_name)).not.toContain('purchaseAmountMinor');
   });
+
+  // ════════════ task 3.10 — transactional outbox events (owner D-1 / D-6) ════
+  describe('task 3.10 — catalog outbox events', () => {
+    const outbox = (eventType: string, resourceId?: string) =>
+      sql<{
+        tenantId: string;
+        companyId: string | null;
+        branchId: string | null;
+        aggregateType: string;
+        aggregateId: string;
+        eventType: string;
+        payload: Record<string, unknown>;
+        resourceVersion: string | null;
+        dispatchedAt: Date | null;
+      }>(
+        `SELECT "tenantId","companyId","branchId","aggregateType","aggregateId","eventType",
+                payload,"resourceVersion"::text AS "resourceVersion","dispatchedAt"
+           FROM outbox
+          WHERE "eventType" = $1 ${resourceId ? 'AND "aggregateId" = $2' : ''}
+          ORDER BY "createdAt" DESC LIMIT 5`,
+        resourceId ? [eventType, resourceId] : [eventType],
+      );
+    const countOutbox = async (): Promise<number> =>
+      Number((await sql<{ n: string }>(`SELECT count(*)::text AS n FROM outbox`))[0]!.n);
+
+    it('26/38/39 — a company price replace-set co-commits a company-scoped outbox row (company_id set, branch_id null, resource_version = set version, bounded payload, no Money)', async () => {
+      const v = await mkVariant(ownerA, 'ob-cp', { base: 'piece' });
+      await companyPrice(coA, v, [{ uomCode: 'piece', sell: money('500', 'AED', 2) }]); // v1
+      await companyPrice(coA, v, [{ uomCode: 'piece', sell: money('600', 'AED', 2) }]); // v2
+      const rows = await outbox('catalog.company.price_changed');
+      const latest = rows[0]!;
+      expect(latest.tenantId).toBe(tenantA);
+      expect(latest.companyId).toBe(coA);
+      expect(latest.branchId).toBeNull();
+      expect(latest.aggregateType).toBe('company_variant_price_set');
+      expect(latest.resourceVersion).toBe('2');
+      expect(latest.payload['variantId']).toBe(v);
+      expect(latest.payload['changedUomCodes']).toEqual(['piece']);
+      const blob = JSON.stringify(latest.payload);
+      expect(blob).not.toMatch(/amountMinor|"600"|AED|sell/i);
+      expect(latest.dispatchedAt).toBeNull();
+    });
+
+    it('27 — a branch price replace-set co-commits a branch-scoped row carrying BOTH company_id and branch_id', async () => {
+      const v = await mkVariant(ownerA, 'ob-bp', { base: 'piece' });
+      await companyPrice(coA, v, [{ uomCode: 'piece', sell: money('500', 'AED', 2) }]);
+      await putBranchPrices(dubai, v, [{ uomCode: 'piece', sell: money('450', 'AED', 2) }], '"0"');
+      const latest = (await outbox('catalog.branch.price_changed'))[0]!;
+      expect(latest.tenantId).toBe(tenantA);
+      expect(latest.companyId).toBe(coA);
+      expect(latest.branchId).toBe(dubai);
+      expect(latest.resourceVersion).toBe('1');
+      expect(latest.payload['variantId']).toBe(v);
+      expect(latest.payload['changedUomCodes']).toEqual(['piece']);
+    });
+
+    it('28 — a branch availability set co-commits a branch-scoped row (both ids, no resource_version, bounded variantIds)', async () => {
+      const v = await mkVariant(ownerA, 'ob-av', { base: 'piece' });
+      const r = await setAvail(dubai, [{ variantId: v, available: false }], ik());
+      expect(r.statusCode, r.payload).toBe(200);
+      const latest = (await outbox('catalog.branch.availability_changed'))[0]!;
+      expect(latest.companyId).toBe(coA);
+      expect(latest.branchId).toBe(dubai);
+      expect(latest.aggregateType).toBe('branch');
+      expect(latest.resourceVersion).toBeNull();
+      expect(latest.payload['variantIds']).toEqual([v]);
+    });
+
+    it('36 — a rolled-back mutation (stale If-Match → 409) writes NO outbox row', async () => {
+      const v = await mkVariant(ownerA, 'ob-rb', { base: 'piece' });
+      await companyPrice(coA, v, [{ uomCode: 'piece', sell: money('500', 'AED', 2) }]); // v1
+      const before = await countOutbox();
+      const stale = await putCompanyPrices(
+        coA,
+        v,
+        [{ uomCode: 'piece', sell: money('999', 'AED', 2) }],
+        '"0"',
+      );
+      expect(stale.statusCode).toBe(409);
+      expect(await countOutbox()).toBe(before);
+    });
+
+    it('44 — an idempotent availability replay (same key) writes NO second outbox row', async () => {
+      const v = await mkVariant(ownerA, 'ob-idem', { base: 'piece' });
+      const key = ik();
+      await setAvail(dubai, [{ variantId: v, available: true }], key);
+      const after1 = (await outbox('catalog.branch.availability_changed', dubai)).length;
+      await setAvail(dubai, [{ variantId: v, available: true }], key); // replay
+      const after2 = (await outbox('catalog.branch.availability_changed', dubai)).length;
+      expect(after2).toBe(after1);
+    });
+
+    it('41/42 — a tax-category / UOM / identifier mutation writes NO outbox row', async () => {
+      const v = await mkVariant(ownerA, 'ob-neg', { base: 'piece' });
+      const before = await countOutbox();
+      // tax-category assignment (task 3.9)
+      const gv = await req('GET', `/catalog/variants/${v}`, ownerA);
+      const vv = (gv.json() as { version: number; productId: string }).version;
+      await req(
+        'PUT',
+        `/catalog/variants/${v}/tax-category`,
+        ownerA,
+        { taxCategoryKey: 'STANDARD' },
+        { 'if-match': `"${vv}"` },
+      );
+      // a UOM create
+      const u = await mkUom(ownerA, { code: 'ob_neg_uom', family: 'EACH', nameEn: 'x' });
+      expect(u.statusCode, u.payload).toBe(201);
+      expect(await countOutbox()).toBe(before);
+    });
+  });
 });
 
 async function seed(url: string): Promise<void> {

@@ -353,6 +353,60 @@ describe('realtime gateway (integration — Redis, 2 real instances)', () => {
     expect(eventOf(received)).toMatchObject({ branch_id: branchX });
   });
 
+  // ── 3c. task 3.10 — cumulative company-scope authorization (owner D-1) ──
+  it('a company-A event never reaches a company-B-only session; Owner ALL/ALL does receive it', async () => {
+    const tenantId = randomUUID();
+    const companyA = randomUUID();
+    const companyB = randomUUID();
+    const bSession = session({
+      tenantId,
+      access: { ...session().access!, companyScope: [companyB], branchScope: 'ALL' },
+    });
+    const bToken = await login(bSession);
+    const ownerToken = await login(session({ tenantId })); // ALL / ALL
+
+    const gw = await bootGateway();
+    const bClient = await connect(gw.port, bToken);
+    const ownerClient = await connect(gw.port, ownerToken);
+
+    const env = envelope({
+      tenant_id: tenantId,
+      company_id: companyA,
+      branch_id: null,
+      type: 'catalog.company.price_changed',
+    });
+    await publishLive(tenantId, env);
+
+    // Owner receives it; company-B session does NOT
+    const got = await ownerClient.waitFor((m) => m['type'] === 'event');
+    expect(eventOf(got)).toMatchObject({ event_id: env['event_id'], company_id: companyA });
+    await sleep(300);
+    expect(bClient.messages.some((m) => m['type'] === 'event')).toBe(false);
+  });
+
+  it('a branch event carrying BOTH company_id + branch_id is denied to a session with the branch but NOT the company (defence in depth)', async () => {
+    const tenantId = randomUUID();
+    const companyA = randomUUID();
+    const branchA = randomUUID();
+    const s = session({
+      tenantId,
+      access: { ...session().access!, companyScope: [randomUUID()], branchScope: [branchA] },
+    });
+    const token = await login(s);
+    const gw = await bootGateway();
+    const client = await connect(gw.port, token);
+
+    const env = envelope({
+      tenant_id: tenantId,
+      company_id: companyA,
+      branch_id: branchA,
+      type: 'catalog.branch.price_changed',
+    });
+    await publishLive(tenantId, env);
+    await sleep(300);
+    expect(client.messages.some((m) => m['type'] === 'event')).toBe(false);
+  });
+
   // ── 3b. a filtered event's heartbeat carries ONLY the cursor — no leakage ─
   it('a branch-Y event filtered for a branch-X-only session surfaces ONLY a {type, cursor} heartbeat — no business field leaks', async () => {
     const tenantId = randomUUID();

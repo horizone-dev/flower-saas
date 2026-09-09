@@ -786,6 +786,47 @@ export interface TaxResolutionResult {
 }
 
 /**
+ * Task 3.10 — the closed set of catalog domain events emitted to the
+ * transactional `outbox` (co-committed with the domain mutation + its audit
+ * row). A **coarse, resource-oriented invalidation signal**, never authoritative
+ * state (ADR-0017 §3): a client that receives one refetches over REST. Five
+ * types only — no field-level explosion, and NOT one per audit action (owner
+ * D-2). Scope per type:
+ *   - `catalog.company.price_changed`      → `{ tenant, company, branch: null }`
+ *   - `catalog.branch.price_changed`       → `{ tenant, company, branch }`
+ *   - `catalog.branch.availability_changed`→ `{ tenant, company, branch }`
+ *   - `catalog.product.status_changed`     → `{ tenant, company: null, branch: null }`
+ *   - `catalog.variant.status_changed`     → `{ tenant, company: null, branch: null }`
+ * The gateway authorises a socket CUMULATIVELY (tenant + company + branch).
+ */
+export const CATALOG_EVENT_TYPES = [
+  'catalog.company.price_changed',
+  'catalog.branch.price_changed',
+  'catalog.branch.availability_changed',
+  'catalog.product.status_changed',
+  'catalog.variant.status_changed',
+] as const;
+export type CatalogEventType = (typeof CATALOG_EVENT_TYPES)[number];
+
+/**
+ * Task 3.10 — `POST /v1/platform/tenants/:tenantId/apply-business-type-template`.
+ * An explicit, audited Super-Admin **re-apply** of a Business-Type CAPABILITY
+ * preset (never catalog-entity creation — owner D-7). `mode` per
+ * `PHASE-3.1-CAPABILITY-SPEC.md` §J. `templateKey` MAY differ from the tenant's
+ * current `businessTypeKey` — a successful logical apply re-stamps the primary
+ * preset metadata (owner D-4), never a runtime discriminator (D0-3).
+ */
+export const TEMPLATE_APPLY_MODES = ['merge', 'replace'] as const;
+export type TemplateApplyMode = (typeof TEMPLATE_APPLY_MODES)[number];
+export const applyBusinessTypeTemplateSchema = z
+  .object({
+    templateKey: z.string().min(1).max(64),
+    mode: z.enum(TEMPLATE_APPLY_MODES).default('merge'),
+  })
+  .strict();
+export type ApplyBusinessTypeTemplateBody = z.infer<typeof applyBusinessTypeTemplateSchema>;
+
+/**
  * Numeric per-tenant limits, all distinct (ARCHITECTURE §4 "four distinct
  * counts"). Enforced by `LimitService` on create / activate / login.
  */

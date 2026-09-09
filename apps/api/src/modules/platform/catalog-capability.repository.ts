@@ -357,6 +357,213 @@ export class PlatformCatalogCapabilityRepository {
       return this.readState(tx, tenantId);
     });
   }
+
+  /**
+   * Task 3.10 — explicit Super-Admin **re-apply** of a Business-Type CAPABILITY
+   * preset (`PHASE-3.1-CAPABILITY-SPEC.md` §J; owner D-1…D-4). ONE `runPlatform`
+   * transaction:
+   *   1. lock the tenant row `FOR UPDATE` (serialises with `patch` + a concurrent
+   *      re-apply — same aggregate/version semantics as `patch`)
+   *   2. `If-Match` on `catalogCapabilityVersion` — missing → `428`, stale → `409`
+   *   3. resolve the target template — `422 UNKNOWN_BUSINESS_TYPE` /
+   *      `422 BUSINESS_TYPE_NOT_ACTIVE`
+   *   4. `merge` / `replace` the target-template capability rows (never deletes a
+   *      key absent from the target; `merge` skips `MANUAL` rows; `replace`
+   *      overwrites any and returns provenance to `TEMPLATE`)
+   *   5. if a logical mutation occurred: re-stamp `tenant.businessType*` (owner
+   *      D-4 — the target key MAY differ from the current one), `+1` the
+   *      aggregate version exactly once, ONE bounded `catalog.template_applied`
+   *      audit row
+   *   6. exact semantic no-op → no write, no version bump, no audit row
+   *
+   * NEVER touches a catalog entity, price, or inventory. NEVER emits an outbox
+   * event (owner D-2). NEVER a runtime discriminator (D0-3).
+   */
+  async reapply(input: {
+    tenantId: string;
+    templateKey: string;
+    mode: 'merge' | 'replace';
+    expectedVersion: number | null;
+    actorPlatformUserId: string | null;
+  }): Promise<TenantCapabilityState> {
+    const { tenantId, templateKey, mode, expectedVersion, actorPlatformUserId } = input;
+
+    return runPlatform(this.platform, async (tx) => {
+      const lockedRows = await tx.$queryRaw<
+        { v: number; btk: string | null; bav: number | null }[]
+      >`
+        SELECT "catalogCapabilityVersion" AS v, "businessTypeKey" AS btk,
+               "businessTypeAppliedVersion" AS bav
+          FROM "tenant" WHERE "id" = ${tenantId}::uuid FOR UPDATE`;
+      if (lockedRows.length === 0) throw new NotFoundError('tenant');
+      const locked = lockedRows[0]!;
+      const currentVersion = locked.v;
+
+      if (expectedVersion === null) {
+        throw new DomainError(
+          'PRECONDITION_REQUIRED',
+          'If-Match (the current aggregateVersion) is required',
+          428,
+        );
+      }
+      if (expectedVersion !== currentVersion) {
+        throw new DomainError(
+          'CATALOG_CAPABILITY_VERSION_CONFLICT',
+          `the capability set changed elsewhere (expected ${expectedVersion}, now ${currentVersion})`,
+          409,
+        );
+      }
+
+      const template = await tx.businessTypeTemplate.findUnique({
+        where: { key: templateKey },
+        select: {
+          key: true,
+          version: true,
+          status: true,
+          capabilities: { select: { capabilityKey: true, enabled: true, config: true } },
+        },
+      });
+      if (!template) {
+        throw new DomainError(
+          'UNKNOWN_BUSINESS_TYPE',
+          `"${templateKey}" is not a known Business Type`,
+          422,
+        );
+      }
+      if (template.status !== 'ACTIVE') {
+        throw new DomainError(
+          'BUSINESS_TYPE_NOT_ACTIVE',
+          `Business Type "${templateKey}" is not available (deprecated)`,
+          422,
+        );
+      }
+
+      // defensive — every shipped template row has config === null (spec §E)
+      for (const cap of template.capabilities) {
+        if (!isCapabilityKey(cap.capabilityKey)) {
+          throw new DomainError(
+            'UNKNOWN_CAPABILITY_KEY',
+            `template "${templateKey}" references unknown capability "${cap.capabilityKey}"`,
+            422,
+          );
+        }
+        const cfg = checkCapabilityConfig(cap.capabilityKey, cap.config ?? null);
+        if (!cfg.ok) throw new DomainError(cfg.code, cfg.message, 422);
+      }
+
+      const templateKeys = template.capabilities.map((c) => c.capabilityKey);
+      const existing = await tx.tenantCatalogCapability.findMany({
+        where: { tenantId, capabilityKey: { in: templateKeys } },
+        select: {
+          capabilityKey: true,
+          enabled: true,
+          config: true,
+          sourceKind: true,
+          sourceTemplateKey: true,
+          sourceTemplateVersion: true,
+        },
+      });
+      const byKey = new Map(existing.map((r) => [r.capabilityKey, r]));
+      const now = new Date();
+      const changedCapabilityKeys: string[] = [];
+
+      for (const cap of template.capabilities) {
+        const prior = byKey.get(cap.capabilityKey);
+        const capConfigJson = JSON.stringify(cap.config ?? null);
+
+        if (prior === undefined) {
+          await tx.tenantCatalogCapability.create({
+            data: {
+              tenantId,
+              capabilityKey: cap.capabilityKey,
+              enabled: cap.enabled,
+              ...(cap.config != null ? { config: cap.config as Prisma.InputJsonValue } : {}),
+              sourceKind: 'TEMPLATE',
+              sourceTemplateKey: template.key,
+              sourceTemplateVersion: template.version,
+              appliedAt: now,
+              appliedBy: actorPlatformUserId,
+              lastChangedBy: actorPlatformUserId,
+            },
+          });
+          changedCapabilityKeys.push(cap.capabilityKey);
+          continue;
+        }
+
+        // merge — leave a MANUAL (diverged) row EXACTLY as-is (spec §J / §H.4)
+        if (mode === 'merge' && prior.sourceKind !== 'TEMPLATE') continue;
+
+        const priorConfigJson = JSON.stringify(prior.config ?? null);
+        const valueChanged = prior.enabled !== cap.enabled || priorConfigJson !== capConfigJson;
+        const provenanceChanged =
+          prior.sourceKind !== 'TEMPLATE' ||
+          prior.sourceTemplateKey !== template.key ||
+          prior.sourceTemplateVersion !== template.version;
+
+        if (!valueChanged && !provenanceChanged) continue;
+
+        await tx.tenantCatalogCapability.update({
+          where: { tenantId_capabilityKey: { tenantId, capabilityKey: cap.capabilityKey } },
+          data: {
+            enabled: cap.enabled,
+            // every shipped template row (and therefore every tenant row) has
+            // `config === null` — the schema registry is empty (spec §E), so a
+            // non-null config can never have been persisted. Snapshot one
+            // faithfully if a future template ever carries it; otherwise leave
+            // the (already-null) column untouched.
+            ...(cap.config != null ? { config: cap.config as Prisma.InputJsonValue } : {}),
+            sourceKind: 'TEMPLATE',
+            sourceTemplateKey: template.key,
+            sourceTemplateVersion: template.version,
+            appliedAt: now,
+            appliedBy: actorPlatformUserId,
+            // returning a row to TEMPLATE provenance clears the divergence marker
+            overriddenAt: null,
+            lastChangedBy: actorPlatformUserId,
+          },
+        });
+        changedCapabilityKeys.push(cap.capabilityKey);
+      }
+
+      const businessTypeKeyChanged = template.key !== locked.btk;
+      const mutated = changedCapabilityKeys.length > 0 || businessTypeKeyChanged;
+
+      if (!mutated) {
+        // exact semantic no-op — no write, no version bump, no audit row
+        return this.readState(tx, tenantId);
+      }
+
+      await tx.tenant.update({
+        where: { id: tenantId },
+        data: {
+          businessTypeKey: template.key,
+          businessTypeAppliedVersion: template.version,
+          businessTypeAppliedAt: now,
+          catalogCapabilityVersion: { increment: 1 },
+        },
+      });
+
+      await this.audit.record(tx, {
+        action: 'catalog.template_applied',
+        resourceType: 'business_type_template',
+        resourceId: template.key,
+        tenantId,
+        actorPlatformUserId,
+        reason: JSON.stringify({
+          mode,
+          fromTemplateKey: locked.btk,
+          fromTemplateVersion: locked.bav,
+          toTemplateKey: template.key,
+          toTemplateVersion: template.version,
+          aggregateVersionFrom: currentVersion,
+          aggregateVersionTo: currentVersion + 1,
+          changedCapabilityKeys: [...changedCapabilityKeys].sort((a, b) => a.localeCompare(b)),
+        }),
+      });
+
+      return this.readState(tx, tenantId);
+    });
+  }
 }
 
 /** the 16-key registry, re-exported for convenience. */

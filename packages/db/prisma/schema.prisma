@@ -731,6 +731,13 @@ model AuditLog {
 model Outbox {
   id            String    @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId      String?   @db.Uuid
+  /// optional — set when the event is company-scoped OR branch-scoped (ADR-0017
+  /// §3 envelope `company_id`, additive Phase-3 amendment / task 3.10). A
+  /// branch-scoped catalog event carries BOTH companyId and branchId (defence in
+  /// depth); a company-scoped one carries companyId with branchId null. The
+  /// gateway authorises CUMULATIVELY (tenant + company + branch). Never derived
+  /// from a client value; never read from `payload`.
+  companyId     String?   @db.Uuid
   /// optional — set when the event is branch-scoped (ADR-0017 envelope field)
   branchId      String?   @db.Uuid
   aggregateType String

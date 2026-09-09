@@ -532,4 +532,37 @@ describe('@flower/api-client', () => {
     // no tax-amount / compute helper on the client
     expect((client as unknown as Record<string, unknown>)['computeVariantTax']).toBeUndefined();
   });
+
+  it('applyBusinessTypeTemplate sends BOTH Idempotency-Key and If-Match, default mode merge (task 3.10)', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ tenantId: 't1', aggregateVersion: 4 }),
+    );
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+
+    await client.applyBusinessTypeTemplate('t1', 'BAKERY_CAKE', 3, 'idem-key-abcd1234');
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe('http://api.test/v1/platform/tenants/t1/apply-business-type-template');
+    expect(init!.method).toBe('POST');
+    expect(init!.headers).toMatchObject({
+      'if-match': '"3"',
+      'idempotency-key': 'idem-key-abcd1234',
+    });
+    expect(JSON.parse(String(init!.body))).toEqual({ templateKey: 'BAKERY_CAKE', mode: 'merge' });
+
+    await client.applyBusinessTypeTemplate(
+      't1',
+      'PERFUME_ATTAR',
+      4,
+      'idem-key-efgh5678',
+      'replace',
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1]!.body))).toEqual({
+      templateKey: 'PERFUME_ATTAR',
+      mode: 'replace',
+    });
+  });
 });

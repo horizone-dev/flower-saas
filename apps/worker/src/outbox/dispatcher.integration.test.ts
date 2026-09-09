@@ -80,17 +80,19 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     payload?: unknown;
     createdAt?: Date;
     branchId?: string | null;
+    companyId?: string | null;
     resourceVersion?: bigint | null;
     actorSummary?: unknown;
   }): Promise<{ id: string; createdAt: Date }> {
     const { rows } = await pool.query<{ id: string; createdAt: Date }>(
       `INSERT INTO outbox
-         (id, "tenantId", "branchId", "aggregateType", "aggregateId", "eventType", payload,
+         (id, "tenantId", "companyId", "branchId", "aggregateType", "aggregateId", "eventType", payload,
           "resourceVersion", "actorSummary", "createdAt")
-       VALUES (uuidv7(), $1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7, $8::jsonb, COALESCE($9, now()))
+       VALUES (uuidv7(), $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::jsonb, $8, $9::jsonb, COALESCE($10, now()))
        RETURNING id, "createdAt"`,
       [
         over.tenantId,
+        over.companyId ?? null,
         over.branchId ?? null,
         over.aggregateType ?? 'tenant',
         over.aggregateId ?? over.tenantId,
@@ -387,7 +389,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
         );
         expect(lock[0]?.acquired).toBe(true);
         const rows = await tx.$queryRawUnsafe<OutboxRow[]>(
-          `SELECT id, "tenantId", "branchId", "aggregateType", "aggregateId", "eventType",
+          `SELECT id, "tenantId", "companyId", "branchId", "aggregateType", "aggregateId", "eventType",
                   "resourceVersion", "actorSummary", "createdAt", seq, attempts
              FROM outbox
             WHERE "tenantId" = $1::uuid AND seq IS NOT NULL AND "dispatchedAt" IS NULL
@@ -536,6 +538,7 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
       [
         'actor_summary',
         'branch_id',
+        'company_id',
         'event_id',
         'occurred_at',
         'resource_id',
@@ -585,6 +588,53 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
 
     const entries = await streamEntries(tenantId);
     expect(entries[0]).toHaveProperty('branch_id', null);
+  });
+
+  it('task 3.10 — company_id + branch_id both survive DB → dispatcher → Redis Stream entry (tests 45/46)', async () => {
+    const tenantId = randomUUID();
+    const companyId = randomUUID();
+    const branchId = randomUUID();
+    // a company-scoped event (branch_id null)
+    const cRow = await insertOutboxRow({
+      tenantId,
+      companyId,
+      branchId: null,
+      eventType: 'catalog.company.price_changed',
+      resourceVersion: 3n,
+    });
+    // a branch-scoped event carrying BOTH ids
+    const bRow = await insertOutboxRow({
+      tenantId,
+      companyId,
+      branchId,
+      eventType: 'catalog.branch.price_changed',
+      resourceVersion: 5n,
+    });
+    await allocateTenantSeq(db, tenantId);
+    await publishNextForTenant(db, tenantId, redis);
+    await publishNextForTenant(db, tenantId, redis);
+
+    const entries = await streamEntries(tenantId);
+    const byId = new Map(entries.map((e) => [e['event_id'], e]));
+    expect(byId.get(cRow.id)).toMatchObject({
+      company_id: companyId,
+      branch_id: null,
+      resource_version: '3',
+    });
+    expect(byId.get(bRow.id)).toMatchObject({
+      company_id: companyId,
+      branch_id: branchId,
+      resource_version: '5',
+    });
+  });
+
+  it('task 3.10 — a legacy event with no company_id yields company_id: null (not omitted)', async () => {
+    const tenantId = randomUUID();
+    await insertOutboxRow({ tenantId, eventType: 'tenant.provisioned' });
+    await allocateTenantSeq(db, tenantId);
+    await publishNextForTenant(db, tenantId, redis);
+    const entries = await streamEntries(tenantId);
+    expect(entries[0]).toHaveProperty('company_id', null);
   });
 
   it('a payload field shaped like routing metadata never overrides the real branch_id/tenant_id (the publisher never derives routing/authorization from untrusted payload)', async () => {

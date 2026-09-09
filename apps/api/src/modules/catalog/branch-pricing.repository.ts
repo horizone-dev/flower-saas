@@ -12,6 +12,8 @@ import type {
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext, type ScopeSet } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
+import { OutboxWriter } from '../../common/audit/outbox.writer.js';
+import { changedUomCodes } from './catalog-events.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { versionConflict } from './catalog-write.helpers.js';
 import { isBuiltinUom } from './uom.helpers.js';
@@ -60,6 +62,7 @@ export class BranchPricingRepository extends ScopedRepository {
   constructor(
     db: DbService,
     private readonly audit: AuditWriter,
+    private readonly outbox: OutboxWriter,
   ) {
     super(db);
   }
@@ -465,6 +468,23 @@ export class BranchPricingRepository extends ScopedRepository {
           },
         });
 
+        // task 3.10 — branch-scoped realtime invalidation, co-committed. Carries
+        // BOTH company_id and branch_id (defence in depth — owner D-1): a socket
+        // scoped to this branch but NOT this company is still denied. Bounded
+        // payload hint only.
+        await this.outbox.enqueue(tx, {
+          aggregateType: 'branch_variant_price_set',
+          aggregateId: aggId,
+          eventType: 'catalog.branch.price_changed',
+          companyId,
+          branchId,
+          resourceVersion: nextVersion,
+          payload: {
+            variantId,
+            changedUomCodes: changedUomCodes(beforeRows, normalized),
+          },
+        });
+
         // ── step 13 — build THIS mutation's result FROM THE TRANSACTION (never
         //    a post-commit GET — Task 3.7 FIX 1 precedent).
         const reachable = (code: string): boolean => {
@@ -572,6 +592,22 @@ export class BranchPricingRepository extends ScopedRepository {
           variants: Object.fromEntries(
             entries.map((e) => [e.variantId, { available: e.available, explicit: true }]),
           ),
+        },
+      });
+
+      // task 3.10 — branch-scoped realtime invalidation, co-committed. BOTH
+      // company_id + branch_id (owner D-1). No `resourceVersion` — branch
+      // availability has no authoritative aggregate version and one is NOT
+      // invented for realtime (owner "RESOURCE VERSION"). Bounded payload:
+      // the request's variant ids (already bounded by the availability limit).
+      await this.outbox.enqueue(tx, {
+        aggregateType: 'branch',
+        aggregateId: branchId,
+        eventType: 'catalog.branch.availability_changed',
+        companyId,
+        branchId,
+        payload: {
+          variantIds: entries.map((e) => e.variantId).sort((a, b) => a.localeCompare(b)),
         },
       });
 

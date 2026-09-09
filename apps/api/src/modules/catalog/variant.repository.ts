@@ -3,6 +3,8 @@ import type { Prisma, ScopedTx } from '@flower/db';
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
+import { OutboxWriter } from '../../common/audit/outbox.writer.js';
+import { visibilityChanged } from './catalog-events.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { versionConflict } from './catalog-write.helpers.js';
 import { assertVariantHasNoIdentifiers } from './identifier.repository.js';
@@ -108,6 +110,7 @@ export class VariantRepository extends ScopedRepository {
   constructor(
     db: DbService,
     private readonly audit: AuditWriter,
+    private readonly outbox: OutboxWriter,
   ) {
     super(db);
   }
@@ -337,6 +340,22 @@ export class VariantRepository extends ScopedRepository {
         before: { status: current.status },
         after: { status: next },
       });
+      // task 3.10 — tenant-global invalidation signal, co-committed. Emitted
+      // only when consumer visibility changes (ACTIVE on one side) — owner D-5.
+      if (visibilityChanged(current.status, next)) {
+        await this.outbox.enqueue(tx, {
+          aggregateType: 'variant',
+          aggregateId: id,
+          eventType: 'catalog.variant.status_changed',
+          resourceVersion: current.version + 1,
+          payload: {
+            variantId: id,
+            productId: current.productId,
+            fromStatus: current.status,
+            toStatus: next,
+          },
+        });
+      }
       return this.getInTx(tx, id);
     });
   }

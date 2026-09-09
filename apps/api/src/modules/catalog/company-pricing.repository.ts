@@ -5,6 +5,8 @@ import { Quantity, type UomRegistry } from '@flower/uom';
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
+import { OutboxWriter } from '../../common/audit/outbox.writer.js';
+import { changedUomCodes } from './catalog-events.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { versionConflict } from './catalog-write.helpers.js';
 import { isBuiltinUom } from './uom.helpers.js';
@@ -65,6 +67,7 @@ export class CompanyPricingRepository extends ScopedRepository {
   constructor(
     db: DbService,
     private readonly audit: AuditWriter,
+    private readonly outbox: OutboxWriter,
   ) {
     super(db);
   }
@@ -350,6 +353,24 @@ export class CompanyPricingRepository extends ScopedRepository {
             variantId,
             count: normalized.length,
             prices: sellMapFromNormalized(normalized),
+          },
+        });
+
+        // task 3.10 — company-scoped realtime invalidation, co-committed in
+        // THIS transaction (owner D-1 / OUTBOX TRANSACTIONAL GUARANTEE).
+        // `company_id` set, `branch_id` null — the gateway delivers only to
+        // sockets whose session companyScope covers this company; branches of
+        // the company re-resolve their effective price on receipt. Bounded
+        // payload hint only — never a Money amount (owner D-6).
+        await this.outbox.enqueue(tx, {
+          aggregateType: 'company_variant_price_set',
+          aggregateId: aggId,
+          eventType: 'catalog.company.price_changed',
+          companyId,
+          resourceVersion: nextVersion,
+          payload: {
+            variantId,
+            changedUomCodes: changedUomCodes(beforeRows, normalized),
           },
         });
 

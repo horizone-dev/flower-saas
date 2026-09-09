@@ -475,6 +475,351 @@ describe('catalog capability configuration surface (task 3.1, integration)', () 
     const ownerB = await mintTenant('b2', tenantB, ['users:view']);
     expect((await req('GET', '/catalog/capabilities', ownerB)).statusCode).toBe(403);
   });
+
+  // ══ task 3.10 — POST /apply-business-type-template (re-apply) ══════════════
+  describe('task 3.10 — apply-business-type-template re-apply', () => {
+    let idemN = 0;
+    const ik = (): string => `t310-apply-${String(++idemN).padStart(4, '0')}`;
+
+    // Dedicated templates — no other test in this file touches these keys, so
+    // their versions / rows are deterministic (BAKERY_CAKE is bumped to v9 by an
+    // earlier test).
+    beforeAll(async () => {
+      await sql(`INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+                 VALUES ('T310_A', 1, 'A', 'x', 'ACTIVE', now()),
+                        ('T310_B', 3, 'B', 'x', 'ACTIVE', now()),
+                        ('T310_C', 1, 'C', 'x', 'ACTIVE', now())
+                 ON CONFLICT (key) DO NOTHING`);
+      await sql(`INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+                 VALUES ('T310_A','strategy.stocked',true,now()),
+                        ('T310_A','branch_pricing',true,now()),
+                        ('T310_A','channel.pos',true,now()),
+                        ('T310_B','strategy.stocked',true,now()),
+                        ('T310_B','strategy.bom',true,now()),
+                        ('T310_B','channel.pos',true,now()),
+                        ('T310_C','strategy.stocked',true,now()),
+                        ('T310_C','branch_pricing',true,now()),
+                        ('T310_C','channel.pos',true,now())
+                 ON CONFLICT ("templateKey","capabilityKey") DO NOTHING`);
+    });
+    const applyTemplate = (
+      tenantId: string,
+      body: { templateKey: string; mode?: 'merge' | 'replace' },
+      opts: { ifMatch?: string | null; idem?: string | null; tok?: string } = {},
+    ) =>
+      req(
+        'POST',
+        `/platform/tenants/${tenantId}/apply-business-type-template`,
+        opts.tok ?? superTok,
+        body,
+        {
+          ...(opts.ifMatch === null ? {} : { 'if-match': `"${opts.ifMatch ?? '1'}"` }),
+          ...(opts.idem === null ? {} : { 'idempotency-key': opts.idem ?? ik() }),
+        },
+      );
+    const capRows = (tenantId: string) =>
+      sql<{
+        capabilityKey: string;
+        enabled: boolean;
+        sourceKind: string;
+        sourceTemplateKey: string | null;
+        sourceTemplateVersion: number | null;
+        overriddenAt: string | null;
+      }>(
+        `SELECT "capabilityKey", enabled, "sourceKind", "sourceTemplateKey",
+                "sourceTemplateVersion", "overriddenAt"
+           FROM tenant_catalog_capability WHERE "tenantId" = $1 ORDER BY "capabilityKey"`,
+        [tenantId],
+      );
+    const tmplApplied = (tenantId: string) =>
+      sql<{ reason: string }>(
+        `SELECT reason FROM audit_log
+          WHERE "tenantId" = $1 AND action = 'catalog.template_applied'
+          ORDER BY "at" ASC`,
+        [tenantId],
+      );
+    const tenantMeta = (tenantId: string) =>
+      one<{ btk: string | null; bav: number | null; v: number }>(
+        `SELECT "businessTypeKey" AS btk, "businessTypeAppliedVersion" AS bav,
+                "catalogCapabilityVersion" AS v FROM tenant WHERE id = $1`,
+        [tenantId],
+      );
+
+    it('11/12/13 — Idempotency-Key AND If-Match both required; missing/stale If-Match are deterministic', async () => {
+      const t = await provision('t310-guards', 'T310_A');
+      // missing Idempotency-Key -> 400
+      const noIdem = await applyTemplate(
+        t,
+        { templateKey: 'T310_A' },
+        { idem: null, ifMatch: '1' },
+      );
+      expect(noIdem.statusCode).toBe(400);
+      expect((noIdem.json() as { error: { code: string } }).error.code).toBe(
+        'IDEMPOTENCY_KEY_MISSING',
+      );
+      // missing If-Match -> 428
+      const noIfMatch = await applyTemplate(t, { templateKey: 'T310_A' }, { ifMatch: null });
+      expect(noIfMatch.statusCode).toBe(428);
+      // stale If-Match -> 409, no write, no audit, version unchanged
+      const beforeAudit = (await tmplApplied(t)).length;
+      const stale = await applyTemplate(
+        t,
+        { templateKey: 'T310_A', mode: 'replace' },
+        { ifMatch: '999' },
+      );
+      expect(stale.statusCode).toBe(409);
+      expect((stale.json() as { error: { code: string } }).error.code).toBe(
+        'CATALOG_CAPABILITY_VERSION_CONFLICT',
+      );
+      expect((await tmplApplied(t)).length).toBe(beforeAudit);
+      expect((await tenantMeta(t)).v).toBe(1);
+    });
+
+    it('2/17/19 — merge of the SAME template at the same version is an EXACT no-op (no version bump, no audit, no outbox)', async () => {
+      const t = await provision('t310-noop', 'T310_A');
+      const v0 = (await tenantMeta(t)).v;
+      const auditBefore = (await tmplApplied(t)).length;
+      const outboxBefore = (
+        await sql<{ n: string }>(
+          `SELECT count(*)::text AS n FROM outbox WHERE "eventType" LIKE 'catalog.%'`,
+        )
+      )[0]!.n;
+      const r = await applyTemplate(
+        t,
+        { templateKey: 'T310_A', mode: 'merge' },
+        { ifMatch: String(v0) },
+      );
+      expect(r.statusCode, r.payload).toBe(200);
+      expect(r.headers['etag']).toBe(`"${v0}"`);
+      expect((await tenantMeta(t)).v).toBe(v0);
+      expect((await tmplApplied(t)).length).toBe(auditBefore);
+      expect(
+        (
+          await sql<{ n: string }>(
+            `SELECT count(*)::text AS n FROM outbox WHERE "eventType" LIKE 'catalog.%'`,
+          )
+        )[0]!.n,
+      ).toBe(outboxBefore);
+    });
+
+    it('3 — merge after a template VERSION bump refreshes TEMPLATE-provenance rows only, bumps once, one audit row', async () => {
+      const t = await provision('t310-refresh', 'T310_C');
+      // diverge one row manually so it becomes MANUAL
+      await capsPATCH(t, String((await tenantMeta(t)).v), [
+        { capabilityKey: 'channel.pos', enabled: false },
+      ]);
+      const vAfterPatch = (await tenantMeta(t)).v;
+      // curator bumps CUSTOM v1 -> v2 and flips branch_pricing off + adds delivery
+      await sql(`UPDATE business_type_template SET version = 2 WHERE key = 'T310_C'`);
+      await sql(
+        `UPDATE business_type_template_capability SET enabled = false
+          WHERE "templateKey" = 'T310_C' AND "capabilityKey" = 'branch_pricing'`,
+      );
+      await sql(
+        `INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+         VALUES ('T310_C','delivery',true, now())
+         ON CONFLICT ("templateKey","capabilityKey") DO NOTHING`,
+      );
+      const auditBefore = (await tmplApplied(t)).length;
+      const r = await applyTemplate(
+        t,
+        { templateKey: 'T310_C', mode: 'merge' },
+        { ifMatch: String(vAfterPatch) },
+      );
+      expect(r.statusCode, r.payload).toBe(200);
+      expect((await tenantMeta(t)).v).toBe(vAfterPatch + 1); // +1 exactly
+      expect((await tmplApplied(t)).length).toBe(auditBefore + 1);
+
+      const rows = new Map((await capRows(t)).map((x) => [x.capabilityKey, x]));
+      // MANUAL row untouched (still disabled, still MANUAL)
+      expect(rows.get('channel.pos')).toMatchObject({ enabled: false, sourceKind: 'MANUAL' });
+      // TEMPLATE rows refreshed to v2 values
+      expect(rows.get('branch_pricing')).toMatchObject({
+        enabled: false,
+        sourceKind: 'TEMPLATE',
+        sourceTemplateVersion: 2,
+      });
+      expect(rows.get('delivery')).toMatchObject({ enabled: true, sourceKind: 'TEMPLATE' });
+      // audit reason carries the template keys + versions (owner D-4)
+      const reason = JSON.parse((await tmplApplied(t)).at(-1)!.reason) as Record<string, unknown>;
+      expect(reason).toMatchObject({
+        mode: 'merge',
+        fromTemplateKey: 'T310_C',
+        toTemplateKey: 'T310_C',
+        toTemplateVersion: 2,
+      });
+      expect(reason['changedCapabilityKeys']).toEqual(
+        expect.arrayContaining(['branch_pricing', 'delivery']),
+      );
+      expect(reason['changedCapabilityKeys']).not.toContain('channel.pos');
+    });
+
+    it('5/6 — replace overwrites a diverged MANUAL row + resets it to TEMPLATE provenance, clears overriddenAt', async () => {
+      const t = await provision('t310-replace', 'T310_A');
+      await capsPATCH(t, String((await tenantMeta(t)).v), [
+        { capabilityKey: 'channel.pos', enabled: false },
+      ]);
+      const before = new Map((await capRows(t)).map((x) => [x.capabilityKey, x]));
+      expect(before.get('channel.pos')).toMatchObject({ sourceKind: 'MANUAL' });
+      expect(before.get('channel.pos')!.overriddenAt).not.toBeNull();
+
+      const v = (await tenantMeta(t)).v;
+      const r = await applyTemplate(
+        t,
+        { templateKey: 'T310_A', mode: 'replace' },
+        { ifMatch: String(v) },
+      );
+      expect(r.statusCode, r.payload).toBe(200);
+      const after = new Map((await capRows(t)).map((x) => [x.capabilityKey, x]));
+      expect(after.get('channel.pos')).toMatchObject({
+        enabled: true, // back to the template value
+        sourceKind: 'TEMPLATE',
+        overriddenAt: null,
+      });
+    });
+
+    it('7 — neither mode deletes a capability key absent from the target template', async () => {
+      const t = await provision('t310-nodelete', 'T310_A');
+      // give the tenant a MANUAL key not in ANY template
+      await capsPATCH(t, String((await tenantMeta(t)).v), [
+        { capabilityKey: 'inventory.expiry', enabled: true },
+      ]);
+      const v = (await tenantMeta(t)).v;
+      await applyTemplate(t, { templateKey: 'T310_A', mode: 'replace' }, { ifMatch: String(v) });
+      const rows = await capRows(t);
+      expect(rows.map((x) => x.capabilityKey)).toContain('inventory.expiry');
+    });
+
+    it('8/9/10 — a DIFFERENT templateKey is allowed and re-stamps tenant.businessTypeKey; audit records from/to keys', async () => {
+      const t = await provision('t310-switch', 'T310_A');
+      expect((await tenantMeta(t)).btk).toBe('T310_A');
+      const v = (await tenantMeta(t)).v;
+      const r = await applyTemplate(
+        t,
+        { templateKey: 'T310_B', mode: 'merge' },
+        { ifMatch: String(v) },
+      );
+      expect(r.statusCode, r.payload).toBe(200);
+      const meta = await tenantMeta(t);
+      expect(meta.btk).toBe('T310_B');
+      expect(meta.bav).toBe(3); // T310_B seed version
+      expect(meta.v).toBe(v + 1);
+      // T310_A-only keys (branch_pricing) are NOT deleted — additive
+      const rows = (await capRows(t)).map((x) => x.capabilityKey);
+      expect(rows).toContain('branch_pricing');
+      expect(rows).toContain('strategy.bom'); // added by T310_B
+      const reason = JSON.parse((await tmplApplied(t)).at(-1)!.reason) as Record<string, unknown>;
+      expect(reason).toMatchObject({
+        fromTemplateKey: 'T310_A',
+        fromTemplateVersion: 1,
+        toTemplateKey: 'T310_B',
+        toTemplateVersion: 3,
+      });
+    });
+
+    it('16 — an exact idempotent replay (same key) does NOT re-execute: no second version bump, no second audit row', async () => {
+      const t = await provision('t310-idem', 'T310_A');
+      const key = ik();
+      const v = (await tenantMeta(t)).v;
+      const r1 = await applyTemplate(
+        t,
+        { templateKey: 'T310_B', mode: 'merge' },
+        { ifMatch: String(v), idem: key },
+      );
+      expect(r1.statusCode, r1.payload).toBe(200);
+      const vAfter = (await tenantMeta(t)).v;
+      const auditAfter = (await tmplApplied(t)).length;
+      const r2 = await applyTemplate(
+        t,
+        { templateKey: 'T310_B', mode: 'merge' },
+        { ifMatch: String(v), idem: key },
+      );
+      expect(r2.statusCode).toBe(200);
+      expect(r2.json()).toEqual(r1.json()); // replayed response
+      expect((await tenantMeta(t)).v).toBe(vAfter);
+      expect((await tmplApplied(t)).length).toBe(auditAfter);
+    });
+
+    it('20/21 — requires platform:catalog_capability:manage + fresh step-up; a tenant Owner cannot reach it', async () => {
+      const t = await provision('t310-authz', 'T310_A');
+      const noStepUp = await mintPlatform('t310-nsu', false, [...PLATFORM_PERMISSIONS]);
+      const r1 = await applyTemplate(t, { templateKey: 'T310_A' }, { tok: noStepUp, ifMatch: '1' });
+      expect(r1.statusCode).toBe(403);
+      const weak = await mintPlatform('t310-weak', true, ['platform:tenants:view']);
+      const r2 = await applyTemplate(t, { templateKey: 'T310_A' }, { tok: weak, ifMatch: '1' });
+      expect(r2.statusCode).toBe(403);
+      const owner = await mintTenant('t310-owner', t, ['catalog:view']);
+      const r3 = await applyTemplate(t, { templateKey: 'T310_A' }, { tok: owner, ifMatch: '1' });
+      expect([401, 403]).toContain(r3.statusCode);
+    });
+
+    it('1 — a DEPRECATED / unknown template is rejected 422; no partial write', async () => {
+      const t = await provision('t310-badtmpl', 'T310_A');
+      await sql(`INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+                 VALUES ('T310_DEP', 1, 'x', 'x', 'DEPRECATED', now()) ON CONFLICT (key) DO NOTHING`);
+      const v = (await tenantMeta(t)).v;
+      const dep = await applyTemplate(t, { templateKey: 'T310_DEP' }, { ifMatch: String(v) });
+      expect(dep.statusCode).toBe(422);
+      expect((dep.json() as { error: { code: string } }).error.code).toBe(
+        'BUSINESS_TYPE_NOT_ACTIVE',
+      );
+      const unk = await applyTemplate(t, { templateKey: 'NOPE_NOT_REAL' }, { ifMatch: String(v) });
+      expect(unk.statusCode).toBe(422);
+      expect((unk.json() as { error: { code: string } }).error.code).toBe('UNKNOWN_BUSINESS_TYPE');
+      expect((await tenantMeta(t)).v).toBe(v); // unchanged
+    });
+
+    it('14 — a concurrent PATCH vs re-apply serialises (no lost update)', async () => {
+      const t = await provision('t310-concur', 'T310_A');
+      const v = (await tenantMeta(t)).v;
+      const [a, b] = await Promise.all([
+        applyTemplate(t, { templateKey: 'T310_B', mode: 'merge' }, { ifMatch: String(v) }),
+        capsPATCH(t, String(v), [{ capabilityKey: 'multi_uom', enabled: true }]),
+      ]);
+      const codes = [a.statusCode, b.statusCode].sort();
+      // one wins (200), the other sees the bumped version (409)
+      expect(codes).toEqual([200, 409]);
+      expect((await tenantMeta(t)).v).toBe(v + 1);
+    });
+
+    it('19 — a re-apply writes ZERO catalog outbox rows (owner D-2)', async () => {
+      const t = await provision('t310-noevent', 'T310_A');
+      const before = (
+        await sql<{ n: string }>(
+          `SELECT count(*)::text AS n FROM outbox WHERE "eventType" LIKE 'catalog.%'`,
+        )
+      )[0]!.n;
+      await applyTemplate(
+        t,
+        { templateKey: 'T310_B', mode: 'replace' },
+        {
+          ifMatch: String((await tenantMeta(t)).v),
+        },
+      );
+      expect(
+        (
+          await sql<{ n: string }>(
+            `SELECT count(*)::text AS n FROM outbox WHERE "eventType" LIKE 'catalog.%'`,
+          )
+        )[0]!.n,
+      ).toBe(before);
+    });
+
+    it('25 — no catalog-entity seed table / template_payload exists (owner D-7)', async () => {
+      const tables = await sql<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name LIKE 'business_type_template%'`,
+      );
+      expect(tables.map((r) => r.table_name).sort()).toEqual([
+        'business_type_template',
+        'business_type_template_capability',
+      ]);
+      const cols = await sql<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'business_type_template'`,
+      );
+      expect(cols.map((c) => c.column_name)).not.toContain('template_payload');
+    });
+  });
 });
 
 async function seed(url: string): Promise<void> {

@@ -4,6 +4,7 @@ import { buildEnvelope, streamKey, ENVELOPE_FIELD, type OutboxRow } from './enve
 const baseRow = (over: Partial<OutboxRow> = {}): OutboxRow => ({
   id: '01930000-0000-7000-8000-000000000001',
   tenantId: 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa',
+  companyId: null,
   branchId: null,
   aggregateType: 'tenant',
   aggregateId: 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa',
@@ -23,6 +24,7 @@ describe('buildEnvelope', () => {
       event_id: '01930000-0000-7000-8000-000000000001',
       seq: '3',
       tenant_id: 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa',
+      company_id: null,
       branch_id: null,
       type: 'tenant.provisioned',
       resource_type: 'tenant',
@@ -33,14 +35,16 @@ describe('buildEnvelope', () => {
     });
   });
 
-  it('carries branch_id / resource_version / actor_summary when the row has them', () => {
+  it('carries company_id / branch_id / resource_version / actor_summary when the row has them', () => {
     const env = buildEnvelope(
       baseRow({
+        companyId: 'cccccccc-cccc-7ccc-8ccc-cccccccccccc',
         branchId: 'bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb',
         resourceVersion: 42n,
         actorSummary: { userId: 'u1', accountType: 'OWNER' },
       }),
     );
+    expect(env.company_id).toBe('cccccccc-cccc-7ccc-8ccc-cccccccccccc');
     expect(env.branch_id).toBe('bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb');
     expect(env.resource_version).toBe('42');
     expect(env.actor_summary).toEqual({ userId: 'u1', accountType: 'OWNER' });
@@ -54,6 +58,7 @@ describe('buildEnvelope', () => {
       [
         'actor_summary',
         'branch_id',
+        'company_id',
         'event_id',
         'occurred_at',
         'resource_id',

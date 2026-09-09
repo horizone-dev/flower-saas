@@ -76,7 +76,7 @@ export async function publishNextForTenant(
     if (!lock[0]?.acquired) return 'not-leader';
 
     const rows = await tx.$queryRawUnsafe<OutboxRow[]>(
-      `SELECT id, "tenantId", "branchId", "aggregateType", "aggregateId", "eventType",
+      `SELECT id, "tenantId", "companyId", "branchId", "aggregateType", "aggregateId", "eventType",
               "resourceVersion", "actorSummary", "createdAt", seq, attempts
          FROM outbox
         WHERE "tenantId" = $1::uuid AND seq IS NOT NULL AND "dispatchedAt" IS NULL

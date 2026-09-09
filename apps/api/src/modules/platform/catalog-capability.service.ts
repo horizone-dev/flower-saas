@@ -1,9 +1,12 @@
 import { Injectable } from '@nestjs/common';
+import type { Redis } from 'ioredis';
 import {
   CATALOG_CAPABILITY_KEYS,
   CAPABILITY_REQUIRED_ENTITLEMENT,
   type CapabilityKey,
+  type TemplateApplyMode,
 } from '@flower/shared-types';
+import { RedisService } from '../../common/redis/redis.module.js';
 import {
   PlatformCatalogCapabilityRepository,
   type CapabilityChange,
@@ -37,7 +40,12 @@ export class PlatformCatalogCapabilityService {
   constructor(
     private readonly repo: PlatformCatalogCapabilityRepository,
     private readonly tenantConfig: TenantConfigRepository,
+    private readonly redis: RedisService,
   ) {}
+
+  private get client(): Redis | null {
+    return this.redis.get();
+  }
 
   async listTemplates(): Promise<{
     data: {
@@ -83,6 +91,47 @@ export class PlatformCatalogCapabilityService {
   }): Promise<TenantCapabilityView> {
     const state = await this.repo.patch(input);
     return this.shape(state, await this.entitledModules(input.tenantId));
+  }
+
+  /**
+   * Task 3.10 — explicit Super-Admin re-apply of a Business-Type CAPABILITY
+   * preset (`merge` / `replace`). Two independent guards (owner D-3):
+   *   - `Idempotency-Key` — protects duplicate transport/request execution: a
+   *     replayed key returns the stored response WITHOUT re-executing (Redis
+   *     guard, 24h TTL, the same pattern as tenant provisioning). Best-effort
+   *     when Redis is down.
+   *   - `If-Match` on `catalogCapabilityVersion` — the hard guard against stale
+   *     operator intent / a lost update vs a concurrent `PATCH` or re-apply
+   *     (`428` missing, `409` stale — enforced in the repo, in the tenant-lock
+   *     transaction).
+   * `templateKey` MAY differ from the tenant's current `businessTypeKey` (owner
+   * D-4). Emits NO outbox event (owner D-2).
+   */
+  async reapply(input: {
+    tenantId: string;
+    templateKey: string;
+    mode: TemplateApplyMode;
+    expectedVersion: number | null;
+    idempotencyKey: string;
+    actorPlatformUserId: string | null;
+  }): Promise<TenantCapabilityView> {
+    const idemKey = `idem:template-apply:${input.tenantId}:${input.idempotencyKey}`;
+    const cached = await this.client?.get(idemKey).catch(() => null);
+    if (cached) return JSON.parse(cached) as TenantCapabilityView;
+
+    const state = await this.repo.reapply({
+      tenantId: input.tenantId,
+      templateKey: input.templateKey,
+      mode: input.mode,
+      expectedVersion: input.expectedVersion,
+      actorPlatformUserId: input.actorPlatformUserId,
+    });
+    const view = this.shape(state, await this.entitledModules(input.tenantId));
+
+    await this.client
+      ?.set(idemKey, JSON.stringify(view), 'EX', 60 * 60 * 24)
+      .catch(() => undefined);
+    return view;
   }
 
   private async entitledModules(tenantId: string): Promise<ReadonlySet<string>> {

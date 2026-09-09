@@ -4,6 +4,8 @@ import { type FulfilmentStrategy, usesFixedVariants } from '@flower/shared-types
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
+import { OutboxWriter } from '../../common/audit/outbox.writer.js';
+import { visibilityChanged } from './catalog-events.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { resolveSlug, SLUG_MAX, versionConflict } from './catalog-write.helpers.js';
 import { requiredAttributeGap } from './attribute-definition.repository.js';
@@ -136,6 +138,7 @@ export class ProductRepository extends ScopedRepository {
   constructor(
     db: DbService,
     private readonly audit: AuditWriter,
+    private readonly outbox: OutboxWriter,
   ) {
     super(db);
   }
@@ -374,6 +377,19 @@ export class ProductRepository extends ScopedRepository {
         before: { status: current.status },
         after: { status: next },
       });
+      // task 3.10 — a coarse tenant-global invalidation signal, co-committed
+      // with the mutation + audit. Emitted only when the transition CHANGES
+      // CONSUMER VISIBILITY (ACTIVE on one side) — owner D-5. DRAFT↔ARCHIVED is
+      // not visible either way, so no event.
+      if (visibilityChanged(current.status, next)) {
+        await this.outbox.enqueue(tx, {
+          aggregateType: 'product',
+          aggregateId: id,
+          eventType: 'catalog.product.status_changed',
+          resourceVersion: updated.version,
+          payload: { productId: id, fromStatus: current.status, toStatus: next },
+        });
+      }
       return updated;
     });
   }

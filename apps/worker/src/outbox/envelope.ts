@@ -11,6 +11,10 @@ export interface OutboxEnvelope {
   /** stringified — BigInt has no safe JSON representation */
   readonly seq: string;
   readonly tenant_id: string;
+  /** ADR-0017 §3 (additive Phase-3 amendment / task 3.10) — set for a
+   *  company-scoped OR branch-scoped event; `null` for a tenant-global one. The
+   *  gateway authorises CUMULATIVELY with tenant_id + branch_id. */
+  readonly company_id: string | null;
   readonly branch_id: string | null;
   readonly type: string;
   readonly resource_type: string;
@@ -24,6 +28,7 @@ export interface OutboxEnvelope {
 export interface OutboxRow {
   readonly id: string;
   readonly tenantId: string | null;
+  readonly companyId: string | null;
   readonly branchId: string | null;
   readonly aggregateType: string;
   readonly aggregateId: string;
@@ -53,6 +58,7 @@ export function buildEnvelope(row: OutboxRow): OutboxEnvelope {
     event_id: row.id,
     seq: row.seq.toString(),
     tenant_id: row.tenantId,
+    company_id: row.companyId,
     branch_id: row.branchId,
     type: row.eventType,
     resource_type: row.aggregateType,

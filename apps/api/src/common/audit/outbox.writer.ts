@@ -10,6 +10,15 @@ export interface OutboxEventInput {
   eventType: string;
   payload: Record<string, unknown>;
   tenantId?: string | null;
+  /** ADR-0017 §3 envelope scope — set by the trusted domain producer for a
+   *  company-scoped event (task 3.10). A branch-scoped event carries BOTH
+   *  companyId + branchId (defence in depth). Never a client value. */
+  companyId?: string | null;
+  /** ADR-0017 §3 envelope scope — set for a branch-scoped event. */
+  branchId?: string | null;
+  /** ADR-0017 §3 `resource_version` — the aggregate version AFTER the mutation;
+   *  gates payload/refetch client-side, never authoritative business state. */
+  resourceVersion?: bigint | number | null;
 }
 
 /**
@@ -27,10 +36,15 @@ export class OutboxWriter {
     await tx.outbox.create({
       data: {
         tenantId: input.tenantId ?? ctx?.tenantId ?? null,
+        companyId: input.companyId ?? null,
+        branchId: input.branchId ?? null,
         aggregateType: input.aggregateType,
         aggregateId: input.aggregateId,
         eventType: input.eventType,
         payload: input.payload as Prisma.InputJsonValue,
+        ...(input.resourceVersion != null
+          ? { resourceVersion: BigInt(input.resourceVersion) }
+          : {}),
         dispatchedAt: null,
       },
     });

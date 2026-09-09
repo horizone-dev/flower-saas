@@ -16,6 +16,7 @@ import { TenantController } from './tenant.controller.js';
 import { AuditController } from './audit.controller.js';
 import {
   BusinessTypeTemplateController,
+  PlatformTenantApplyTemplateController,
   PlatformTenantCatalogCapabilityController,
 } from './catalog-capability.controller.js';
 
@@ -45,6 +46,7 @@ import {
     AuditController,
     BusinessTypeTemplateController,
     PlatformTenantCatalogCapabilityController,
+    PlatformTenantApplyTemplateController,
   ],
   exports: [
     PlanRepository,

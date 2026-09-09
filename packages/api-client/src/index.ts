@@ -884,6 +884,34 @@ export class ApiClient {
       (raw) => raw as TenantCatalogCapabilityState,
     );
   }
+  /**
+   * Task 3.10 — `POST /v1/platform/tenants/:tenantId/apply-business-type-template`.
+   * An explicit Super-Admin re-apply of a Business-Type CAPABILITY preset
+   * (`merge` / `replace`). `templateKey` MAY differ from the tenant's current
+   * business type. BOTH `Idempotency-Key` and `If-Match` (the `aggregateVersion`
+   * from the last read) are **required** — a stale `If-Match` throws `ApiError`
+   * 409 `CATALOG_CAPABILITY_VERSION_CONFLICT`; a missing one → 428. Applies NO
+   * catalog entities, prices, or inventory; emits NO realtime event.
+   */
+  applyBusinessTypeTemplate(
+    tenantId: string,
+    templateKey: string,
+    expectedVersion: number,
+    idempotencyKey: string,
+    mode: 'merge' | 'replace' = 'merge',
+  ): Promise<TenantCatalogCapabilityState> {
+    return this.call<TenantCatalogCapabilityState>(
+      `/v1/platform/tenants/${tenantId}/apply-business-type-template`,
+      {
+        method: 'POST',
+        body: { templateKey, mode },
+        ifMatch: `"${expectedVersion}"`,
+        idempotencyKey,
+      },
+      (raw) => raw as TenantCatalogCapabilityState,
+    );
+  }
+
   // ── generic catalog core (task 3.2) — tenant realm ───────────────────────
   // `catalog:view` reads / `catalog:manage` writes. POST → Idempotency-Key;
   // PUT / DELETE → If-Match; activate / archive → BOTH.

@@ -973,6 +973,82 @@ describe('variants + option groups (task 3.4, integration)', () => {
     // tenantA = CUSTOM, tenantC = BAKERY_CAKE
     expect(await build(ownerA)).toEqual(await build(ownerC));
   });
+
+  // ══ task 3.10 — variant status_changed outbox events (owner D-5) ═══════════
+  describe('task 3.10 — variant status_changed outbox events', () => {
+    const variantEvents = (variantId: string) =>
+      sql<{
+        companyId: string | null;
+        branchId: string | null;
+        resourceVersion: string | null;
+        payload: Record<string, unknown>;
+      }>(
+        `SELECT "companyId","branchId","resourceVersion"::text AS "resourceVersion", payload
+           FROM outbox
+          WHERE "eventType" = 'catalog.variant.status_changed' AND "aggregateId" = $1
+          ORDER BY "createdAt" ASC`,
+        [variantId],
+      );
+
+    it('32/33/34 — DRAFT→ACTIVE, ACTIVE→ARCHIVED, ARCHIVED→ACTIVE each emit a tenant-global variant event (company_id null, branch_id null, productId in payload)', async () => {
+      const cat = await makeCategory(ownerA, 't310v-cat');
+      const p = await makeProduct(ownerA, cat, 't310v-p', 'STOCKED');
+      // activate the product first (owner L-9)
+      await req('POST', `/catalog/products/${p.id}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${p.version}"`,
+      });
+      const vs = await listVariants(ownerA, p.id);
+      const vid = vs[0]!.id;
+
+      const a = await activateVariant(ownerA, vid); // DRAFT → ACTIVE
+      const v1 = (a.json() as { version: number }).version;
+      const ar = await req('POST', `/catalog/variants/${vid}/archive`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${v1}"`,
+      });
+      const v2 = (ar.json() as { version: number }).version;
+      const re = await req('POST', `/catalog/variants/${vid}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${v2}"`,
+      });
+      expect(re.statusCode, re.payload).toBe(200);
+
+      const events = await variantEvents(vid);
+      expect(events).toHaveLength(3);
+      expect(events.map((e) => [e.payload['fromStatus'], e.payload['toStatus']])).toEqual([
+        ['DRAFT', 'ACTIVE'],
+        ['ACTIVE', 'ARCHIVED'],
+        ['ARCHIVED', 'ACTIVE'],
+      ]);
+      for (const e of events) {
+        expect(e.companyId).toBeNull();
+        expect(e.branchId).toBeNull();
+        expect(e.payload['variantId']).toBe(vid);
+        expect(e.payload['productId']).toBe(p.id);
+        expect(Number(e.resourceVersion)).toBeGreaterThan(0);
+      }
+    });
+
+    it('a no-op variant activate + a base-UOM edit emit NO variant status event', async () => {
+      const cat = await makeCategory(ownerA, 't310v2-cat');
+      const p = await makeProduct(ownerA, cat, 't310v2-p', 'STOCKED');
+      await req('POST', `/catalog/products/${p.id}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${p.version}"`,
+      });
+      const vid = (await listVariants(ownerA, p.id))[0]!.id;
+      const a = await activateVariant(ownerA, vid);
+      const v1 = (a.json() as { version: number }).version;
+      const before = (await variantEvents(vid)).length;
+      // no-op activate (already ACTIVE)
+      await req('POST', `/catalog/variants/${vid}/activate`, ownerA, undefined, {
+        'idempotency-key': ik(),
+        'if-match': `"${v1}"`,
+      });
+      expect((await variantEvents(vid)).length).toBe(before);
+    });
+  });
 });
 
 async function seed(url: string): Promise<void> {

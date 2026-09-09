@@ -584,14 +584,34 @@ key:
 
 ---
 
-## J. Future re-apply merge / replace contract (Task 3.10)
+## J. Re-apply merge / replace contract (implemented in Task 3.10)
 
-**Not implemented in Task 3.1.** Locked here so Task 3.10 has no ambiguity and so
-§H's provenance columns are designed correctly now.
+**Not implemented in Task 3.1.** Locked here so §H's provenance columns were
+designed correctly. **IMPLEMENTED in Task 3.10** (owner approval 2026-09-09) with
+these owner refinements on top of the semantics below:
 
-Route (Task 3.10): `POST /v1/platform/tenants/:tenantId/apply-business-type-template`
-— `platform:catalog_capability:manage` + step-up + `Idempotency-Key`
-(`catalog.template.apply`). Body: `{ templateKey, mode: 'merge' | 'replace' }`.
+- **D-3 — BOTH guards.** `Idempotency-Key` **and** `If-Match: "<catalogCapabilityVersion>"`
+  are **required** (they solve different problems — transport replay vs stale
+  operator intent, which matters most for `replace`). Missing `If-Match` → `428`;
+  stale → `409 CATALOG_CAPABILITY_VERSION_CONFLICT` with no partial write / no
+  audit row. The `Idempotency-Key` is a Redis-guard (24h) that replays the stored
+  response without re-executing.
+- **D-4 — `templateKey` MAY differ** from the tenant's current `businessTypeKey`.
+  A successful logical apply re-stamps `businessTypeKey` / `businessTypeAppliedVersion`
+  / `businessTypeAppliedAt` — a metadata primary-preset change ONLY; it never
+  deletes/transforms a catalog entity, price, or capability key absent from the
+  target. The audit `reason` records `{ mode, fromTemplateKey, fromTemplateVersion,
+toTemplateKey, toTemplateVersion, changedCapabilityKeys }` (versions are not
+  globally unique across template keys, so the keys are recorded too).
+- **D-2 — NO outbox / realtime** for a re-apply.
+- **D-7 — capability rows ONLY.** No `business_type_template_category` / `_attribute`
+  / `_uom` / `template_payload`. Never a runtime discriminator (D0-3).
+
+Route: `POST /v1/platform/tenants/:tenantId/apply-business-type-template`
+— `platform:catalog_capability:manage` + fresh step-up + `Idempotency-Key`
+
+- `If-Match`. Body: `{ templateKey, mode?: 'merge' | 'replace' }` (`mode` default
+  `merge`).
 
 | Mode              | Semantics                                                                                                                                                                                                                                                                                                                                                    |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

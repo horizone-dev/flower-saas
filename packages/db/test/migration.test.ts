@@ -105,7 +105,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_catalog_uom'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_company_pricing'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_branch_pricing'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_tax_category$/);
+    expect(names.some((n) => n.endsWith('_catalog_tax_category'))).toBe(true);
+    expect(names.at(-1)).toMatch(/_catalog_realtime_company_scope$/);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -2899,13 +2900,12 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
 
     beforeAll(seedCurrencies);
 
-    it('records the migration (task 3.9 is now the last one)', async () => {
+    it('records the company-pricing migration', async () => {
       const { rows } = await pool.query<{ migration_name: string }>(
         `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
       );
       const names = rows.map((r) => r.migration_name);
       expect(names.some((n) => n.endsWith('_catalog_company_pricing'))).toBe(true);
-      expect(names.at(-1)).toMatch(/_catalog_tax_category$/);
     });
 
     it('creates exactly company_variant_price_set / company_variant_uom_price — no discount / list-price / tax / effective-date / branch / stock column', async () => {
@@ -3610,15 +3610,11 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       return { product, variant };
     };
 
-    it('exactly ONE new task 3.9 migration; it is the last one', async () => {
+    it('exactly ONE task 3.9 migration', async () => {
       const { rows } = await pool.query<{ migration_name: string }>(
         `SELECT migration_name FROM _prisma_migrations WHERE migration_name LIKE '%catalog_tax_category%'`,
       );
       expect(rows).toHaveLength(1);
-      const all = await pool.query<{ migration_name: string }>(
-        `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
-      );
-      expect(all.rows.at(-1)!.migration_name).toMatch(/_catalog_tax_category$/);
     });
 
     it('adds NO new table (existing tax_category is reused as-is)', async () => {
@@ -3709,6 +3705,74 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
           expect(cols, `${t}.${bad}`).not.toContain(bad);
         }
       }
+    });
+  });
+
+  // ── task 3.10 — catalog realtime company scope (additive outbox column only) ─
+  describe('catalog realtime company scope (task 3.10)', () => {
+    it('exactly ONE task 3.10 migration; it is the last one', async () => {
+      const { rows } = await pool.query<{ migration_name: string }>(
+        `SELECT migration_name FROM _prisma_migrations WHERE migration_name LIKE '%catalog_realtime_company_scope%'`,
+      );
+      expect(rows).toHaveLength(1);
+      const all = await pool.query<{ migration_name: string }>(
+        `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
+      );
+      expect(all.rows.at(-1)!.migration_name).toMatch(/_catalog_realtime_company_scope$/);
+    });
+
+    it('outbox.companyId: additive, NULLABLE, uuid, propagated to the default partition', async () => {
+      const parent = await pool.query<{ is_nullable: string; data_type: string }>(
+        `SELECT is_nullable, data_type FROM information_schema.columns
+          WHERE table_name = 'outbox' AND column_name = 'companyId'`,
+      );
+      expect(parent.rows).toHaveLength(1);
+      expect(parent.rows[0]!.is_nullable).toBe('YES');
+      expect(parent.rows[0]!.data_type).toBe('uuid');
+      const partition = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'outbox_default' AND column_name = 'companyId'`,
+      );
+      expect(partition.rowCount).toBe(1);
+    });
+
+    it('the task-3.10 migration adds NO new table and NO FK on outbox.companyId', async () => {
+      const tables = await pool.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name LIKE 'business_type_template%'`,
+      );
+      expect(tables.rows.map((r) => r.table_name).sort()).toEqual([
+        'business_type_template',
+        'business_type_template_capability',
+      ]);
+      const fk = await pool.query(
+        `SELECT 1 FROM information_schema.key_column_usage k
+           JOIN information_schema.table_constraints c USING (constraint_name)
+          WHERE k.table_name IN ('outbox', 'outbox_default')
+            AND k.column_name = 'companyId' AND c.constraint_type = 'FOREIGN KEY'`,
+      );
+      expect(fk.rowCount).toBe(0);
+      // NO template_payload / catalog-template columns anywhere (owner D-7)
+      const payload = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'business_type_template' AND column_name = 'template_payload'`,
+      );
+      expect(payload.rowCount).toBe(0);
+    });
+
+    it('outbox RLS policy is UNCHANGED by task 3.10 — still tenantId-based, no companyId in the predicate', async () => {
+      const rls = await pool.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+        `SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'outbox'`,
+      );
+      expect(rls.rows[0]?.relrowsecurity).toBe(true);
+      expect(rls.rows[0]?.relforcerowsecurity).toBe(true);
+      const pol = await pool.query<{ qual: string; with_check: string }>(
+        `SELECT qual, with_check FROM pg_policies WHERE tablename = 'outbox'`,
+      );
+      expect(pol.rows).toHaveLength(1);
+      expect(pol.rows[0]!.qual).toContain('app.tenant_id');
+      expect(pol.rows[0]!.qual).not.toContain('company');
+      expect(pol.rows[0]!.with_check).not.toContain('company');
     });
   });
 

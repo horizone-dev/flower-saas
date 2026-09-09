@@ -480,3 +480,40 @@ describe('@flower/shared-types — catalog tax-category + rate resolution (task 
     expect(m['computeTax']).toBeUndefined();
   });
 });
+
+describe('@flower/shared-types — catalog events + template re-apply (task 3.10)', () => {
+  it('CATALOG_EVENT_TYPES is exactly the 5 coarse resource-oriented types (owner D-2)', async () => {
+    const m = await import('./index.js');
+    expect([...m.CATALOG_EVENT_TYPES]).toEqual([
+      'catalog.company.price_changed',
+      'catalog.branch.price_changed',
+      'catalog.branch.availability_changed',
+      'catalog.product.status_changed',
+      'catalog.variant.status_changed',
+    ]);
+    // NOT field-level: no `catalog.variant.price.changed` etc.
+    for (const t of m.CATALOG_EVENT_TYPES) {
+      expect(t.split('.').length).toBeLessThanOrEqual(3);
+    }
+    // NOT one per audit action — category / attribute / uom / identifier / tax
+    // mutations are absent
+    const blob = JSON.stringify(m.CATALOG_EVENT_TYPES);
+    for (const bad of ['category', 'attribute', 'identifier', 'uom', 'tax', 'template']) {
+      expect(blob).not.toContain(bad);
+    }
+  });
+
+  it('applyBusinessTypeTemplateSchema: strict, mode defaults to merge, closed enum', async () => {
+    const m = await import('./index.js');
+    const s = m.applyBusinessTypeTemplateSchema;
+    expect(s.parse({ templateKey: 'BAKERY_CAKE' })).toEqual({
+      templateKey: 'BAKERY_CAKE',
+      mode: 'merge',
+    });
+    expect(s.parse({ templateKey: 'X', mode: 'replace' }).mode).toBe('replace');
+    expect(s.safeParse({ templateKey: 'X', mode: 'wipe' }).success).toBe(false);
+    expect(s.safeParse({ mode: 'merge' }).success).toBe(false); // templateKey required
+    expect(s.safeParse({ templateKey: 'X', extra: 1 }).success).toBe(false); // strict
+    expect([...m.TEMPLATE_APPLY_MODES]).toEqual(['merge', 'replace']);
+  });
+});

@@ -980,6 +980,103 @@ describe('generic catalog core (task 3.2, integration)', () => {
       expect(cols.map((c) => c.column_name)).not.toContain('fulfilmentStrategy');
     });
   });
+
+  // ══ task 3.10 — product/variant status realtime events (owner D-5) ═════════
+  describe('task 3.10 — product status_changed outbox events', () => {
+    const statusEvents = (aggregateId: string) =>
+      sql<{
+        companyId: string | null;
+        branchId: string | null;
+        resourceVersion: string | null;
+        payload: Record<string, unknown>;
+      }>(
+        `SELECT "companyId","branchId","resourceVersion"::text AS "resourceVersion", payload
+           FROM outbox
+          WHERE "eventType" = 'catalog.product.status_changed' AND "aggregateId" = $1
+          ORDER BY "createdAt" ASC`,
+        [aggregateId],
+      );
+    const mkDraftProduct = async (slug: string): Promise<{ id: string; version: number }> => {
+      const cat = await makeCategory(ownerA, `${slug}-c`);
+      const p = await req(
+        'POST',
+        '/catalog/products',
+        ownerA,
+        { categoryId: cat.id, nameEn: slug, slug: `${slug}-p`, fulfilmentStrategy: 'STOCKED' },
+        { 'idempotency-key': `t310-${slug}` },
+      );
+      expect(p.statusCode, p.payload).toBe(201);
+      return {
+        id: (p.json() as { id: string }).id,
+        version: (p.json() as { version: number }).version,
+      };
+    };
+    const transition = (id: string, action: 'activate' | 'archive', version: number) =>
+      req('POST', `/catalog/products/${id}/${action}`, ownerA, undefined, {
+        'idempotency-key': `t310-${id}-${action}-${version}`,
+        'if-match': `"${version}"`,
+      });
+
+    it('29/30/31 — DRAFT→ACTIVE, ACTIVE→ARCHIVED, ARCHIVED→ACTIVE each emit a tenant-global status event with resource_version + fromStatus/toStatus', async () => {
+      const p = await mkDraftProduct('t310-vis');
+      const a = await transition(p.id, 'activate', p.version); // DRAFT → ACTIVE
+      const v1 = (a.json() as { version: number }).version;
+      const ar = await transition(p.id, 'archive', v1); // ACTIVE → ARCHIVED
+      const v2 = (ar.json() as { version: number }).version;
+      await transition(p.id, 'activate', v2); // ARCHIVED → ACTIVE
+
+      const events = await statusEvents(p.id);
+      expect(events).toHaveLength(3);
+      expect(events.map((e) => [e.payload['fromStatus'], e.payload['toStatus']])).toEqual([
+        ['DRAFT', 'ACTIVE'],
+        ['ACTIVE', 'ARCHIVED'],
+        ['ARCHIVED', 'ACTIVE'],
+      ]);
+      for (const e of events) {
+        expect(e.companyId).toBeNull();
+        expect(e.branchId).toBeNull();
+        expect(e.payload['productId']).toBe(p.id);
+        expect(Number(e.resourceVersion)).toBeGreaterThan(0);
+      }
+    });
+
+    it('D-5 — DRAFT→ARCHIVED does NOT emit (no visibility change)', async () => {
+      const p = await mkDraftProduct('t310-da');
+      const r = await transition(p.id, 'archive', p.version); // DRAFT → ARCHIVED
+      expect(r.statusCode, r.payload).toBe(200);
+      expect(await statusEvents(p.id)).toHaveLength(0);
+    });
+
+    it('36/37 — a no-op activate (already ACTIVE) and a stale If-Match emit NO event', async () => {
+      const p = await mkDraftProduct('t310-noop');
+      const a = await transition(p.id, 'activate', p.version);
+      const v1 = (a.json() as { version: number }).version;
+      const before = (await statusEvents(p.id)).length;
+      await transition(p.id, 'activate', v1); // no-op — already ACTIVE
+      const stale = await transition(p.id, 'archive', 0); // stale If-Match
+      expect(stale.statusCode).toBe(409);
+      expect((await statusEvents(p.id)).length).toBe(before);
+    });
+
+    it('35 — an ordinary DRAFT field edit (PUT) emits NO event', async () => {
+      const p = await mkDraftProduct('t310-edit');
+      const before = (await sql<{ n: string }>(`SELECT count(*)::text AS n FROM outbox`))[0]!.n;
+      const g = (await req('GET', `/catalog/products/${p.id}`, ownerA)).json() as {
+        version: number;
+      };
+      const upd = await req(
+        'PUT',
+        `/catalog/products/${p.id}`,
+        ownerA,
+        { nameEn: 'renamed' },
+        { 'if-match': `"${g.version}"` },
+      );
+      expect(upd.statusCode, upd.payload).toBe(200);
+      expect((await sql<{ n: string }>(`SELECT count(*)::text AS n FROM outbox`))[0]!.n).toBe(
+        before,
+      );
+    });
+  });
 });
 
 async function seed(url: string): Promise<void> {
