@@ -645,15 +645,20 @@ export class BranchPricingRepository extends ScopedRepository {
       // CURSOR PAGINATION IS OVER UNIQUE VARIANTS, NOT PRICE ROWS. A variant may
       // have several `company_variant_uom_price` rows (piece / dozen / carton);
       // it must consume exactly ONE page slot. `SELECT DISTINCT "variantId" …
-      // ORDER BY "variantId" ASC LIMIT n` is a DB-GUARANTEED unique-variant page
-      // in PostgreSQL (DISTINCT collapses the duplicate UOM rows before LIMIT) —
-      // it does not rely on any Prisma `distinct` + `take` interaction. The
-      // cursor is a `variantId`; the next page starts strictly after it, so no
-      // variant is skipped and none repeats across pages. `nextCursor` is the
-      // last emitted `variantId` (the caller keeps paging until `entries` is
-      // empty).
+      // ORDER BY "variantId" ASC LIMIT n+1` is a DB-GUARANTEED unique-variant
+      // window in PostgreSQL (DISTINCT collapses the duplicate UOM rows before
+      // LIMIT) — it does not rely on any Prisma `distinct` + `take` interaction.
+      // The cursor is a `variantId`; the next page starts strictly after it
+      // (`variantId > cursor`), so no variant is skipped and none repeats.
+      //
+      // TERMINATION: fetch `limit + 1` unique ids, emit only the first `limit`.
+      // `hasMore = candidates.length > limit` — the extra lookahead row proves
+      // another page exists. `nextCursor` is the last EMITTED `variantId` when
+      // `hasMore`, else `null` (the lookahead row is never emitted and never
+      // becomes the cursor). No trailing empty page is required to detect the
+      // end.
       const tenantId = requireTenantContext().tenantId;
-      const distinctRows =
+      const candidateRows =
         cursor === undefined
           ? await tx.$queryRaw<{ variantId: string }[]>`
               SELECT DISTINCT "variantId"
@@ -670,9 +675,10 @@ export class BranchPricingRepository extends ScopedRepository {
                  AND "variantId" > ${cursor}::uuid
                ORDER BY "variantId" ASC
                LIMIT ${limit + 1}`;
-      const page = distinctRows.slice(0, limit);
+      const hasMore = candidateRows.length > limit;
+      const page = candidateRows.slice(0, limit);
       if (page.length === 0) return { entries: [], nextCursor: null };
-      const nextCursor = page[page.length - 1]!.variantId;
+      const nextCursor = hasMore ? page[page.length - 1]!.variantId : null;
 
       const variantIds = page.map((p) => p.variantId);
       const [variants, companyRows, branchRows, availRows] = await Promise.all([

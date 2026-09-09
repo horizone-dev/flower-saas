@@ -1276,6 +1276,9 @@ describe('branch price override + availability (task 3.8, integration)', () => {
       const ordered = [a, b, c].sort();
       const seen = new Set<string>();
 
+      // limit=1 walk: page1 → A (nextCursor A), page2 → B (nextCursor B),
+      // page3 → C (nextCursor NULL — the `limit + 1` lookahead found no 4th
+      // unique variant, so the walk terminates WITHOUT a trailing empty request).
       let cursor: string | null | undefined = undefined;
       for (let i = 0; i < ordered.length; i++) {
         const pg: Page = await pageOf(cursor ?? undefined);
@@ -1285,24 +1288,56 @@ describe('branch price override + availability (task 3.8, integration)', () => {
         expect(seen.has(e.variantId), 'no variant repeats across pages').toBe(false);
         seen.add(e.variantId);
         expect(e.prices, `${e.variantId} tier count`).toHaveLength(tierCount[e.variantId]!);
-        expect(pg.nextCursor, 'nextCursor is the last emitted variantId').toBe(ordered[i]);
+        const isLast = i === ordered.length - 1;
+        expect(
+          pg.nextCursor,
+          isLast
+            ? 'final page → nextCursor null (lookahead saw no further variant)'
+            : 'nextCursor is the last emitted variantId',
+        ).toBe(isLast ? null : ordered[i]);
         cursor = pg.nextCursor;
       }
-      // page 4 → empty, nextCursor null
-      const p4 = await pageOf(cursor ?? undefined);
-      expect(p4.entries).toEqual([]);
-      expect(p4.nextCursor).toBeNull();
+      // the walk is already done — nextCursor was null on page 3, no page 4 request.
+      expect(cursor).toBeNull();
       // every variant seen exactly once — no skips
       expect([...seen].sort()).toEqual(ordered);
 
+      // an explicit request past the last emitted id still yields entries=[] / null
+      const past = await pageOf(ordered[ordered.length - 1]!);
+      expect(past.entries).toEqual([]);
+      expect(past.nextCursor).toBeNull();
+
       // the 3-UOM variant's page carried all 3 tiers (branch override on `piece`,
       // company fallback on the other two) — its extra rows never split the page.
+      // limit=200 > 3 unique variants ⇒ hasMore false ⇒ nextCursor null.
       const bigPage = (await effCatalog(pgBranch, '?limit=200')).json() as Page;
       expect(bigPage.entries.map((x) => x.variantId)).toEqual(ordered);
+      expect(bigPage.nextCursor).toBeNull();
       const aEntry = bigPage.entries.find((x) => x.variantId === a)!;
       expect(aEntry.prices.map((x) => x.uomCode).sort()).toEqual(['eccarton', 'ecdozen', 'piece']);
       expect(aEntry.prices.find((x) => x.uomCode === 'piece')!.source).toBe('BRANCH');
       expect(aEntry.prices.find((x) => x.uomCode === 'ecdozen')!.source).toBe('COMPANY');
+
+      // a branch whose company has priced NOTHING → empty first page, nextCursor null
+      const emptyBranch = (
+        await sql<{ id: string }>(
+          `INSERT INTO branch (id,"tenantId","companyId",name,"updatedAt")
+           VALUES (uuidv7(),$1,$2,'PgBranchEmpty',now()) RETURNING id`,
+          [
+            tenantA,
+            (
+              await sql<{ id: string }>(
+                `INSERT INTO company (id,"tenantId","legalNameEn","countryCode","defaultCurrency","status","updatedAt")
+                 VALUES (uuidv7(),$1,'PgCoEmpty','AE','AED','ACTIVE',now()) RETURNING id`,
+                [tenantA],
+              )
+            )[0]!.id,
+          ],
+        )
+      )[0]!.id;
+      const empty = (await effCatalog(emptyBranch, '?limit=50')).json() as Page;
+      expect(empty.entries).toEqual([]);
+      expect(empty.nextCursor).toBeNull();
     });
 
     it('a catalog:view-only user → 403 on writes; branch reads work', async () => {
