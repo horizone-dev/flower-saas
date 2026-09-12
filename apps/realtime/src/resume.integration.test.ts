@@ -377,6 +377,100 @@ describe('realtime gateway resume/replay (integration — Redis)', () => {
     expect(resumed['cursor']).toBe(idOther); // yet the scanned position reached the full boundary
   });
 
+  // ── CHECK 2 (owner final review, task 3.10) — company-scoped replay filter,
+  //    through the REAL resume() path, reusing the shared isAuthorized() —
+  //    parallel to the branch-scope proof above. The scanned cursor must
+  //    advance past the filtered company-B entry, and a fresh reconnect from
+  //    the returned cursor must not re-scan/re-deliver it. ──────────────────
+  it('company-scoped replay filters an unauthorized company; the scanned cursor advances past it and a reconnect from the returned cursor never re-delivers it', async () => {
+    const tenantId = randomUUID();
+    const companyA = randomUUID();
+    const companyB = randomUUID();
+    const base = session();
+    const s = session({ tenantId, access: { ...base.access!, companyScope: [companyA] } });
+    const token = await login(s);
+
+    const id0 = await xadd(tenantId, envelope({ tenant_id: tenantId, type: 'baseline' }));
+    const gw = await bootGateway();
+    const client = await connect(gw.port, token);
+
+    await xadd(
+      tenantId,
+      envelope({ tenant_id: tenantId, company_id: companyA, branch_id: null, type: 'event1-A' }),
+    );
+    const idOther = await xadd(
+      tenantId,
+      envelope({ tenant_id: tenantId, company_id: companyB, branch_id: null, type: 'event2-B' }),
+    );
+    const id3 = await xadd(
+      tenantId,
+      envelope({ tenant_id: tenantId, company_id: companyA, branch_id: null, type: 'event3-A' }),
+    );
+
+    client.send({ type: 'resume', cursor: id0 });
+    const resumed = await client.waitFor((m) => m['type'] === 'resumed');
+
+    const delivered = client.messages
+      .filter((m) => m['type'] === 'event')
+      .map((m) => eventOf(m)['type']);
+    expect(delivered).toEqual(['event1-A', 'event3-A']); // event2-B scanned but filtered
+    expect(resumed['cursor']).toBe(id3); // scanned position reached the full boundary
+    void idOther;
+
+    // A fresh event lands after the first resume completed. Reconnecting from
+    // the EXACT cursor `resume` returned must replay only what is genuinely
+    // new — never re-scan/re-deliver event2-B (or anything at/behind id3).
+    const id4 = await xadd(
+      tenantId,
+      envelope({ tenant_id: tenantId, company_id: companyA, branch_id: null, type: 'event4-A' }),
+    );
+    const client2 = await connect(gw.port, token);
+    client2.send({ type: 'resume', cursor: resumed['cursor'] as string });
+    const resumed2 = await client2.waitFor((m) => m['type'] === 'resumed');
+    const delivered2 = client2.messages
+      .filter((m) => m['type'] === 'event')
+      .map((m) => eventOf(m)['type']);
+    expect(delivered2).toEqual(['event4-A']); // event2-B never reappears
+    expect(resumed2['cursor']).toBe(id4);
+  });
+
+  // ── CHECK 2 — cumulative company AND branch authorization (both must pass) ─
+  it('replay DENIES an event unless BOTH company and branch authorization pass — a branch match alone is not sufficient', async () => {
+    const tenantId = randomUUID();
+    const companyA = randomUUID();
+    const companyB = randomUUID();
+    const branchA = randomUUID();
+    const base = session();
+    // authorized for companyB and branchA — NOT companyA
+    const s = session({
+      tenantId,
+      access: { ...base.access!, companyScope: [companyB], branchScope: [branchA] },
+    });
+    const token = await login(s);
+
+    const id0 = await xadd(tenantId, envelope({ tenant_id: tenantId, type: 'baseline' }));
+    const gw = await bootGateway();
+    const client = await connect(gw.port, token);
+
+    // company_id=A (out of scope) + branch_id=A (in scope) — a branch.* event
+    // always carries both per ADR-0017 §3 Amendment A1; BOTH must authorize.
+    const idEvt = await xadd(
+      tenantId,
+      envelope({
+        tenant_id: tenantId,
+        company_id: companyA,
+        branch_id: branchA,
+        type: 'branchA-companyA',
+      }),
+    );
+
+    client.send({ type: 'resume', cursor: id0 });
+    const resumed = await client.waitFor((m) => m['type'] === 'resumed');
+
+    expect(client.messages.filter((m) => m['type'] === 'event')).toHaveLength(0); // DENIED
+    expect(resumed['cursor']).toBe(idEvt); // scanned cursor still reaches the boundary
+  });
+
   // ── scope narrowing DURING replay stops delivery immediately (hard gate #9) ─
   it('scope narrowing during replay immediately stops delivery to the now-unauthorized branch — deterministic, not timing-based', async () => {
     const tenantId = randomUUID();
@@ -419,6 +513,60 @@ describe('realtime gateway resume/replay (integration — Redis)', () => {
       tenantId,
       sessionId: randomUUID(),
       access: { ...wide.access!, branchScope: [branchA] },
+    });
+    const narrowToken = await login(narrow);
+    client.send({ type: 'refresh_token', token: narrowToken });
+    await client.waitFor((m) => m['type'] === 'refreshed');
+
+    proceed.resolve(); // only now does the server proceed to entryB's chunk
+
+    const resumed = await client.waitFor((m) => m['type'] === 'resumed');
+    const delivered = client.messages
+      .filter((m) => m['type'] === 'event')
+      .map((m) => eventOf(m)['type']);
+    expect(delivered).toEqual(['entryA']); // entryB never delivered
+    expect(resumed['cursor']).toBe(idB); // but the scanned cursor still reached the boundary
+  });
+
+  // ── CHECK 2 — mid-replay companyScope narrowing (equivalent proof to the
+  //    branchScope narrowing test above, same shared isAuthorized() path) ──
+  it('companyScope narrowing during replay immediately stops delivery to the now-unauthorized company — deterministic, not timing-based', async () => {
+    const tenantId = randomUUID();
+    const companyA = randomUUID();
+    const companyB = randomUUID();
+    const base = session();
+    const wide = session({
+      tenantId,
+      access: { ...base.access!, companyScope: [companyA, companyB] },
+    });
+    const wideToken = await login(wide);
+
+    const id0 = await xadd(tenantId, envelope({ tenant_id: tenantId, type: 'baseline' }));
+    const idA = await xadd(
+      tenantId,
+      envelope({ tenant_id: tenantId, company_id: companyA, branch_id: null, type: 'entryA' }),
+    );
+    const idB = await xadd(
+      tenantId,
+      envelope({ tenant_id: tenantId, company_id: companyB, branch_id: null, type: 'entryB' }),
+    );
+    void idA;
+
+    const proceed = deferred<void>();
+    const gw = await bootGateway({
+      chunkSize: 1,
+      onYield: () => proceed.promise,
+    });
+    const client = await connect(gw.port, wideToken);
+
+    client.send({ type: 'resume', cursor: id0 });
+    await client.waitFor((m) => m['type'] === 'event' && eventOf(m)['type'] === 'entryA');
+    // the server is now paused inside onYield, about to fetch entryB's chunk.
+
+    const narrow = session({
+      tenantId,
+      sessionId: randomUUID(),
+      access: { ...wide.access!, companyScope: [companyA] },
     });
     const narrowToken = await login(narrow);
     client.send({ type: 'refresh_token', token: narrowToken });

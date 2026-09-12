@@ -1467,6 +1467,60 @@ describe('branch price override + availability (task 3.8, integration)', () => {
       expect(latest.payload['changedUomCodes']).toEqual(['piece']);
     });
 
+    // ═══ CHECK 1 (owner final review, task 3.10) — identical-set PUT is a
+    // logical mutation, never a content-diff no-op. Frozen source: Task 3.7
+    // (`17b8623`) "9. bump the aggregate version ONLY when it already
+    // existed" (existence, never content, gates the bump); Task 3.8
+    // (`e333f9d`) `branch_variant_price_set` is "INDEPENDENTLY MONOTONIC
+    // (created at 1, only incremented, never reset/deleted)". Proven here
+    // through the real branch replace() path, mirroring the company-side
+    // proof in catalog-company-pricing.integration.test.ts.
+    it('CHECK1 — a content-identical branch PUT with correct If-Match bumps version n -> n+1, writes exactly 1 audit row, and enqueues exactly 1 outbox row at resource_version n+1', async () => {
+      const v = await mkVariant(ownerA, 'check1-branch', { base: 'piece' });
+      await companyPrice(coA, v, [{ uomCode: 'piece', sell: money('500', 'AED', 2) }]);
+      const entries = [{ uomCode: 'piece', sell: money('450', 'AED', 2) }];
+
+      const p1 = await putBranchPrices(dubai, v, entries, '"0"');
+      expect(p1.statusCode, p1.payload).toBe(200);
+      expect(bpJson(p1).version).toBe(1);
+      const aggId = (
+        await sql<{ id: string }>(
+          `SELECT id FROM branch_variant_price_set WHERE "branchId"=$1 AND "variantId"=$2`,
+          [dubai, v],
+        )
+      )[0]!.id;
+
+      const countAudit = async (): Promise<number> =>
+        Number(
+          (
+            await sql<{ n: string }>(
+              `SELECT count(*)::text AS n FROM audit_log WHERE "resourceId"=$1 AND action='catalog.branch_price_changed'`,
+              [aggId],
+            )
+          )[0]!.n,
+        );
+      const auditBefore = await countAudit();
+      const outboxBefore = (await outbox('catalog.branch.price_changed', aggId)).length;
+
+      // resubmit the EXACT same entries with the correct If-Match — content-identical.
+      const p2 = await putBranchPrices(dubai, v, entries, '"1"');
+      expect(p2.statusCode, p2.payload).toBe(200);
+      expect(bpJson(p2).version).toBe(2); // n -> n+1, never a no-op
+      expect(p2.headers.etag).toBe('"2"');
+      expect(bpJson(p2).prices).toEqual(bpJson(p1).prices);
+
+      expect(await countAudit()).toBe(auditBefore + 1); // exactly 1 new audit row
+
+      const outboxRows = await outbox('catalog.branch.price_changed', aggId);
+      expect(outboxRows.length).toBe(outboxBefore + 1); // exactly 1 new outbox row
+      expect(outboxRows[0]!.resourceVersion).toBe('2'); // resource_version = n+1
+
+      // a THIRD identical resubmit bumps again — unconditional on existence,
+      // never gated on whether content changed.
+      const p3 = await putBranchPrices(dubai, v, entries, '"2"');
+      expect(bpJson(p3).version).toBe(3);
+    });
+
     it('28 — a branch availability set co-commits a branch-scoped row (both ids, no resource_version, bounded variantIds)', async () => {
       const v = await mkVariant(ownerA, 'ob-av', { base: 'piece' });
       const r = await setAvail(dubai, [{ variantId: v, available: false }], ik());

@@ -1118,6 +1118,71 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
       }
     });
   });
+
+  // ════════════ CHECK 1 (owner final review, task 3.10) — identical-set PUT
+  // is a logical mutation, never a content-diff no-op. Frozen source:
+  // Task 3.7 (`17b8623`) — "9. bump the aggregate version ONLY when it
+  // already existed (a newly created row is already at version 1 ==
+  // nextVersion)" — the condition is existence, never content equality.
+  // Task 3.8 (`e333f9d`) — `branch_variant_price_set` is "INDEPENDENTLY
+  // MONOTONIC (created at 1, only incremented, never reset/deleted)". The
+  // implementation (`company-pricing.repository.ts` step 9) unconditionally
+  // deletes+reinserts rows and bumps the version on every existing-aggregate
+  // PUT — there is no content-equality short-circuit anywhere in the frozen
+  // scope or the code. This suite proves that contract explicitly.
+  describe('CHECK 1 — identical price-set PUT is a logical mutation, not a no-op', () => {
+    const outbox = (eventType: string, resourceId: string) =>
+      sql<{ resourceVersion: string | null }>(
+        `SELECT "resourceVersion"::text AS "resourceVersion" FROM outbox
+          WHERE "eventType" = $1 AND "aggregateId" = $2
+          ORDER BY "createdAt" DESC LIMIT 5`,
+        [eventType, resourceId],
+      );
+
+    it('a content-identical company PUT with correct If-Match bumps version n -> n+1, writes exactly 1 audit row, and enqueues exactly 1 outbox row at resource_version n+1', async () => {
+      const { variantId } = await mkVariant(ownerA, 'check1-co', { base: 'piece' });
+      const entries = [{ uomCode: 'piece', sell: money('500', 'AED', 2) }];
+
+      const p1 = await putPrices(coAED, variantId, entries, '"0"');
+      expect(p1.statusCode, p1.payload).toBe(200);
+      expect(priceJson(p1).version).toBe(1);
+      const aggId = (
+        await sql<{ id: string }>(
+          `SELECT id FROM company_variant_price_set WHERE "companyId"=$1 AND "variantId"=$2`,
+          [coAED, variantId],
+        )
+      )[0]!.id;
+
+      const auditBefore = await count(
+        `SELECT count(*)::int AS n FROM audit_log WHERE "resourceId"=$1 AND action='catalog.company_price_changed'`,
+        [aggId],
+      );
+      const outboxBefore = (await outbox('catalog.company.price_changed', aggId)).length;
+
+      // resubmit the EXACT same entries with the correct If-Match — content-identical.
+      const p2 = await putPrices(coAED, variantId, entries, '"1"');
+      expect(p2.statusCode, p2.payload).toBe(200);
+      expect(priceJson(p2).version).toBe(2); // n -> n+1, never a no-op
+      expect(p2.headers.etag).toBe('"2"');
+      expect(priceJson(p2).prices).toEqual(priceJson(p1).prices);
+
+      expect(
+        await count(
+          `SELECT count(*)::int AS n FROM audit_log WHERE "resourceId"=$1 AND action='catalog.company_price_changed'`,
+          [aggId],
+        ),
+      ).toBe(auditBefore + 1); // exactly 1 new audit row
+
+      const outboxRows = await outbox('catalog.company.price_changed', aggId);
+      expect(outboxRows.length).toBe(outboxBefore + 1); // exactly 1 new outbox row
+      expect(outboxRows[0]!.resourceVersion).toBe('2'); // resource_version = n+1
+
+      // a THIRD identical resubmit bumps again — unconditional on existence,
+      // never gated on whether content changed.
+      const p3 = await putPrices(coAED, variantId, entries, '"2"');
+      expect(priceJson(p3).version).toBe(3);
+    });
+  });
 });
 
 async function seed(url: string): Promise<void> {
