@@ -1119,6 +1119,75 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
     });
   });
 
+  // ════════════ Task 3.11 — HG3-NO-BT-BRANCH dual-tenant proof (owner §28) ══
+  describe('generic multi-business — Business Type does not alter company pricing behaviour', () => {
+    let tenantBT = '';
+    let coBT = '';
+    let ownerBT = '';
+
+    beforeAll(async () => {
+      // a SECOND, genuinely different, real preset — not a synthetic key —
+      // mirrors the pattern already used in catalog-core/-attributes/-variants/
+      // -identifiers/-uom. Same capability set as tenantA (multi_uom) is applied
+      // explicitly below, so a behaviour difference could only come from a
+      // business-type runtime branch, never from a capability-config mismatch.
+      await sql(`INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+                 VALUES ('BAKERY_CAKE', 2, 'Bakery', 'x', 'ACTIVE', now())
+                 ON CONFLICT (key) DO NOTHING`);
+      await sql(`INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+                 VALUES ('BAKERY_CAKE','strategy.stocked',true,now()),
+                        ('BAKERY_CAKE','variants',true,now())
+                 ON CONFLICT ("templateKey","capabilityKey") DO NOTHING`);
+      tenantBT = await (async () => {
+        const res = await req(
+          'POST',
+          '/platform/tenants',
+          superTok,
+          {
+            slug: 'price-bt',
+            name: 'price-bt',
+            region: 'AE',
+            companyCountryCode: 'AE',
+            businessTypeKey: 'BAKERY_CAKE',
+            planVersionId: PLAN_V,
+            ownerEmail: 'owner@price-bt.test',
+          },
+          { 'idempotency-key': 'prov-price-bt' },
+        );
+        expect(res.statusCode, res.payload).toBe(201);
+        return (res.json() as { tenantId: string }).tenantId;
+      })();
+      await setCap(tenantBT, 'multi_uom', true);
+      ownerBT = await mintTenant('obt', tenantBT, PRICE);
+      coBT = (
+        await sql<{ id: string }>(`SELECT id FROM company WHERE "tenantId"=$1`, [tenantBT])
+      )[0]!.id;
+    });
+
+    it('two tenants, different businessTypeKey, identical company-pricing input -> identical results', async () => {
+      const btA = (
+        await sql<{ k: string }>(`SELECT "businessTypeKey" AS k FROM tenant WHERE id=$1`, [tenantA])
+      )[0]!.k;
+      const btBT = (
+        await sql<{ k: string }>(`SELECT "businessTypeKey" AS k FROM tenant WHERE id=$1`, [
+          tenantBT,
+        ])
+      )[0]!.k;
+      expect(btA).not.toBe(btBT);
+
+      const { variantId: vA } = await mkVariant(ownerA, 'bt-neutral-a', { base: 'piece' });
+      const { variantId: vBT } = await mkVariant(ownerBT, 'bt-neutral-bt', { base: 'piece' });
+      const entries = [{ uomCode: 'piece', sell: money('500', 'AED', 2) }];
+
+      const rA = await putPrices(coAED, vA, entries, '"0"', ownerA);
+      const rBT = await putPrices(coBT, vBT, entries, '"0"', ownerBT);
+      expect(rA.statusCode, rA.payload).toBe(200);
+      expect(rBT.statusCode, rBT.payload).toBe(rA.statusCode);
+      expect(priceJson(rBT)).toEqual(priceJson(rA)); // identical version/prices/resolvable
+      expect(rBT.headers.etag).toBe(rA.headers.etag);
+    });
+  });
+
   // ════════════ CHECK 1 (owner final review, task 3.10) — identical-set PUT
   // is a logical mutation, never a content-diff no-op. Frozen source:
   // Task 3.7 (`17b8623`) — "9. bump the aggregate version ONLY when it

@@ -992,6 +992,90 @@ describe('catalog tax-category + rate resolution (task 3.9, integration)', () =>
       expect(JSON.stringify(body)).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
     });
   });
+
+  // ════════════ Task 3.11 — HG3-NO-BT-BRANCH dual-tenant proof (owner §28) ══
+  describe('generic multi-business — Business Type does not alter tax resolution', () => {
+    let tenantBT = '';
+    let coBT = '';
+    let ownerBT = '';
+
+    beforeAll(async () => {
+      // a SECOND, genuinely different, real preset — mirrors the pattern
+      // already used in catalog-core/-attributes/-variants/-identifiers/-uom.
+      // No capability gates tax resolution, so no setCap() parity is needed —
+      // the point is purely that businessTypeKey never enters the fiscal path
+      // (company.countryCode is the sole authority, CLAUDE.md §9 / owner
+      // Correction 4).
+      await sql(`INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+                 VALUES ('BAKERY_CAKE', 2, 'Bakery', 'x', 'ACTIVE', now())
+                 ON CONFLICT (key) DO NOTHING`);
+      await sql(`INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+                 VALUES ('BAKERY_CAKE','strategy.stocked',true,now()),
+                        ('BAKERY_CAKE','variants',true,now())
+                 ON CONFLICT ("templateKey","capabilityKey") DO NOTHING`);
+      const res = await req(
+        'POST',
+        '/platform/tenants',
+        superTok,
+        {
+          slug: 'tax-bt',
+          name: 'tax-bt',
+          region: 'AE',
+          companyCountryCode: 'AE',
+          businessTypeKey: 'BAKERY_CAKE',
+          planVersionId: PLAN_V,
+          ownerEmail: 'owner@tax-bt.test',
+        },
+        { 'idempotency-key': 'prov-tax-bt' },
+      );
+      expect(res.statusCode, res.payload).toBe(201);
+      tenantBT = (res.json() as { tenantId: string }).tenantId;
+      ownerBT = await mintTenant('obt', tenantBT, CATALOG);
+      coBT = (
+        await sql<{ id: string }>(`SELECT id FROM company WHERE "tenantId"=$1`, [tenantBT])
+      )[0]!.id;
+    });
+
+    it('two tenants, different businessTypeKey, identical product tax-category + date -> identical resolution', async () => {
+      const btA = (
+        await sql<{ k: string }>(`SELECT "businessTypeKey" AS k FROM tenant WHERE id=$1`, [tenantA])
+      )[0]!.k;
+      const btBT = (
+        await sql<{ k: string }>(`SELECT "businessTypeKey" AS k FROM tenant WHERE id=$1`, [
+          tenantBT,
+        ])
+      )[0]!.k;
+      expect(btA).not.toBe(btBT);
+
+      const {
+        productId: pA,
+        variantId: vA,
+        productVersion: pvA,
+      } = await mkVariant(ownerA, 'bt-neutral-tax-a');
+      const {
+        productId: pBT,
+        variantId: vBT,
+        productVersion: pvBT,
+      } = await mkVariant(ownerBT, 'bt-neutral-tax-bt');
+      await setProductTax(pA, 'STANDARD', `"${pvA}"`, ownerA);
+      await setProductTax(pBT, 'STANDARD', `"${pvBT}"`, ownerBT);
+
+      const rA = await resolveTax(coAE, vA, '?date=2026-01-15', ownerA);
+      const rBT = await resolveTax(coBT, vBT, '?date=2026-01-15', ownerBT);
+      expect(rA.statusCode, rA.payload).toBe(200);
+      expect(rBT.statusCode, rBT.payload).toBe(rA.statusCode);
+      // identical rateBps/source/reason/categorySource/resolvedDate/regime —
+      // business type never enters the fiscal path. `companyId`/`variantId`
+      // are per-request identifiers and are excluded from the comparison.
+      const { companyId: _cA, variantId: _vA, ...domainA } = rA.json() as Record<string, unknown>;
+      const {
+        companyId: _cBT,
+        variantId: _vBT,
+        ...domainBT
+      } = rBT.json() as Record<string, unknown>;
+      expect(domainBT).toEqual(domainA);
+    });
+  });
 });
 
 async function seed(url: string): Promise<void> {

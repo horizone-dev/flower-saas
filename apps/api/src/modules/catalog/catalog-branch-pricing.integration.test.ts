@@ -1576,6 +1576,81 @@ describe('branch price override + availability (task 3.8, integration)', () => {
       expect(await countOutbox()).toBe(before);
     });
   });
+
+  // ════════════ Task 3.11 — HG3-NO-BT-BRANCH dual-tenant proof (owner §28) ══
+  describe('generic multi-business — Business Type does not alter branch pricing behaviour', () => {
+    let tenantBT = '';
+    let coBT = '';
+    let branchBT = '';
+    let ownerBT = '';
+
+    beforeAll(async () => {
+      // a SECOND, genuinely different, real preset — mirrors the pattern
+      // already used in catalog-core/-attributes/-variants/-identifiers/-uom.
+      // Same capability set as tenantA (multi_uom + branch_pricing) is applied
+      // explicitly below, so a behaviour difference could only come from a
+      // business-type runtime branch, never from a capability-config mismatch.
+      await sql(`INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+                 VALUES ('BAKERY_CAKE', 2, 'Bakery', 'x', 'ACTIVE', now())
+                 ON CONFLICT (key) DO NOTHING`);
+      await sql(`INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+                 VALUES ('BAKERY_CAKE','strategy.stocked',true,now()),
+                        ('BAKERY_CAKE','variants',true,now())
+                 ON CONFLICT ("templateKey","capabilityKey") DO NOTHING`);
+      const res = await req(
+        'POST',
+        '/platform/tenants',
+        superTok,
+        {
+          slug: 'bp-bt',
+          name: 'bp-bt',
+          region: 'AE',
+          companyCountryCode: 'AE',
+          businessTypeKey: 'BAKERY_CAKE',
+          planVersionId: PLAN_V,
+          ownerEmail: 'owner@bp-bt.test',
+        },
+        { 'idempotency-key': 'prov-bp-bt' },
+      );
+      expect(res.statusCode, res.payload).toBe(201);
+      tenantBT = (res.json() as { tenantId: string }).tenantId;
+      await setCap(tenantBT, 'multi_uom', true);
+      await setCap(tenantBT, 'branch_pricing', true);
+      coBT = (
+        await sql<{ id: string }>(`SELECT id FROM company WHERE "tenantId"=$1`, [tenantBT])
+      )[0]!.id;
+      branchBT = (
+        await sql<{ id: string }>(`SELECT id FROM branch WHERE "tenantId"=$1`, [tenantBT])
+      )[0]!.id;
+      ownerBT = await mintTenant('obt', tenantBT, CATALOG);
+    });
+
+    it('two tenants, different businessTypeKey, identical branch-pricing input -> identical results', async () => {
+      const btA = (
+        await sql<{ k: string }>(`SELECT "businessTypeKey" AS k FROM tenant WHERE id=$1`, [tenantA])
+      )[0]!.k;
+      const btBT = (
+        await sql<{ k: string }>(`SELECT "businessTypeKey" AS k FROM tenant WHERE id=$1`, [
+          tenantBT,
+        ])
+      )[0]!.k;
+      expect(btA).not.toBe(btBT);
+
+      const vA = await mkVariant(ownerA, 'bt-neutral-a', { base: 'piece' });
+      const vBT = await mkVariant(ownerBT, 'bt-neutral-bt', { base: 'piece' });
+      const entries = [{ uomCode: 'piece', sell: money('450', 'AED', 2) }];
+
+      await companyPrice(coA, vA, [{ uomCode: 'piece', sell: money('500', 'AED', 2) }], ownerA);
+      await companyPrice(coBT, vBT, [{ uomCode: 'piece', sell: money('500', 'AED', 2) }], ownerBT);
+
+      const rA = await putBranchPrices(dubai, vA, entries, '"0"', ownerA);
+      const rBT = await putBranchPrices(branchBT, vBT, entries, '"0"', ownerBT);
+      expect(rA.statusCode, rA.payload).toBe(200);
+      expect(rBT.statusCode, rBT.payload).toBe(rA.statusCode);
+      expect(bpJson(rBT)).toEqual(bpJson(rA)); // identical version/prices/resolvable
+      expect(rBT.headers.etag).toBe(rA.headers.etag);
+    });
+  });
 });
 
 async function seed(url: string): Promise<void> {
