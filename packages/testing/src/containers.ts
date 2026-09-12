@@ -37,7 +37,12 @@ export interface StartTestStackOptions {
 const IMAGES = {
   postgres: 'postgres:17',
   redis: 'redis:7',
-  minio: 'minio/minio:RELEASE.2025-04-08T15-41-24Z',
+  // MinIO stopped publishing images to Docker Hub in October 2025 (source-only
+  // distribution going forward) — `minio/minio` pulls now fail with "pull
+  // access denied". `quay.io/minio/minio` is MinIO's own official second
+  // registry and still serves every tag published before that cutoff,
+  // including this exact one — same image content, no version change.
+  minio: 'quay.io/minio/minio:RELEASE.2025-04-08T15-41-24Z',
 } as const;
 
 export async function startTestStack(options: StartTestStackOptions = {}): Promise<TestStack> {
