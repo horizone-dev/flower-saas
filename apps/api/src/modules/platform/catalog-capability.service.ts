@@ -6,6 +6,8 @@ import {
   type CapabilityKey,
   type TemplateApplyMode,
 } from '@flower/shared-types';
+import { requestHash } from '../../common/idempotency/canonical-hash.js';
+import { DomainError } from '../../common/errors/domain-error.js';
 import { RedisService } from '../../common/redis/redis.module.js';
 import {
   PlatformCatalogCapabilityRepository,
@@ -106,6 +108,22 @@ export class PlatformCatalogCapabilityService {
    *     transaction).
    * `templateKey` MAY differ from the tenant's current `businessTypeKey` (owner
    * D-4). Emits NO outbox event (owner D-2).
+   *
+   * Owner strict-review fix — the cached replay is now fingerprinted, reusing
+   * the SAME canonical fingerprint primitive as the tenant-realm
+   * `IdempotencyInterceptor` (`requestHash`/`canonicalize` from
+   * `canonical-hash.ts` — no second idempotency subsystem). Canonical mutation
+   * identity = route + tenant + acting principal + `{templateKey, mode}` — the
+   * `If-Match` value is deliberately EXCLUDED (matching the tenant-realm
+   * interceptor's own hash, which never includes arbitrary headers): a
+   * fingerprint-confirmed replay returns the cached response directly and
+   * NEVER re-validates the original `If-Match` against the now-advanced DB
+   * version (e.g. `If-Match "5"` → applied → v6; the exact same replay must
+   * return the cached v6 success, not fail because the DB is now at 6). A
+   * SAME key + DIFFERENT `{templateKey, mode}` is a deterministic
+   * `409 IDEMPOTENCY_KEY_REUSED` — it never returns the previous response. A
+   * FRESH key always reaches `repo.reapply()`, whose own `If-Match` check is
+   * unchanged (`428` missing / `409 CATALOG_CAPABILITY_VERSION_CONFLICT` stale).
    */
   async reapply(input: {
     tenantId: string;
@@ -116,8 +134,32 @@ export class PlatformCatalogCapabilityService {
     actorPlatformUserId: string | null;
   }): Promise<TenantCapabilityView> {
     const idemKey = `idem:template-apply:${input.tenantId}:${input.idempotencyKey}`;
-    const cached = await this.client?.get(idemKey).catch(() => null);
-    if (cached) return JSON.parse(cached) as TenantCapabilityView;
+    const fingerprint = requestHash({
+      method: 'POST',
+      routePattern: '/v1/platform/tenants/:tenantId/apply-business-type-template',
+      pathParams: { tenantId: input.tenantId },
+      query: {},
+      scope: 'platform:catalog_capability:apply',
+      tenantId: input.tenantId,
+      principalId: input.actorPlatformUserId ?? '',
+      body: { templateKey: input.templateKey, mode: input.mode },
+    });
+
+    const cachedRaw = await this.client?.get(idemKey).catch(() => null);
+    if (cachedRaw) {
+      const cached = JSON.parse(cachedRaw) as {
+        fingerprint: string;
+        response: TenantCapabilityView;
+      };
+      if (cached.fingerprint !== fingerprint) {
+        throw new DomainError(
+          'IDEMPOTENCY_KEY_REUSED',
+          'this Idempotency-Key was already used for a different request',
+          409,
+        );
+      }
+      return cached.response;
+    }
 
     const state = await this.repo.reapply({
       tenantId: input.tenantId,
@@ -129,7 +171,7 @@ export class PlatformCatalogCapabilityService {
     const view = this.shape(state, await this.entitledModules(input.tenantId));
 
     await this.client
-      ?.set(idemKey, JSON.stringify(view), 'EX', 60 * 60 * 24)
+      ?.set(idemKey, JSON.stringify({ fingerprint, response: view }), 'EX', 60 * 60 * 24)
       .catch(() => undefined);
     return view;
   }

@@ -70,6 +70,21 @@ export interface ApplyTemplateInput {
  *
  * Does NOT open a transaction and does NOT catch — a failure anywhere rolls the
  * caller's whole transaction back (no partial capability rows).
+ *
+ * Owner strict-review note (validation consistency vs `reapply()` below): this
+ * function does NOT re-run `isCapabilityKey`/`checkCapabilityConfig` per row at
+ * apply-time, while `reapply()` does. This is NOT an inconsistent trust
+ * boundary — both functions read from the SAME `business_type_template_capability`
+ * table, whose only writer is the seed data in `packages/db/prisma/catalog-
+ * capabilities.ts`. That file is (a) typed `readonly CapabilityKey[]` — an
+ * unknown key literal fails `tsc` — and (b) asserts at module load that every
+ * seeded key is in `CATALOG_CAPABILITY_KEYS`, throwing otherwise (enforced by
+ * `catalog-capabilities.test.ts`); every seeded row's `config` is always `null`
+ * (spec §E — there is no config schema registry yet). There is no other write
+ * path to this table (no admin endpoint). `reapply()`'s inline check is
+ * therefore redundant defense-in-depth for identical data, not a gap this
+ * function has and `reapply()` closes — VERIFIED NOT A DEFECT, left as-is
+ * rather than adding an equally-redundant check here.
  */
 export async function applyBusinessTypeTemplate(
   tx: ScopedTx,
@@ -378,6 +393,16 @@ export class PlatformCatalogCapabilityRepository {
    *
    * NEVER touches a catalog entity, price, or inventory. NEVER emits an outbox
    * event (owner D-2). NEVER a runtime discriminator (D0-3).
+   *
+   * Owner strict-review note (audit shape vs `applyBusinessTypeTemplate`'s
+   * `catalog.template_applied` reason): the two shapes intentionally differ
+   * (`{templateKey, templateVersion, appliedCapabilityKeys}` for the initial
+   * provisioning-time apply vs `{mode, from/toTemplateKey, from/toTemplateVersion,
+   * aggregateVersionFrom/To, changedCapabilityKeys}` here) because they describe
+   * different events — a first-ever stamp vs an explicit re-apply with a
+   * before/after delta. `mode`'s presence is itself a valid discriminant; no
+   * secret/PII either way. VERIFIED NOT A DEFECT — Task 3.1's historical shape
+   * is intentionally left unchanged.
    */
   async reapply(input: {
     tenantId: string;

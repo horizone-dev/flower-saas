@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma, ScopedTx } from '@flower/db';
+import type { CatalogEventType } from '@flower/shared-types';
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
@@ -329,7 +330,7 @@ export class VariantRepository extends ScopedRepository {
         await assertSignatureFree(tx, current.productId, current.optionSignature, id);
       }
 
-      await tx.variant.update({
+      const updated = await tx.variant.update({
         where: { id },
         data: { status: next, version: { increment: 1 } },
       });
@@ -342,12 +343,15 @@ export class VariantRepository extends ScopedRepository {
       });
       // task 3.10 — tenant-global invalidation signal, co-committed. Emitted
       // only when consumer visibility changes (ACTIVE on one side) — owner D-5.
+      // `resourceVersion` is the AUTHORITATIVE post-update row value (never a
+      // derived `current.version + 1`) — matches `product.repository.ts`'s
+      // parallel transition (owner strict-review fix).
       if (visibilityChanged(current.status, next)) {
         await this.outbox.enqueue(tx, {
           aggregateType: 'variant',
           aggregateId: id,
-          eventType: 'catalog.variant.status_changed',
-          resourceVersion: current.version + 1,
+          eventType: 'catalog.variant.status_changed' satisfies CatalogEventType,
+          resourceVersion: updated.version,
           payload: {
             variantId: id,
             productId: current.productId,

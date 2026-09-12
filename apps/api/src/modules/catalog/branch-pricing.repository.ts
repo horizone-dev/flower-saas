@@ -8,6 +8,7 @@ import type {
   BranchAvailabilityView,
   BranchAvailabilitySetResult,
   BranchEffectiveCatalogEntry,
+  CatalogEventType,
 } from '@flower/shared-types';
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext, type ScopeSet } from '../../common/context/index.js';
@@ -475,7 +476,7 @@ export class BranchPricingRepository extends ScopedRepository {
         await this.outbox.enqueue(tx, {
           aggregateType: 'branch_variant_price_set',
           aggregateId: aggId,
-          eventType: 'catalog.branch.price_changed',
+          eventType: 'catalog.branch.price_changed' satisfies CatalogEventType,
           companyId,
           branchId,
           resourceVersion: nextVersion,
@@ -603,7 +604,7 @@ export class BranchPricingRepository extends ScopedRepository {
       await this.outbox.enqueue(tx, {
         aggregateType: 'branch',
         aggregateId: branchId,
-        eventType: 'catalog.branch.availability_changed',
+        eventType: 'catalog.branch.availability_changed' satisfies CatalogEventType,
         companyId,
         branchId,
         payload: {

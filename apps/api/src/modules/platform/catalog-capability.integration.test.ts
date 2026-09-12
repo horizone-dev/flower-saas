@@ -740,6 +740,116 @@ describe('catalog capability configuration surface (task 3.1, integration)', () 
       expect((await tmplApplied(t)).length).toBe(auditAfter);
     });
 
+    // ═══ owner strict-review fix — idempotency fingerprint (canonical mutation
+    // identity = tenant + principal + {templateKey, mode}, via the shared
+    // `requestHash` primitive) ═══════════════════════════════════════════════
+    it('idempotency fingerprint — same key + same request replays the cached response WITHOUT revalidating the original If-Match against the now-advanced DB version', async () => {
+      const t = await provision('t310-fp-same', 'T310_A');
+      const key = ik();
+      const v1 = (await tenantMeta(t)).v; // 1
+      const first = await applyTemplate(
+        t,
+        { templateKey: 'T310_C', mode: 'merge' },
+        { ifMatch: String(v1), idem: key },
+      );
+      expect(first.statusCode, first.payload).toBe(200);
+      const v2 = (await tenantMeta(t)).v; // 2
+      expect(v2).toBe(v1 + 1);
+
+      // advance the DB version further via an UNRELATED mutation (a different
+      // idempotency key) — the cached replay's original If-Match ("1") is now
+      // stale against the live aggregate, which is exactly what must NOT matter.
+      const advance = await applyTemplate(
+        t,
+        { templateKey: 'T310_A', mode: 'replace' },
+        { ifMatch: String(v2), idem: ik() },
+      );
+      expect(advance.statusCode, advance.payload).toBe(200);
+      const v3 = (await tenantMeta(t)).v; // 3
+      expect(v3).toBe(v2 + 1);
+      const auditBeforeReplay = (await tmplApplied(t)).length;
+
+      // exact same key + exact same body + the ORIGINAL (now doubly-stale)
+      // If-Match a naive client retry would resend.
+      const replay = await applyTemplate(
+        t,
+        { templateKey: 'T310_C', mode: 'merge' },
+        { ifMatch: String(v1), idem: key },
+      );
+      expect(replay.statusCode, replay.payload).toBe(200); // NOT 409
+      expect(replay.json()).toEqual(first.json()); // the cached v2 response, verbatim
+      expect((await tenantMeta(t)).v).toBe(v3); // DB untouched by the replay
+      expect((await tmplApplied(t)).length).toBe(auditBeforeReplay); // no new audit row
+    });
+
+    it('idempotency fingerprint — same key + a DIFFERENT canonical request (templateKey/mode) is a deterministic 409, never the previous cached response', async () => {
+      const t = await provision('t310-fp-diff', 'T310_A');
+      const key = ik();
+      const v1 = (await tenantMeta(t)).v;
+      const first = await applyTemplate(
+        t,
+        { templateKey: 'T310_A', mode: 'merge' },
+        { ifMatch: String(v1), idem: key },
+      );
+      expect(first.statusCode, first.payload).toBe(200);
+      const v2 = (await tenantMeta(t)).v;
+      const auditAfterFirst = (await tmplApplied(t)).length;
+
+      // same key, DIFFERENT templateKey — a different canonical request.
+      const diffTemplate = await applyTemplate(
+        t,
+        { templateKey: 'T310_B', mode: 'merge' },
+        { ifMatch: String(v2), idem: key },
+      );
+      expect(diffTemplate.statusCode).toBe(409);
+      expect((diffTemplate.json() as { error: { code: string } }).error.code).toBe(
+        'IDEMPOTENCY_KEY_REUSED',
+      );
+      expect(diffTemplate.json()).not.toEqual(first.json());
+
+      // same key, same templateKey, DIFFERENT mode — also a different request.
+      const diffMode = await applyTemplate(
+        t,
+        { templateKey: 'T310_A', mode: 'replace' },
+        { ifMatch: String(v2), idem: key },
+      );
+      expect(diffMode.statusCode).toBe(409);
+      expect((diffMode.json() as { error: { code: string } }).error.code).toBe(
+        'IDEMPOTENCY_KEY_REUSED',
+      );
+
+      // neither rejected replay mutated anything.
+      expect((await tenantMeta(t)).v).toBe(v2);
+      expect((await tmplApplied(t)).length).toBe(auditAfterFirst);
+    });
+
+    it('idempotency fingerprint — a FRESH key with a stale If-Match still gets a deterministic 409 CATALOG_CAPABILITY_VERSION_CONFLICT', async () => {
+      const t = await provision('t310-fp-fresh-stale', 'T310_A');
+      const v1 = (await tenantMeta(t)).v;
+      const bump = await applyTemplate(
+        t,
+        { templateKey: 'T310_C', mode: 'merge' },
+        { ifMatch: String(v1), idem: ik() },
+      );
+      expect(bump.statusCode, bump.payload).toBe(200);
+      const v2 = (await tenantMeta(t)).v;
+      expect(v2).toBe(v1 + 1);
+
+      // a brand-new idempotency key (never seen before) — no cache entry exists,
+      // so this must reach `repo.reapply()` directly and fail its own If-Match
+      // check against the now-current version.
+      const freshStale = await applyTemplate(
+        t,
+        { templateKey: 'T310_A', mode: 'merge' },
+        { ifMatch: String(v1), idem: ik() },
+      );
+      expect(freshStale.statusCode).toBe(409);
+      expect((freshStale.json() as { error: { code: string } }).error.code).toBe(
+        'CATALOG_CAPABILITY_VERSION_CONFLICT',
+      );
+      expect((await tenantMeta(t)).v).toBe(v2); // unchanged
+    });
+
     it('20/21 — requires platform:catalog_capability:manage + fresh step-up; a tenant Owner cannot reach it', async () => {
       const t = await provision('t310-authz', 'T310_A');
       const noStepUp = await mintPlatform('t310-nsu', false, [...PLATFORM_PERMISSIONS]);

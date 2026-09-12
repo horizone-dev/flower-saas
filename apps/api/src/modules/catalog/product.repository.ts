@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma, ScopedTx } from '@flower/db';
-import { type FulfilmentStrategy, usesFixedVariants } from '@flower/shared-types';
+import {
+  type CatalogEventType,
+  type FulfilmentStrategy,
+  usesFixedVariants,
+} from '@flower/shared-types';
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
@@ -385,7 +389,7 @@ export class ProductRepository extends ScopedRepository {
         await this.outbox.enqueue(tx, {
           aggregateType: 'product',
           aggregateId: id,
-          eventType: 'catalog.product.status_changed',
+          eventType: 'catalog.product.status_changed' satisfies CatalogEventType,
           resourceVersion: updated.version,
           payload: { productId: id, fromStatus: current.status, toStatus: next },
         });

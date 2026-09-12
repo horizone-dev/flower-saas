@@ -1013,6 +1013,7 @@ describe('variants + option groups (task 3.4, integration)', () => {
         'if-match': `"${v2}"`,
       });
       expect(re.statusCode, re.payload).toBe(200);
+      const v3 = (re.json() as { version: number }).version;
 
       const events = await variantEvents(vid);
       expect(events).toHaveLength(3);
@@ -1028,6 +1029,17 @@ describe('variants + option groups (task 3.4, integration)', () => {
         expect(e.payload['productId']).toBe(p.id);
         expect(Number(e.resourceVersion)).toBeGreaterThan(0);
       }
+      // owner strict-review fix — `resourceVersion` must be the AUTHORITATIVE
+      // post-update row value (never a derived `current.version + 1`): prove
+      // the three-way equality — the version each API response returned, the
+      // version each outbox row recorded, and the version actually persisted.
+      expect(events.map((e) => Number(e.resourceVersion))).toEqual([v1, v2, v3]);
+      const persisted = await sql<{ version: number }>(
+        `SELECT version FROM variant WHERE id = $1`,
+        [vid],
+      );
+      expect(persisted[0]!.version).toBe(v3);
+      expect(Number(events[2]!.resourceVersion)).toBe(persisted[0]!.version);
     });
 
     it('a no-op variant activate + a base-UOM edit emit NO variant status event', async () => {

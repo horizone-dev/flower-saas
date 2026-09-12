@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { ScopedTx } from '@flower/db';
+import type { CatalogEventType } from '@flower/shared-types';
 import { Money, type MoneyDTO } from '@flower/money';
 import { Quantity, type UomRegistry } from '@flower/uom';
 import { ScopedRepository, DbService } from '../../common/data/index.js';
@@ -365,7 +366,7 @@ export class CompanyPricingRepository extends ScopedRepository {
         await this.outbox.enqueue(tx, {
           aggregateType: 'company_variant_price_set',
           aggregateId: aggId,
-          eventType: 'catalog.company.price_changed',
+          eventType: 'catalog.company.price_changed' satisfies CatalogEventType,
           companyId,
           resourceVersion: nextVersion,
           payload: {
