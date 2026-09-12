@@ -88,12 +88,20 @@ Full breakdown: [`../phase-0/PHASE-0-PLAN.md`](../phase-0/PHASE-0-PLAN.md).
 
 ## Phase 3 — Catalog, tax, orders, POS walk-in sale, payments, double-entry GL, receivables _(first revenue path + financial truth)_
 
+Phase 3 executes as two owner-approved sub-phases: **3a** (catalog/UOM/
+identifiers/pricing/tax-reference foundation — complete,
+`phase-3a-catalog-complete`) then **3b** (orders/payments/GL/receivables/
+settlement/cancellation/refund — this section's remaining scope, planned in
+[`../phase-3/PHASE-3B-PLAN.md`](../phase-3/PHASE-3B-PLAN.md)).
+`phase-3-complete` requires both.
+
 - **Objective**: a florist rings up a STOCKED walk-in sale with correct GCC tax,
   cash + one card provider; every sale posts one balanced, idempotent journal entry;
   other branch terminals see it live.
 - **Modules**: catalog, identifiers, pricing (basic), tax, orders, payments,
   **accounting** (CoA + posting engine + periods), **receivables** (AR / credit /
-  advances / gift cards), crm (core), files, reporting (first rollups).
+  advances — gift cards explicitly deferred beyond Phase 3b V1, not required
+  for phase-3-complete), crm (core), files, reporting (first rollups).
 - **ADR-0018 (additive, 2026-09-05)**: `catalog` also designs the
   `business_type_template` reference table + tenant catalog capability
   configuration (extends §48; Super-Admin write, Owner operate-within) and must
