@@ -5,6 +5,7 @@ import {
   PHASE_3_5_TENANT_PERMISSIONS,
   PHASE_3_7_TENANT_PERMISSIONS,
   PHASE_3_8_TENANT_PERMISSIONS,
+  PHASE_3B_1_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -38,6 +39,12 @@ import {
  * `branch_price:manage`; `manager` does NOT by default (mirrors the keys above).
  * Existing tenants get the identical backfill in the task 3.8 migration. Not
  * step-up. Gates BOTH branch-price writes and branch-availability writes.
+ *
+ * Phase 3b task 3b.1 (docs/phase-3/PHASE-3B-PLAN.md §E): `owner` + `admin`
+ * gain `accounting:view` + `accounting:manage`; `owner` ALONE also gains
+ * `accounting:period:manage` (Owner-tier only — no tenant "Super Admin" role
+ * is invented; `manager` gets neither). Existing tenants get the identical
+ * backfill in the task 3b.1 migration.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
@@ -50,6 +57,10 @@ const CATALOG = [
   ...PHASE_3_8_TENANT_PERMISSIONS,
 ];
 const CATALOG_VIEW = 'catalog:view';
+/** accounting:view + accounting:manage — shared by owner + admin (3b.1). */
+const ACCOUNTING = PHASE_3B_1_TENANT_PERMISSIONS.filter((k) => k !== 'accounting:period:manage');
+/** accounting:period:manage — Owner-tier only (3b.1). */
+const ACCOUNTING_PERIOD_MANAGE = 'accounting:period:manage';
 
 export interface SystemRoleTemplate {
   key: string;
@@ -58,8 +69,12 @@ export interface SystemRoleTemplate {
 }
 
 export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freeze([
-  { key: 'owner', name: 'Owner', permissions: [...P, ...CATALOG] },
-  { key: 'admin', name: 'Admin', permissions: [...P, ...CATALOG] },
+  {
+    key: 'owner',
+    name: 'Owner',
+    permissions: [...P, ...CATALOG, ...ACCOUNTING, ACCOUNTING_PERIOD_MANAGE],
+  },
+  { key: 'admin', name: 'Admin', permissions: [...P, ...CATALOG, ...ACCOUNTING] },
   {
     key: 'manager',
     name: 'Manager',

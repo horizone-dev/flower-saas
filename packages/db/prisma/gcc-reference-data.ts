@@ -23,6 +23,10 @@ export interface CountrySeed {
   defaultCurrencyCode: string;
   weekendModel: 'FRI_SAT' | 'SAT_SUN';
   active: boolean;
+  /// IANA zone — provisioning-default reference data ONLY (task 3b.1). Read
+  /// once, at company-provisioning time, to pre-fill `Company.accountingTimezone`.
+  /// Never a runtime posting-time fallback; never re-applied to an existing Company.
+  defaultTimezone: string;
 }
 
 export interface CurrencySeed {
@@ -88,6 +92,7 @@ export const GCC_COUNTRIES: readonly CountrySeed[] = [
     defaultCurrencyCode: 'AED',
     weekendModel: 'SAT_SUN',
     active: true,
+    defaultTimezone: 'Asia/Dubai',
   },
   {
     code: 'SA',
@@ -97,6 +102,7 @@ export const GCC_COUNTRIES: readonly CountrySeed[] = [
     defaultCurrencyCode: 'SAR',
     weekendModel: 'FRI_SAT',
     active: true,
+    defaultTimezone: 'Asia/Riyadh',
   },
   {
     code: 'QA',
@@ -106,6 +112,7 @@ export const GCC_COUNTRIES: readonly CountrySeed[] = [
     defaultCurrencyCode: 'QAR',
     weekendModel: 'FRI_SAT',
     active: true,
+    defaultTimezone: 'Asia/Qatar',
   },
   {
     code: 'KW',
@@ -115,6 +122,7 @@ export const GCC_COUNTRIES: readonly CountrySeed[] = [
     defaultCurrencyCode: 'KWD',
     weekendModel: 'FRI_SAT',
     active: true,
+    defaultTimezone: 'Asia/Kuwait',
   },
   {
     code: 'BH',
@@ -124,6 +132,7 @@ export const GCC_COUNTRIES: readonly CountrySeed[] = [
     defaultCurrencyCode: 'BHD',
     weekendModel: 'FRI_SAT',
     active: true,
+    defaultTimezone: 'Asia/Bahrain',
   },
   {
     code: 'OM',
@@ -133,6 +142,7 @@ export const GCC_COUNTRIES: readonly CountrySeed[] = [
     defaultCurrencyCode: 'OMR',
     weekendModel: 'FRI_SAT',
     active: true,
+    defaultTimezone: 'Asia/Muscat',
   },
 ];
 

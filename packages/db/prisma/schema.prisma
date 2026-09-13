@@ -110,7 +110,7 @@ model PermissionRegistry {
   /// TENANT | PLATFORM — the two realms are never cross-grantable (SECURITY.md)
   realm        String   @default("TENANT")
   groupKey     String
-  description   String
+  description  String
   /// the phase that first enforces this key (1 for the Phase 1 foundation set)
   addedInPhase Int      @default(1)
   createdAt    DateTime @default(now()) @db.Timestamptz(6)
@@ -124,13 +124,13 @@ model PermissionRegistry {
 // credentials, MFA, roles and sessions.
 
 model PlatformUser {
-  id            String                 @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  email         String                 @unique
+  id            String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  email         String               @unique
   name          String
   /// ACTIVE | DISABLED
-  status        String                 @default("ACTIVE")
-  createdAt     DateTime               @default(now()) @db.Timestamptz(6)
-  updatedAt     DateTime               @updatedAt @db.Timestamptz(6)
+  status        String               @default("ACTIVE")
+  createdAt     DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime             @updatedAt @db.Timestamptz(6)
   credential    PlatformCredential?
   mfaFactors    PlatformMfaFactor[]
   roles         PlatformUserRole[]
@@ -200,21 +200,21 @@ model PlatformUserRole {
 }
 
 model PlatformSession {
-  id             String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  platformUserId String       @db.Uuid
-  platformUser   PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
+  id                    String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  platformUserId        String       @db.Uuid
+  platformUser          PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
   /// NONE | MFA | STEP_UP
-  mfaLevel       String       @default("NONE")
-  ip             String?
-  userAgent      String?
+  mfaLevel              String       @default("NONE")
+  ip                    String?
+  userAgent             String?
   /// non-null while an impersonation is active (points at a tenant)
-  impersonatingTenantId String? @db.Uuid
+  impersonatingTenantId String?      @db.Uuid
   impersonationReason   String?
-  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
-  lastSeenAt     DateTime     @default(now()) @db.Timestamptz(6)
-  expiresAt      DateTime     @db.Timestamptz(6)
-  revokedAt      DateTime?    @db.Timestamptz(6)
-  revokeReason   String?
+  createdAt             DateTime     @default(now()) @db.Timestamptz(6)
+  lastSeenAt            DateTime     @default(now()) @db.Timestamptz(6)
+  expiresAt             DateTime     @db.Timestamptz(6)
+  revokedAt             DateTime?    @db.Timestamptz(6)
+  revokeReason          String?
 
   @@index([platformUserId])
   @@map("platform_session")
@@ -224,15 +224,15 @@ model PlatformSession {
 
 /// The isolation root. RLS on this table keys on `id` (not `tenant_id`).
 model Tenant {
-  id            String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  slug          String   @unique
-  name          String
+  id                         String                @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  slug                       String                @unique
+  name                       String
   /// e.g. "AE", "SA" — never hardcoded region logic (Z-3)
-  region        String
+  region                     String
   /// DRAFT | ACTIVE | SUSPENDED | TERMINATED
-  status        String   @default("DRAFT")
-  planVersionId String   @db.Uuid
-  planVersion   PlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
+  status                     String                @default("DRAFT")
+  planVersionId              String                @db.Uuid
+  planVersion                PlanVersion           @relation(fields: [planVersionId], references: [id], onDelete: Restrict)
   /// Business-Type preset this tenant was provisioned with (Phase 3 task 3.1) —
   /// a `business_type_template.key`. Nullable ONLY for pre-3.1 tenants; the new
   /// provisioning API requires it (D2-12 / spec §1). NEVER read at runtime to
@@ -241,37 +241,41 @@ model Tenant {
   businessType               BusinessTypeTemplate? @relation(fields: [businessTypeKey], references: [key], onDelete: Restrict)
   /// the `business_type_template.version` the current capability snapshot came from
   businessTypeAppliedVersion Int?
-  businessTypeAppliedAt      DateTime? @db.Timestamptz(6)
+  businessTypeAppliedAt      DateTime?             @db.Timestamptz(6)
   /// Aggregate optimistic-concurrency counter for the tenant's COMPLETE catalog
   /// capability configuration (spec §L / R-3). 0 = unconfigured; the initial
   /// template apply sets it to 1; every successful capability PATCH +1.
-  catalogCapabilityVersion   Int      @default(0)
-  createdAt     DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+  catalogCapabilityVersion   Int                   @default(0)
+  createdAt                  DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt                  DateTime              @updatedAt @db.Timestamptz(6)
 
-  entitlements  TenantEntitlement[]
-  limits        TenantLimit[]
-  settings      TenantSetting[]
-  users         User[]
-  roles         Role[]
-  companies     Company[]
-  branches      Branch[]
-  posTerminals  PosTerminal[]
-  providerCreds ProviderCredential[]
+  entitlements        TenantEntitlement[]
+  limits              TenantLimit[]
+  settings            TenantSetting[]
+  users               User[]
+  roles               Role[]
+  companies           Company[]
+  branches            Branch[]
+  posTerminals        PosTerminal[]
+  providerCreds       ProviderCredential[]
   catalogCapabilities TenantCatalogCapability[]
+  accounts            Account[]
+  accountingPeriods   AccountingPeriod[]
+  journalEntries      JournalEntry[]
+  journalLines        JournalLine[]
 
   @@map("tenant")
 }
 
 model TenantEntitlement {
-  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId  String  @db.Uuid
-  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   moduleKey String
-  enabled   Boolean @default(false)
-  config    Json    @default("{}")
+  enabled   Boolean  @default(false)
+  config    Json     @default("{}")
   /// DEFAULT | OVERRIDE
-  source    String  @default("DEFAULT")
+  source    String   @default("DEFAULT")
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
   @@unique([tenantId, moduleKey])
@@ -280,17 +284,17 @@ model TenantEntitlement {
 }
 
 model TenantLimit {
-  id                   String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId             String        @db.Uuid
-  tenant               Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  limitKey             String
-  value                BigInt
-  isOverride           Boolean       @default(false)
-  overrideReason       String?
-  setByPlatformUserId  String?       @db.Uuid
-  setByPlatformUser    PlatformUser? @relation(fields: [setByPlatformUserId], references: [id], onDelete: SetNull)
-  setAt                DateTime?     @db.Timestamptz(6)
-  updatedAt            DateTime      @updatedAt @db.Timestamptz(6)
+  id                  String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId            String        @db.Uuid
+  tenant              Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  limitKey            String
+  value               BigInt
+  isOverride          Boolean       @default(false)
+  overrideReason      String?
+  setByPlatformUserId String?       @db.Uuid
+  setByPlatformUser   PlatformUser? @relation(fields: [setByPlatformUserId], references: [id], onDelete: SetNull)
+  setAt               DateTime?     @db.Timestamptz(6)
+  updatedAt           DateTime      @updatedAt @db.Timestamptz(6)
 
   @@unique([tenantId, limitKey])
   @@index([tenantId])
@@ -314,27 +318,27 @@ model TenantSetting {
 // ───────────────────────────── identity (tenant) ──────────────────────────────
 
 model User {
-  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId    String   @db.Uuid
-  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id              String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   /// OWNER | USER — a limit bucket, never an authorization signal (ARCH §6)
-  accountType String   @default("USER")
-  email       String
-  phone       String?
+  accountType     String   @default("USER")
+  email           String
+  phone           String?
   /// ACTIVE | DISABLED | LOCKED
-  status      String   @default("ACTIVE")
-  createdAt   DateTime @default(now()) @db.Timestamptz(6)
-  createdByUserId String? @db.Uuid
-  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+  status          String   @default("ACTIVE")
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  createdByUserId String?  @db.Uuid
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
 
-  credential         Credential?
-  mfaFactors         MfaFactor[]
-  setPasswordTokens  SetPasswordToken[]
-  sessions           Session[]
-  roles              UserRole[]
-  grants             PermissionGrant[]  @relation("grantSubject")
-  grantsMade         PermissionGrant[]  @relation("grantActor")
-  dataScope          DataScopeAssignment?
+  credential        Credential?
+  mfaFactors        MfaFactor[]
+  setPasswordTokens SetPasswordToken[]
+  sessions          Session[]
+  roles             UserRole[]
+  grants            PermissionGrant[]    @relation("grantSubject")
+  grantsMade        PermissionGrant[]    @relation("grantActor")
+  dataScope         DataScopeAssignment?
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -376,38 +380,38 @@ model MfaFactor {
 /// Admin-generated, single-use, expiring set-password link. Token hashed at rest
 /// (OD3) — the raw token is only ever in the API response.
 model SetPasswordToken {
-  id              String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId        String    @db.Uuid
-  userId          String    @db.Uuid
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash       String    @unique
-  expiresAt       DateTime  @db.Timestamptz(6)
-  usedAt          DateTime? @db.Timestamptz(6)
-  createdByUserId String?   @db.Uuid
-  createdByPlatformUserId String? @db.Uuid
-  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  id                      String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                String    @db.Uuid
+  userId                  String    @db.Uuid
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash               String    @unique
+  expiresAt               DateTime  @db.Timestamptz(6)
+  usedAt                  DateTime? @db.Timestamptz(6)
+  createdByUserId         String?   @db.Uuid
+  createdByPlatformUserId String?   @db.Uuid
+  createdAt               DateTime  @default(now()) @db.Timestamptz(6)
 
   @@index([tenantId, userId])
   @@map("set_password_token")
 }
 
 model Session {
-  id            String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId      String    @db.Uuid
-  userId        String    @db.Uuid
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id            String         @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String         @db.Uuid
+  userId        String         @db.Uuid
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// identity/origin/audit only — NEVER an isolation boundary (ARCH §8)
-  posTerminalId String?   @db.Uuid
+  posTerminalId String?        @db.Uuid
   /// null until Phase 2 (devices module)
-  deviceId      String?   @db.Uuid
+  deviceId      String?        @db.Uuid
   /// NONE | MFA | STEP_UP
-  mfaLevel      String    @default("NONE")
+  mfaLevel      String         @default("NONE")
   ip            String?
   userAgent     String?
-  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
-  lastSeenAt    DateTime  @default(now()) @db.Timestamptz(6)
-  expiresAt     DateTime  @db.Timestamptz(6)
-  revokedAt     DateTime? @db.Timestamptz(6)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(6)
+  lastSeenAt    DateTime       @default(now()) @db.Timestamptz(6)
+  expiresAt     DateTime       @db.Timestamptz(6)
+  revokedAt     DateTime?      @db.Timestamptz(6)
   revokeReason  String?
   refreshTokens RefreshToken[]
 
@@ -518,13 +522,13 @@ model PermissionGrant {
 /// The data-scope axis. Company + branch scope, optional per-branch permission
 /// overlay. Owner short-circuits to ALL/ALL at resolution time.
 model DataScopeAssignment {
-  id               String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId         String  @db.Uuid
-  userId           String  @unique @db.Uuid
-  user             User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  companyScopeAll  Boolean @default(false)
+  id               String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  userId           String   @unique @db.Uuid
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyScopeAll  Boolean  @default(false)
   companyIds       String[] @db.Uuid
-  branchScopeAll   Boolean @default(false)
+  branchScopeAll   Boolean  @default(false)
   branchIds        String[] @db.Uuid
   /// { "<branchId>": ["perm:key", …] } — narrower perms in specific branches
   perBranchOverlay Json?
@@ -537,37 +541,50 @@ model DataScopeAssignment {
 // ──────────────────────────────── org (tenant) ────────────────────────────────
 
 model Company {
-  id                String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId          String        @db.Uuid
-  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  legalNameEn       String
-  legalNameAr       String?
-  crNumber          String?
+  id                 String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId           String               @db.Uuid
+  tenant             Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalNameEn        String
+  legalNameAr        String?
+  crNumber           String?
   /// tax registration number / VAT number
-  trn               String?
-  registeredAddress String?
+  trn                String?
+  registeredAddress  String?
   /// The legal-entity country — THE fiscal source (currency / VAT / e-invoicing),
   /// never `tenant.region` (architecture correction 4). Nullable in the Phase
   /// 2-core expand migration; task 2.7 provisioning sets it. FK -> country.code.
-  countryCode       String?
+  countryCode        String?
   /// resolved from the country at provisioning; a branch may override *display*
   /// currency only, never the legal currency. FK -> currency.code.
-  defaultCurrency   String?
+  defaultCurrency    String?
   /// non-secret fiscal profile (e-invoicing provider ref, invoice-series policy).
-  fiscalConfig      Json?
+  fiscalConfig       Json?
+  /// task 3b.1 — the SOLE financial-posting-authority timezone (IANA, e.g.
+  /// "Asia/Dubai"). Nullable at rollout (existing companies require an explicit
+  /// Accounting Setup action to configure it — never auto-backfilled); financial
+  /// posting fails closed (ACCOUNTING_TIMEZONE_NOT_CONFIGURED) while null. Never
+  /// falls back to Branch.timezone / Country.defaultTimezone / POS / client tz.
+  accountingTimezone String?
   /// ACTIVE | INACTIVE
-  status            String        @default("ACTIVE")
-  createdAt         DateTime      @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime      @updatedAt @db.Timestamptz(6)
-  tradeLicenses     TradeLicense[]
-  branches          Branch[]
-  posTerminals      PosTerminal[]
-  providerCreds     ProviderCredential[]
+  status             String               @default("ACTIVE")
+  createdAt          DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime             @updatedAt @db.Timestamptz(6)
+  tradeLicenses      TradeLicense[]
+  branches           Branch[]
+  posTerminals       PosTerminal[]
+  providerCreds      ProviderCredential[]
+  accounts           Account[]
+  accountingPeriods  AccountingPeriod[]
+  journalEntries     JournalEntry[]
+  journalLines       JournalLine[]
 
   /// task 3.7 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`                  ← `company_variant_price_set` tenant-safe FK
   ///   `(tenantId, id, defaultCurrency)` ← `company_variant_uom_price.sellCurrencyCode`
   ///     must equal the company's default currency (Inv-3); ON UPDATE RESTRICT.
+  /// task 3b.1 — FK targets only (no column added / retyped):
+  ///   `(tenantId, companyId, id)` on `account` / `accounting_period` /
+  ///   `journal_entry` — proves each row belongs to this company at the DB.
   @@unique([tenantId, id])
   @@unique([tenantId, id, defaultCurrency])
   @@index([tenantId])
@@ -593,23 +610,24 @@ model TradeLicense {
 }
 
 model Branch {
-  id           String          @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId     String          @db.Uuid
-  tenant       Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  companyId    String          @db.Uuid
-  company      Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  name         String
+  id            String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId      String               @db.Uuid
+  tenant        Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId     String               @db.Uuid
+  company       Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  name          String
   /// IANA tz, e.g. "Asia/Dubai"
-  timezone     String          @default("Asia/Dubai")
+  timezone      String               @default("Asia/Dubai")
   /// FRI_SAT | SAT_SUN | SUN_ONLY … (GCC weekend model)
-  weekendModel String          @default("FRI_SAT")
+  weekendModel  String               @default("FRI_SAT")
   /// ACTIVE | INACTIVE
-  status       String          @default("ACTIVE")
-  createdAt    DateTime        @default(now()) @db.Timestamptz(6)
-  updatedAt    DateTime        @updatedAt @db.Timestamptz(6)
-  settings     BranchSetting[]
-  posTerminals PosTerminal[]
+  status        String               @default("ACTIVE")
+  createdAt     DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime             @updatedAt @db.Timestamptz(6)
+  settings      BranchSetting[]
+  posTerminals  PosTerminal[]
   providerCreds ProviderCredential[]
+  journalLines  JournalLine[]
 
   /// task 3.8 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`             ← `branch_variant_*` tenant-safe FK
@@ -637,54 +655,210 @@ model BranchSetting {
 
 /// Identity / origin / register / audit only. NEVER an isolation boundary.
 model PosTerminal {
-  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId  String   @db.Uuid
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  companyId String   @db.Uuid
-  company   Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  branchId  String   @db.Uuid
-  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  code      String
-  name      String
+  id           String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId     String        @db.Uuid
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId    String        @db.Uuid
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId     String        @db.Uuid
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  code         String
+  name         String
   /// ACTIVE | INACTIVE
-  status    String   @default("ACTIVE")
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  status       String        @default("ACTIVE")
+  createdAt    DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime      @updatedAt @db.Timestamptz(6)
+  journalLines JournalLine[]
 
+  /// task 3b.1 — FK target only: `journal_line.(tenantId, companyId, branchId,
+  /// posTerminalId)` proves a POS attribution dimension belongs to the same
+  /// tenant + company + branch as the line (attribution only, never isolation).
   @@unique([tenantId, code])
+  @@unique([tenantId, companyId, branchId, id])
   @@index([tenantId, branchId])
   @@map("pos_terminal")
+}
+
+// ─────── accounting: CoA + posting engine + accounting periods (task 3b.1) ────
+// One GL per Company (ZF-3). Branch / POS terminal are journal-line DIMENSIONS,
+// never separate ledgers / isolation axes. `JournalEntry`/`JournalLine` are
+// made append-only + minimum-2-line + balanced by DB trigger (not just service
+// discipline) — see the sealed-journal trigger set in this migration's SQL.
+
+/// Chart-of-accounts row — one per (tenant, company, key). The 14 frozen system
+/// keys (ASSET.CASH_ON_HAND … EXPENSE.RECEIVABLE_WRITE_OFF) are seeded at
+/// company-provisioning time from `accounting-reference-data.ts` (task 3b.1
+/// checkpoint B) and are non-disableable by construction — no status/lifecycle
+/// field exists in V1 (no owner-created custom account exists to disable).
+model Account {
+  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId   String   @db.Uuid
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  /// immutable internal posting identity, e.g. "ASSET.CASH_ON_HAND" — never
+  /// exposed on any update DTO; write-once at seed time.
+  key         String
+  /// ASSET | LIABILITY | EQUITY | REVENUE | CONTRA_REVENUE | EXPENSE — immutable
+  category    String
+  /// owner-editable human-facing code (report / reconciliation use)
+  displayCode String
+  /// owner-editable human-facing name
+  displayName String
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  journalLines JournalLine[]
+
+  /// FK target: `journal_line.(tenantId, companyId, accountId)` proves a line's
+  /// account belongs to the same tenant + company as the line itself.
+  @@unique([tenantId, companyId, id])
+  @@unique([tenantId, companyId, key])
+  @@unique([tenantId, companyId, displayCode])
+  @@index([tenantId, companyId])
+  @@map("account")
+}
+
+/// A company-scoped fiscal period. OPEN | CLOSED, V1 has no reopen API — a
+/// correction to closed-period activity is a new reversing entry posted into a
+/// currently-OPEN period, never a reopen. Non-overlap is a DB exclusion
+/// constraint (`btree_gist`, added by hand in the migration SQL — Prisma's
+/// schema DSL cannot express it), not merely an application check.
+model AccountingPeriod {
+  id             String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId       String    @db.Uuid
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId      String    @db.Uuid
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  startDate      DateTime  @db.Date
+  endDate        DateTime  @db.Date
+  /// OPEN | CLOSED
+  status         String    @default("OPEN")
+  closedAt       DateTime? @db.Timestamptz(6)
+  closedByUserId String?   @db.Uuid
+  /// optimistic concurrency (If-Match pattern, matching every other mutation)
+  version        Int       @default(1)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+
+  journalEntries JournalEntry[]
+
+  @@index([tenantId, companyId, startDate, endDate])
+  @@map("accounting_period")
+}
+
+/// One balanced, immutable posting-worthy business event. `postingDate` is
+/// server-derived (posting instant + `Company.accountingTimezone`) — never
+/// client input — and immutable once stored. Idempotent re-posting of the same
+/// `(tenantId, companyId, sourceKind, sourceId)` is a no-op IF the
+/// `postingFingerprint` matches; a mismatch is a `JOURNAL_SOURCE_CONFLICT`
+/// (financial-safety-critical — never silently swallowed). `sealedAt` is an
+/// INTERNAL implementation marker only (see the migration SQL's sealed-journal
+/// trigger set) — externally a Journal either posts successfully or does not
+/// exist; there is no visible draft state.
+model JournalEntry {
+  id                       String           @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                 String           @db.Uuid
+  tenant                   Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId                String           @db.Uuid
+  company                  Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  accountingPeriodId       String           @db.Uuid
+  accountingPeriod         AccountingPeriod @relation(fields: [accountingPeriodId], references: [id], onDelete: Restrict)
+  postingDate              DateTime         @db.Date
+  /// the originating domain event kind, e.g. "ORDER_SALE" (no producer exists
+  /// yet in task 3b.1 — the posting engine primitive ships without one)
+  sourceKind               String
+  sourceId                 String
+  /// inherited from `Company.defaultCurrency` at posting time, immutable
+  /// thereafter. Single currency per journal — no FX, no multi-currency journal.
+  currencyCode             String
+  description              String?
+  reversalOfJournalEntryId String?          @db.Uuid
+  reversalOfJournalEntry   JournalEntry?    @relation("JournalReversal", fields: [reversalOfJournalEntryId], references: [id], onDelete: Restrict)
+  reversals                JournalEntry[]   @relation("JournalReversal")
+  /// deterministic canonical-content hash over the posting request — detects a
+  /// same-source-identity-different-content conflict.
+  postingFingerprint       String
+  /// internal-only sealing marker (see migration SQL) — NULL only transiently
+  /// inside the posting transaction; a row visible outside that transaction is
+  /// always sealed and balanced (DB-enforced, not application discipline).
+  sealedAt                 DateTime?        @db.Timestamptz(6)
+  createdByUserId          String?          @db.Uuid
+  createdAt                DateTime         @default(now()) @db.Timestamptz(6)
+
+  lines JournalLine[]
+
+  /// FK target: `journal_line.(tenantId, companyId, journalEntryId)` and the
+  /// self-referencing reversal FK below.
+  @@unique([tenantId, companyId, id])
+  /// idempotent-posting identity — reposting the same source is a no-op
+  /// (fingerprint-checked in the service layer).
+  @@unique([tenantId, companyId, sourceKind, sourceId])
+  /// at most one full reversal per original entry (nullable-unique).
+  @@unique([reversalOfJournalEntryId])
+  @@index([tenantId, companyId, postingDate])
+  @@map("journal_entry")
+}
+
+/// A single debit or credit line of a `JournalEntry`. No `currencyCode` /
+/// `currencyExponent` here by design — every line inherits its parent entry's
+/// single currency (no per-line drift possible; no field exists to diverge).
+/// `branchId` / `posTerminalId` are dimension / attribution columns ONLY —
+/// never a GL isolation axis (see `journal_line_pos_requires_branch` CHECK and
+/// the composite FKs added by hand in the migration SQL).
+model JournalLine {
+  id             String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId       String       @db.Uuid
+  tenant         Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId      String       @db.Uuid
+  company        Company      @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  journalEntryId String       @db.Uuid
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Restrict)
+  accountId      String       @db.Uuid
+  account        Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  branchId       String?      @db.Uuid
+  branch         Branch?      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  posTerminalId  String?      @db.Uuid
+  posTerminal    PosTerminal? @relation(fields: [posTerminalId], references: [id], onDelete: Restrict)
+  debitMinor     BigInt       @default(0)
+  creditMinor    BigInt       @default(0)
+  description    String?
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+
+  @@index([journalEntryId])
+  @@index([tenantId, companyId])
+  @@map("journal_line")
 }
 
 // ───────────────────────── secrets vault shell (tenant) ───────────────────────
 // Platform-realm write only. No tenant-realm permission key exists for these.
 
 model ProviderCredential {
-  id                    String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId              String        @db.Uuid
-  tenant                Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  companyId             String?       @db.Uuid
-  company               Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
-  branchId              String?       @db.Uuid
-  branch                Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  id                      String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                String        @db.Uuid
+  tenant                  Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId               String?       @db.Uuid
+  company                 Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  branchId                String?       @db.Uuid
+  branch                  Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
   /// e.g. "stripe", "whatsapp_bsp", "openai"
-  provider              String
+  provider                String
   /// TEST | LIVE
-  mode                  String        @default("TEST")
+  mode                    String        @default("TEST")
   /// AES-256-GCM ciphertext of the raw credential (never logged, never returned)
-  secretCiphertext      Bytes
-  secretNonce           Bytes
+  secretCiphertext        Bytes
+  secretNonce             Bytes
   /// the per-tenant DEK, wrapped by the master key (KMS in prod, env in dev)
-  dekWrapped            Bytes
+  dekWrapped              Bytes
   /// non-secret config a tenant may see (masked display, method toggles…)
-  nonSecretConfig       Json          @default("{}")
+  nonSecretConfig         Json          @default("{}")
   /// ACTIVE | REVOKED
-  status                String        @default("ACTIVE")
-  version               Int           @default(1)
-  updatedByPlatformUserId String?     @db.Uuid
-  updatedByPlatformUser PlatformUser? @relation(fields: [updatedByPlatformUserId], references: [id], onDelete: SetNull)
-  createdAt             DateTime      @default(now()) @db.Timestamptz(6)
-  updatedAt             DateTime      @updatedAt @db.Timestamptz(6)
+  status                  String        @default("ACTIVE")
+  version                 Int           @default(1)
+  updatedByPlatformUserId String?       @db.Uuid
+  updatedByPlatformUser   PlatformUser? @relation(fields: [updatedByPlatformUserId], references: [id], onDelete: SetNull)
+  createdAt               DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime      @updatedAt @db.Timestamptz(6)
 
   @@index([tenantId, provider])
   @@map("provider_credential")
@@ -729,40 +903,40 @@ model AuditLog {
 }
 
 model Outbox {
-  id            String    @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId      String?   @db.Uuid
+  id              String    @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId        String?   @db.Uuid
   /// optional — set when the event is company-scoped OR branch-scoped (ADR-0017
   /// §3 envelope `company_id`, additive Phase-3 amendment / task 3.10). A
   /// branch-scoped catalog event carries BOTH companyId and branchId (defence in
   /// depth); a company-scoped one carries companyId with branchId null. The
   /// gateway authorises CUMULATIVELY (tenant + company + branch). Never derived
   /// from a client value; never read from `payload`.
-  companyId     String?   @db.Uuid
+  companyId       String?   @db.Uuid
   /// optional — set when the event is branch-scoped (ADR-0017 envelope field)
-  branchId      String?   @db.Uuid
-  aggregateType String
-  aggregateId   String
-  eventType     String
-  payload       Json
+  branchId        String?   @db.Uuid
+  aggregateType   String
+  aggregateId     String
+  eventType       String
+  payload         Json
   /// optional resource version for the ADR-0017 envelope (`resource_version`) —
   /// gates payload application client-side; never authoritative business state.
   resourceVersion BigInt?
   /// optional safe actor summary for the envelope (`actor_summary`) — e.g.
   /// `{ "userId": "...", "accountType": "OWNER" }`. Never a token, secret or
   /// full user record.
-  actorSummary  Json?
-  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+  actorSummary    Json?
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
   /// null until the dispatcher publishes it (Phase 2-core task 2.4)
-  dispatchedAt  DateTime? @db.Timestamptz(6)
+  dispatchedAt    DateTime? @db.Timestamptz(6)
   /// per-tenant-global logical sequence — assigned ONCE by the dispatcher and
   /// persisted BEFORE the Redis publish; never re-assigned (FC-1 / ADR-0017 §1).
   /// Allocated from `OutboxTenantSeq` by whichever dispatcher holds the
   /// per-tenant advisory lock (task 2.4 / OI-P2-1).
-  seq           BigInt?
-  attempts      Int       @default(0)
-  availableAt   DateTime  @default(now()) @db.Timestamptz(6)
+  seq             BigInt?
+  attempts        Int       @default(0)
+  availableAt     DateTime  @default(now()) @db.Timestamptz(6)
   /// bounded, sanitised (never a secret/credential) — task 2.4
-  lastError     String?
+  lastError       String?
 
   @@id([id, createdAt])
   @@index([createdAt])
@@ -862,6 +1036,11 @@ model Country {
   /// region grouping; mirrors tenant.region semantics, not a fiscal source
   region              String
   defaultCurrencyCode String
+  /// task 3b.1 — provisioning-default reference data ONLY (IANA, e.g.
+  /// "Asia/Dubai"). Read exactly once, at company-provisioning time, to
+  /// pre-fill `Company.accountingTimezone`. Never re-read/re-applied to an
+  /// existing Company afterward; never a runtime posting-time fallback.
+  defaultTimezone     String?
   /// FRI_SAT | SAT_SUN | SUN_ONLY …
   weekendModel        String
   /// Hijri display, Ramadan hours, etc.
@@ -1014,13 +1193,13 @@ model BusinessTypeTemplateCapability {
 /// JSON blob is never used (D2-5 / HG3-CAPABILITY-NORMALIZATION). Provenance is
 /// explicit via `sourceKind` (spec §H) — never inferred from `version === 1`.
 model TenantCatalogCapability {
-  id            String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId      String  @db.Uuid
-  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id                    String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId              String    @db.Uuid
+  tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   /// one of the closed 16-key CapabilityKey set (`@flower/shared-types`)
-  capabilityKey String
-  enabled       Boolean
-  config        Json?
+  capabilityKey         String
+  enabled               Boolean
+  config                Json?
   /// TEMPLATE — written by an apply, unchanged since; MANUAL — created or edited
   /// by a PATCH. Task 3.10's `merge` re-apply updates only TEMPLATE rows.
   sourceKind            String
@@ -1036,9 +1215,9 @@ model TenantCatalogCapability {
   overriddenAt          DateTime? @db.Timestamptz(6)
   /// per-row counter — reserved for a future single-row edit route; NOT the
   /// concurrency contract for the set (that is tenant.catalogCapabilityVersion).
-  version   Int      @default(1)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  version               Int       @default(1)
+  createdAt             DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(6)
 
   @@unique([tenantId, capabilityKey])
   @@index([tenantId])
@@ -1067,13 +1246,13 @@ model TenantCatalogCapability {
 /// the service (root = depth 1). Company-neutral. `ACTIVE` ↔ `ARCHIVED` only
 /// (no `DRAFT` — plan §C.3). Archive never cascades to children (owner §3).
 model Category {
-  id       String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId String  @db.Uuid
+  id        String     @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String     @db.Uuid
   /// nullable ⇒ a root category. The tenant-safe self FK `(tenantId, parentId) →
   /// category(tenantId, id)` is added in the migration.
-  parentId String? @db.Uuid
-  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
-  children Category[] @relation("CategoryTree")
+  parentId  String?    @db.Uuid
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children  Category[] @relation("CategoryTree")
   /// url-safe; sibling-unique via `(tenantId, parentId, slug)`, root-unique via a
   /// partial `(tenantId, slug) WHERE parentId IS NULL` index (migration).
   /// `^[a-z0-9][a-z0-9-]{0,62}$` (CHECK).
@@ -1081,13 +1260,13 @@ model Category {
   nameEn    String
   /// optional — an absent Arabic name is NULL, never a fake empty string (owner §8)
   nameAr    String?
-  sortOrder Int      @default(0)
+  sortOrder Int        @default(0)
   /// ACTIVE | ARCHIVED (CHECK)
-  status    String   @default("ACTIVE")
+  status    String     @default("ACTIVE")
   /// optimistic-concurrency counter — every successful update / status change +1
-  version   Int      @default(1)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  version   Int        @default(1)
+  createdAt DateTime   @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime   @updatedAt @db.Timestamptz(6)
 
   products             Product[]
   attributeDefinitions AttributeDefinition[] @relation("AttrDefCategory")
@@ -1104,8 +1283,8 @@ model Category {
 /// never a hardcoded enum (owner §4 / §10). Task 3.3 attaches typed attribute
 /// definitions to a product type; Task 3.2 stores nothing behavioural on it.
 model ProductType {
-  id       String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId String  @db.Uuid
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
   /// tenant-defined key — `^[A-Z][A-Z0-9_]{1,63}$` (CHECK). Immutable after create.
   key       String
   nameEn    String
@@ -1133,34 +1312,34 @@ model ProductType {
 /// `status = ACTIVE` means "this catalog definition is active" — NOT "sellable"
 /// (owner §7); sellability is derived later from price + variant + availability.
 model Product {
-  id            String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId      String       @db.Uuid
-  categoryId    String       @db.Uuid
-  category      Category     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  productTypeId String?      @db.Uuid
-  productType   ProductType? @relation(fields: [productTypeId], references: [id], onDelete: Restrict)
+  id                 String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId           String       @db.Uuid
+  categoryId         String       @db.Uuid
+  category           Category     @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  productTypeId      String?      @db.Uuid
+  productType        ProductType? @relation(fields: [productTypeId], references: [id], onDelete: Restrict)
   /// tenant-unique; `^[a-z0-9][a-z0-9-]{0,127}$` (CHECK)
-  slug        String
-  nameEn      String
-  nameAr      String?
-  description String?
+  slug               String
+  nameEn             String
+  nameAr             String?
+  description        String?
   /// STOCKED | BOM | CUSTOM (CHECK). Mutable ONLY while status = DRAFT (owner §5);
   /// each change re-runs the capability + entitlement check in the service.
   fulfilmentStrategy String
   /// merchandising display flag — NOT a price (plan §C.3)
-  hidePrice Boolean @default(false)
+  hidePrice          Boolean      @default(false)
   /// task 3.9 — the VAT tax-category default for this product's variants
   /// (D1 = product default + variant override). Nullable: no backfill, no
   /// NOT NULL. Textual reference to `tax_category.key` (platform-global); the FK
   /// (`ON UPDATE CASCADE ON DELETE RESTRICT`) lives in the additive migration
   /// only, exactly like `company.country_code -> country.code`. Absence at BOTH
   /// product and variant level = "not configured" — NEVER 0% tax (§11).
-  taxCategoryKey String?
+  taxCategoryKey     String?
   /// DRAFT | ACTIVE | ARCHIVED (CHECK)
-  status    String  @default("DRAFT")
-  version   Int     @default(1)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  status             String       @default("DRAFT")
+  version            Int          @default(1)
+  createdAt          DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime     @updatedAt @db.Timestamptz(6)
 
   attributeValues ProductAttributeValue[]
   optionGroups    OptionGroup[]
@@ -1190,33 +1369,33 @@ model Product {
 /// usable on create). `key` + `valueType` are immutable after create; a scope
 /// change is rejected once any value row exists (data-integrity rule 2).
 model AttributeDefinition {
-  id       String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId String  @db.Uuid
+  id                     String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId               String       @db.Uuid
   /// tenant-defined, immutable — `^[A-Z][A-Z0-9_]{1,63}$` (CHECK)
-  key   String
-  nameEn String
-  nameAr String?
+  key                    String
+  nameEn                 String
+  nameAr                 String?
   /// TEXT | NUMBER | ENUM | BOOLEAN | DATE — closed set (CHECK). Immutable.
-  valueType String
+  valueType              String
   /// scope: at most one of the two may be set (CHECK). Both null ⇒ tenant-global.
   /// Category scope = EXACT match, no descendant inheritance (owner K.7).
-  appliesToCategoryId    String? @db.Uuid
+  appliesToCategoryId    String?      @db.Uuid
   appliesToCategory      Category?    @relation("AttrDefCategory", fields: [appliesToCategoryId], references: [id], onDelete: Restrict)
-  appliesToProductTypeId String? @db.Uuid
+  appliesToProductTypeId String?      @db.Uuid
   appliesToProductType   ProductType? @relation("AttrDefProductType", fields: [appliesToProductTypeId], references: [id], onDelete: Restrict)
   /// display-only unit hint (e.g. "ml", "cm") — never enforced
-  unitHint String?
+  unitHint               String?
   /// STORED metadata only — Task 3.4 decides variant interaction (owner K.8)
-  isVariantOption Boolean @default(false)
+  isVariantOption        Boolean      @default(false)
   /// an ACTIVE, in-scope, required definition must have a value before a product
   /// can be ACTIVE (owner K.2) — catalog-definition completeness only, never
   /// changed retroactively.
-  required Boolean @default(false)
+  required               Boolean      @default(false)
   /// ACTIVE | ARCHIVED (CHECK)
-  status  String @default("ACTIVE")
-  version Int    @default(1)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  status                 String       @default("ACTIVE")
+  version                Int          @default(1)
+  createdAt              DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime     @updatedAt @db.Timestamptz(6)
 
   options AttributeOption[]
   values  ProductAttributeValue[]
@@ -1235,17 +1414,17 @@ model AttributeDefinition {
 /// deletes with its definition; `product_attribute_value.optionId` RESTRICTs
 /// that, so an in-use option cannot be removed.
 model AttributeOption {
-  id                    String @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId              String @db.Uuid
-  attributeDefinitionId String @db.Uuid
+  id                    String              @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId              String              @db.Uuid
+  attributeDefinitionId String              @db.Uuid
   definition            AttributeDefinition @relation(fields: [attributeDefinitionId], references: [id], onDelete: Cascade)
   /// stored token (e.g. "RED"); unique per definition
-  value   String
-  labelEn String
-  labelAr String?
-  sortOrder Int @default(0)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  value                 String
+  labelEn               String
+  labelAr               String?
+  sortOrder             Int                 @default(0)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime            @updatedAt @db.Timestamptz(6)
 
   values ProductAttributeValue[]
 
@@ -1264,20 +1443,20 @@ model AttributeOption {
 /// (data-integrity rule 3 + rule 1). Concurrency handle = the parent
 /// `product.version` (no own version).
 model ProductAttributeValue {
-  id                    String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId              String  @db.Uuid
-  productId             String  @db.Uuid
-  product               Product @relation(fields: [productId], references: [id], onDelete: Restrict)
-  attributeDefinitionId String  @db.Uuid
+  id                    String              @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId              String              @db.Uuid
+  productId             String              @db.Uuid
+  product               Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
+  attributeDefinitionId String              @db.Uuid
   definition            AttributeDefinition @relation(fields: [attributeDefinitionId], references: [id], onDelete: Restrict)
-  valueText   String?
-  valueNumber Decimal?  @db.Decimal(18, 4)
-  valueBool   Boolean?
-  valueDate   DateTime? @db.Date
-  optionId    String?   @db.Uuid
-  option      AttributeOption? @relation(fields: [optionId], references: [id], onDelete: Restrict)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  valueText             String?
+  valueNumber           Decimal?            @db.Decimal(18, 4)
+  valueBool             Boolean?
+  valueDate             DateTime?           @db.Date
+  optionId              String?             @db.Uuid
+  option                AttributeOption?    @relation(fields: [optionId], references: [id], onDelete: Restrict)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime            @updatedAt @db.Timestamptz(6)
 
   @@unique([tenantId, productId, attributeDefinitionId])
   @@index([tenantId, productId])
@@ -1312,10 +1491,10 @@ model ProductAttributeValue {
 /// DRAFT and has no explicit variants (owner L-11). Values are a
 /// parent-controlled replace-set guarded by `option_group.version` (owner L-12).
 model OptionGroup {
-  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId  String  @db.Uuid
-  productId String  @db.Uuid
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  productId String   @db.Uuid
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   /// tenant-defined, immutable — `^[A-Z][A-Z0-9_]{1,63}$` (CHECK)
   key       String
   nameEn    String
@@ -1345,12 +1524,12 @@ model OptionValue {
   optionGroupId String      @db.Uuid
   group         OptionGroup @relation(fields: [optionGroupId], references: [id], onDelete: Cascade)
   /// stored token (e.g. "RED"); unique per group; immutable within the replace-set
-  value     String
-  labelEn   String
-  labelAr   String?
-  sortOrder Int      @default(0)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  value         String
+  labelEn       String
+  labelAr       String?
+  sortOrder     Int         @default(0)
+  createdAt     DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @db.Timestamptz(6)
 
   variantSelections VariantOptionValue[]
 
@@ -1372,16 +1551,16 @@ model OptionValue {
 /// DB FK (OD-5) — the service validates it against `@flower/uom` and row-locks
 /// any tenant-custom code (FOR KEY SHARE).
 model Variant {
-  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId  String  @db.Uuid
-  productId String  @db.Uuid
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id              String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  productId       String   @db.Uuid
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   /// denormalised display label (derived from the product + option labels)
-  nameEn    String
-  nameAr    String?
-  sortOrder Int     @default(0)
+  nameEn          String
+  nameAr          String?
+  sortOrder       Int      @default(0)
   /// the auto-created internal default variant for a simple STOCKED/BOM product
-  isDefault Boolean @default(false)
+  isDefault       Boolean  @default(false)
   /// deterministic, insertion-order-independent canonical id-pair signature
   /// (server-derived, never client-supplied). '' for the default variant.
   optionSignature String   @default("")
@@ -1479,23 +1658,23 @@ model VariantOptionValue {
 /// (owner "CONCURRENCY"); lifecycle races are handled with a `FOR UPDATE` row
 /// lock + a status predicate + the global unique constraint + idempotency.
 model ItemIdentifier {
-  id       String @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId String @db.Uuid
+  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId    String   @db.Uuid
   /// VARIANT only in Phase 3a (CHECK). `INVENTORY_ITEM` is reserved for Phase 5.
-  targetKind String
+  targetKind  String
   /// the target row's id — for `VARIANT`, a `variant.id` in the same tenant
   /// (enforced by the migration's tenant-safe composite FK on the server-derived
   /// `targetVariantId` generated column).
-  targetId String @db.Uuid
+  targetId    String   @db.Uuid
   /// SKU | BARCODE | QR (CHECK). Immutable.
-  codeType String
+  codeType    String
   /// canonical stored value — SKU is trimmed + upper-cased; BARCODE / QR are
   /// trimmed but never case-folded (owner "SKU NORMALIZATION"). Immutable.
   /// Tenant-unique across every code type and both statuses (owner decision 3).
-  value String
+  value       String
   /// ACTIVE | INACTIVE (CHECK). Deactivation preserves the row + never frees the
   /// value. Reactivation flips this back on the same row.
-  status    String   @default("ACTIVE")
+  status      String   @default("ACTIVE")
   /// task 3.6 — the IMMUTABLE printed pack-identity snapshot. BARCODE / QR only
   /// (SKU pack-forbidden, CHECK). All three NULL or all three non-NULL (CHECK).
   /// `packBaseQty` = `packQty` converted to the target variant's `baseUomCode`
@@ -1503,8 +1682,8 @@ model ItemIdentifier {
   packUomCode String?
   packQty     Decimal? @db.Decimal(18, 4)
   packBaseQty Decimal? @db.Decimal(18, 4)
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
 
   @@unique([tenantId, value])
   @@index([tenantId, targetKind, targetId])
@@ -1604,10 +1783,10 @@ model CompanyVariantPriceSet {
 /// sellCurrencyExponent) -> currency(code, exponent)` (Inv-3 / C-3, ON UPDATE
 /// RESTRICT). RLS ENABLE + FORCE. NO `version` column — the aggregate owns it.
 model CompanyVariantUomPrice {
-  id        String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId  String   @db.Uuid
-  companyId String   @db.Uuid
-  variantId String   @db.Uuid
+  id        String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String @db.Uuid
+  companyId String @db.Uuid
+  variantId String @db.Uuid
   /// the variant's `baseUomCode` OR a UOM reachable to it via the Task 3.6
   /// effective conversion model (validated in the service — legitimacy only,
   /// never used to derive the price). CHECK on the canonical shape.
@@ -1615,7 +1794,7 @@ model CompanyVariantUomPrice {
 
   sellAmountMinor      BigInt
   sellCurrencyCode     String
-  sellCurrencyExponent Int      @db.SmallInt
+  sellCurrencyExponent Int    @db.SmallInt
 
   /// FOUNDATION ONLY — nullable, never touched by the Task 3.7 API.
   purchaseAmountMinor      BigInt?

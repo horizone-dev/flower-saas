@@ -137,6 +137,10 @@ export const PERMISSIONS = {
     'settings:branch:manage',
     'settings:tenant:manage',
   ],
+  // Task 3b.1 — CoA + Posting Engine + Accounting Periods. Distinct from the
+  // pre-existing `finance` group's `accounts:*` (a separate, broader Finance
+  // module placeholder, not this task's Chart-of-Accounts primitive).
+  accounting: ['accounting:view', 'accounting:manage', 'accounting:period:manage'],
 } as const satisfies Record<string, readonly string[]>;
 
 export type PermissionGroup = keyof typeof PERMISSIONS;
@@ -286,6 +290,25 @@ export const PHASE_3_9_TENANT_PERMISSIONS = [] as const satisfies readonly Permi
 export type Phase39TenantPermission = (typeof PHASE_3_9_TENANT_PERMISSIONS)[number];
 
 /**
+ * Phase 3b task 3b.1 (CoA + Posting Engine + Accounting Periods) activates the
+ * three new `accounting` keys (docs/phase-3/PHASE-3B-PLAN.md §E). Registered
+ * in `permission_registry` and assigned to built-in system roles: `owner` +
+ * `admin` gain `accounting:view` + `accounting:manage`; `owner` ALONE also
+ * gains `accounting:period:manage` (a period create/close is Owner-tier only —
+ * the frozen owner decision explicitly forbids inventing a tenant "Super Admin"
+ * role for this; Platform Super Admin is a wholly separate auth realm, per
+ * SECURITY.md, never conflated with a tenant role). `manager` gets neither.
+ * Existing tenants get the identical backfill in the task 3b.1 migration.
+ */
+export const PHASE_3B_1_TENANT_PERMISSIONS = [
+  'accounting:view',
+  'accounting:manage',
+  'accounting:period:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b1TenantPermission = (typeof PHASE_3B_1_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the
@@ -324,6 +347,15 @@ export const STEP_UP_PERMISSIONS: ReadonlySet<string> = new Set<string>([
   'roles:manage',
   'settings:tenant:manage',
   'settings:branch:manage',
+  // Task 3b.1 — period create/close is a financial-integrity-affecting action
+  // (docs/phase-3/PHASE-3B-PLAN.md §D3b-4/§E). `accounting:manage` is also
+  // used for the low-risk account-display-metadata PATCH, which opts OUT with
+  // `@NoStepUp()` (the accounting-timezone-configuration route, which shares
+  // this key, is the one that actually needs the step-up tier — mirrors the
+  // existing `platform:catalog_capability:manage` precedent of one key serving
+  // both a step-up-worthy mutation and a `@NoStepUp()` lower-risk route).
+  'accounting:manage',
+  'accounting:period:manage',
   ...PLATFORM_PERMISSIONS.filter(
     (k) =>
       k === 'platform:tenants:manage' ||

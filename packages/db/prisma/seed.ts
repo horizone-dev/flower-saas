@@ -20,6 +20,7 @@ import {
   PHASE_3_5_TENANT_PERMISSIONS,
   PHASE_3_7_TENANT_PERMISSIONS,
   PHASE_3_8_TENANT_PERMISSIONS,
+  PHASE_3B_1_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   PERMISSION_GROUP_OF,
 } from '@flower/permissions';
@@ -80,6 +81,8 @@ async function main(): Promise<void> {
       // task 3.8 — the reserved `branch_price:manage` key (D2-6). Existing DBs
       // also get it via the task 3.8 migration. In its `catalog` group.
       ...PHASE_3_8_TENANT_PERMISSIONS.map((key) => ({ key, phase: 3 })),
+      // task 3b.1 — accounting:view / accounting:manage / accounting:period:manage.
+      ...PHASE_3B_1_TENANT_PERMISSIONS.map((key) => ({ key, phase: 3 })),
     ];
     for (const { key, phase } of TENANT_REGISTRY) {
       await prisma.permissionRegistry.upsert({
@@ -172,6 +175,7 @@ async function main(): Promise<void> {
           defaultCurrencyCode: country.defaultCurrencyCode,
           weekendModel: country.weekendModel,
           active: country.active,
+          defaultTimezone: country.defaultTimezone,
         },
       });
     }

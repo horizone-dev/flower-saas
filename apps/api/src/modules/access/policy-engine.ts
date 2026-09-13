@@ -13,7 +13,12 @@ import { ALLOW, deny, type AccessTarget, type Decision } from './policy.types.js
  * `effectivePermissions` by `resolveEffectivePermissions`.
  */
 export class PolicyEngine {
-  can(ctx: RequestContext, permissionKey: string, target: AccessTarget = {}): Decision {
+  can(
+    ctx: RequestContext,
+    permissionKey: string,
+    target: AccessTarget = {},
+    opts: { stepUpExempt?: boolean } = {},
+  ): Decision {
     if (ctx.accountType === 'PLATFORM') {
       // platform realm is evaluated by its own guard set, not this engine
       return deny('NOT_TENANT_SCOPED', 'platform realm');
@@ -31,7 +36,7 @@ export class PolicyEngine {
       // a branch overlay can only *narrow*, so a missing base permission is final
       return deny('MISSING_PERMISSION', permissionKey);
     }
-    if (requiresStepUp(permissionKey) && ctx.mfaLevel !== 'STEP_UP') {
+    if (requiresStepUp(permissionKey) && !opts.stepUpExempt && ctx.mfaLevel !== 'STEP_UP') {
       return deny('STEP_UP_REQUIRED', permissionKey);
     }
 

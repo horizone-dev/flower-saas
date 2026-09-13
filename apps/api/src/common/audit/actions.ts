@@ -159,6 +159,23 @@ export const AUDITABLE_ACTIONS = {
   'catalog.product_tax_category_changed': { resourceType: 'product', security: false },
   'catalog.variant_tax_category_changed': { resourceType: 'variant', security: false },
 
+  // ── accounting: CoA / periods / posting engine (task 3b.1) ────────────────
+  // Business events, NOT security events — ordinary tenant financial-config
+  // administration and the posting engine's own append-only trail. The journal
+  // itself (journal_entry / journal_line) is the authoritative financial
+  // detail; these audit rows record WHO/WHEN/WHAT-SOURCE, never a raw
+  // debit/credit amount or account key (bounded payload convention).
+  'accounting.account_display_updated': { resourceType: 'account', security: false },
+  /** existing-company bootstrap's idempotent CoA backfill (§P) — distinct from
+   *  `account_display_updated`, which records an owner editing one account's
+   *  display fields, not a bulk insert of missing default rows. */
+  'accounting.company_coa_backfilled': { resourceType: 'company', security: false },
+  'accounting.period_created': { resourceType: 'accounting_period', security: false },
+  'accounting.period_closed': { resourceType: 'accounting_period', security: false },
+  'accounting.company_timezone_configured': { resourceType: 'company', security: false },
+  'accounting.journal_posted': { resourceType: 'journal_entry', security: false },
+  'accounting.journal_reversed': { resourceType: 'journal_entry', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

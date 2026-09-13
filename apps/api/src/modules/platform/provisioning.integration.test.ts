@@ -177,13 +177,29 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
       // derived from tenant.region (correction 4) and never left mismatched.
       const company = (
         await q(
-          `SELECT "countryCode", "defaultCurrency", "fiscalConfig" FROM company WHERE "tenantId"=$1`,
+          `SELECT "countryCode", "defaultCurrency", "fiscalConfig", "accountingTimezone" FROM company WHERE "tenantId"=$1`,
           [tenantId],
         )
       )[0];
       expect(company.countryCode).toBe('AE');
       expect(company.defaultCurrency).toBe('AED');
       expect(company.fiscalConfig).toEqual({});
+
+      // task 3b.1 — a one-time seed from the same authoritative country
+      // reference row read above (Country.defaultTimezone), never re-applied
+      // afterward; and the 14 frozen Chart-of-Accounts rows, one GL per Company.
+      expect(company.accountingTimezone).toBe('Asia/Dubai');
+      const accounts = await q(
+        `SELECT key, category, "displayCode", "displayName" FROM account WHERE "tenantId"=$1 ORDER BY key`,
+        [tenantId],
+      );
+      expect(accounts).toHaveLength(14);
+      expect(accounts.map((a) => a.key)).toContain('ASSET.CASH_ON_HAND');
+      expect(accounts.map((a) => a.key)).toContain('EXPENSE.RECEIVABLE_WRITE_OFF');
+      const cash = accounts.find((a) => a.key === 'ASSET.CASH_ON_HAND');
+      expect(cash.category).toBe('ASSET');
+      expect(cash.displayCode).toBe('1000');
+      expect(cash.displayName).toBe('Cash on Hand');
 
       // task 3.1 — the Business-Type template snapshot ran inside the same txn
       const t = (
@@ -513,7 +529,7 @@ async function seed(url: string): Promise<void> {
       INSERT INTO platform_user (id, email, name, "updatedAt")
       VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
-      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
+      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "defaultTimezone", "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, 'Asia/Dubai', now());
       -- task 3.1: a CUSTOM Business-Type template + its 3-key minimal capability set
       INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
       VALUES ('CUSTOM', 1, 'Custom', 'مخصص', 'ACTIVE', now()),

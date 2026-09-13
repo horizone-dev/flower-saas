@@ -16,6 +16,7 @@ import {
   PHASE_3_5_TENANT_PERMISSIONS,
   PHASE_3_7_TENANT_PERMISSIONS,
   PHASE_3_8_TENANT_PERMISSIONS,
+  PHASE_3B_1_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -64,12 +65,14 @@ describe('cross-tenant isolation probe suite', () => {
     identifierValue: '',
     uomCode: '',
     uomConversionId: '',
+    accountingPeriodId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
   let platformTok: string;
   let ownerATok: string;
   let ownerBTok: string;
+  let ownerBAccountingTok: string; // tenant B, task 3b.1 accounting:* permissions
   let branchUserATok: string; // tenant A, scoped to branch A1 only
 
   beforeAll(async () => {
@@ -117,6 +120,14 @@ describe('cross-tenant isolation probe suite', () => {
         await one(
           `INSERT INTO branch (id,"tenantId","companyId",name,"updatedAt")
            VALUES (uuidv7(),$1,$2,'A branch 2',now()) RETURNING id`,
+          [A.tenantId, A.companyId],
+        )
+      ).id;
+      // task 3b.1 — an A-owned OPEN accounting period to probe for
+      A.accountingPeriodId = (
+        await one(
+          `INSERT INTO accounting_period (id,"tenantId","companyId","startDate","endDate",status,version,"updatedAt")
+           VALUES (uuidv7(),$1,$2,'2030-01-01','2030-01-31','OPEN',1,now()) RETURNING id`,
           [A.tenantId, A.companyId],
         )
       ).id;
@@ -185,6 +196,13 @@ describe('cross-tenant isolation probe suite', () => {
         ...PHASE_3_7_TENANT_PERMISSIONS,
         ...PHASE_3_8_TENANT_PERMISSIONS,
       ],
+    });
+    ownerBAccountingTok = await mint('probe-owner-b-accounting', {
+      realm: 'tenant',
+      tenantId: B.tenantId,
+      userId: B.ownerId,
+      accountType: 'OWNER',
+      permissions: [...PHASE_3B_1_TENANT_PERMISSIONS],
     });
 
     // seed a couple of A-owned resources to probe for
@@ -389,7 +407,7 @@ describe('cross-tenant isolation probe suite', () => {
   }
 
   const send = (
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     url: string,
     token: string | null,
     body?: Record<string, unknown>,
@@ -408,7 +426,7 @@ describe('cross-tenant isolation probe suite', () => {
   /** status of a request as `attacker` */
   const asStatus =
     (
-      method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+      method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
       url: string,
       token: string,
       body?: Record<string, unknown>,
@@ -1106,6 +1124,79 @@ describe('cross-tenant isolation probe suite', () => {
           };
         },
       },
+      // ── task 3b.1: CoA + Accounting Periods are tenant/company-scoped through
+      // RLS + the repository's own (tenantId, companyId) filter (GET is a list
+      // endpoint — per this suite's convention it returns an empty, leak-free
+      // result rather than 403/404). Mutations (PATCH/POST) resolve their
+      // target row by id first and correctly 404 on a cross-tenant/cross-
+      // company id, never leaking A's account/period existence to B.
+      {
+        name: "GET A company's accounts as ownerB (accounting:view) — empty, no leak",
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/companies/${A.companyId}/accounting/accounts`,
+            ownerBAccountingTok,
+          );
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode,
+            leaked: res.statusCode === 200 && blob !== '[]',
+          };
+        },
+      },
+      {
+        name: "PATCH an A account's display metadata as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PATCH',
+          `/v1/companies/${A.companyId}/accounting/accounts/${A.companyId}`,
+          ownerBAccountingTok,
+          { displayName: 'hacked' },
+          { 'if-match': '"2000-01-01T00:00:00.000Z"' },
+        ),
+      },
+      {
+        name: "GET A company's accounting periods as ownerB (accounting:view) — empty, no leak",
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/companies/${A.companyId}/accounting/periods`,
+            ownerBAccountingTok,
+          );
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode,
+            leaked: res.statusCode === 200 && blob !== '[]',
+          };
+        },
+      },
+      {
+        name: "POST close on A's OPEN accounting period as ownerB (A's period id)",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/accounting/periods/${A.accountingPeriodId}/close`,
+          ownerBAccountingTok,
+          undefined,
+          { 'if-match': '"1"' },
+        ),
+      },
+      {
+        name: 'PATCH accounting timezone config on A as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PATCH',
+          `/v1/companies/${A.companyId}/accounting/config/timezone`,
+          ownerBAccountingTok,
+          { accountingTimezone: 'Asia/Riyadh' },
+        ),
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -1330,6 +1421,9 @@ describe('cross-tenant isolation probe suite', () => {
       '/v1/catalog',
       '/v1/platform/tenants/:tenantId',
       '/v1/platform/tenants/:id',
+      // task 3b.1 — probed above (tenant B cannot read/mutate tenant A's CoA /
+      // accounting periods / timezone config).
+      '/v1/companies/:companyId/accounting',
     ];
     const unprobed = nonPublic.filter((r) => {
       const key = `${r.httpMethod} ${r.path}`;

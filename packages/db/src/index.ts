@@ -17,3 +17,8 @@ export {
   type ScopeContext,
   type RunOptions,
 } from './scoped.js';
+
+export {
+  ACCOUNTING_REFERENCE_ACCOUNTS,
+  type AccountReferenceRow,
+} from './accounting-reference-data.js';

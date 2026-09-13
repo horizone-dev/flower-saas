@@ -106,7 +106,8 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     expect(names.some((n) => n.endsWith('_catalog_company_pricing'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_branch_pricing'))).toBe(true);
     expect(names.some((n) => n.endsWith('_catalog_tax_category'))).toBe(true);
-    expect(names.at(-1)).toMatch(/_catalog_realtime_company_scope$/);
+    expect(names.some((n) => n.endsWith('_catalog_realtime_company_scope'))).toBe(true);
+    expect(names.some((n) => n.endsWith('_accounting_coa_posting_periods'))).toBe(true);
     expect(rows.every((r) => r.finished_at !== null)).toBe(true);
   });
 
@@ -795,8 +796,9 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       // company_variant_price_set / company_variant_uom_price (task 3.7) +
       // branch_variant_price_set / branch_variant_uom_price /
       // branch_variant_availability (task 3.8) are created below — the rest stay
-      // forbidden through Phase 3a. `inventory_*` / `order` / `payment` /
-      // `journal_*` are Phase 3b / Phase 5.
+      // forbidden through Phase 3a. `account` / `accounting_period` /
+      // `journal_entry` / `journal_line` are task 3b.1 (Phase 3b, approved) —
+      // `inventory_*` / `order` / `payment` remain Phase 5 / later 3b tasks.
       for (const forbidden of [
         'inventory_item',
         'branch_inventory_balance',
@@ -805,7 +807,6 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         'order',
         'order_line',
         'payment',
-        'journal_entry',
       ]) {
         expect(present.has(forbidden), `${forbidden} must NOT exist yet`).toBe(false);
       }
@@ -3710,15 +3711,11 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
 
   // ── task 3.10 — catalog realtime company scope (additive outbox column only) ─
   describe('catalog realtime company scope (task 3.10)', () => {
-    it('exactly ONE task 3.10 migration; it is the last one', async () => {
+    it('exactly ONE task 3.10 migration', async () => {
       const { rows } = await pool.query<{ migration_name: string }>(
         `SELECT migration_name FROM _prisma_migrations WHERE migration_name LIKE '%catalog_realtime_company_scope%'`,
       );
       expect(rows).toHaveLength(1);
-      const all = await pool.query<{ migration_name: string }>(
-        `SELECT migration_name FROM _prisma_migrations ORDER BY started_at`,
-      );
-      expect(all.rows.at(-1)!.migration_name).toMatch(/_catalog_realtime_company_scope$/);
     });
 
     it('outbox.companyId: additive, NULLABLE, uuid, propagated to the default partition', async () => {

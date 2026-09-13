@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { runPlatform, type PrismaClient } from '@flower/db';
+import { runPlatform, type PrismaClient, ACCOUNTING_REFERENCE_ACCOUNTS } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { OutboxWriter } from '../../common/audit/outbox.writer.js';
@@ -123,7 +123,7 @@ export class ProvisioningRepository {
         // when a provider is actually onboarded.
         const country = await tx.country.findUnique({
           where: { code: input.companyCountryCode },
-          select: { code: true, defaultCurrencyCode: true, active: true },
+          select: { code: true, defaultCurrencyCode: true, defaultTimezone: true, active: true },
         });
         if (!country || !country.active) {
           throw new DomainError(
@@ -140,9 +140,29 @@ export class ProvisioningRepository {
             legalNameEn: input.companyLegalNameEn,
             countryCode: country.code,
             defaultCurrency: country.defaultCurrencyCode,
+            // task 3b.1 — one-time seed from the same authoritative country
+            // reference row read above; never re-read/re-applied afterward.
+            // Provisioning-default reference data only (Country.defaultTimezone) —
+            // Company.accountingTimezone is the sole financial-posting authority
+            // from this point on.
+            accountingTimezone: country.defaultTimezone,
             fiscalConfig: {},
             status: 'ACTIVE',
           },
+        });
+
+        // task 3b.1 — the 14 frozen Chart-of-Accounts rows, one GL per Company.
+        // Additive to this same provisioning transaction; `key`/`category` are
+        // immutable, `displayCode`/`displayName` seed the owner-editable fields.
+        await tx.account.createMany({
+          data: ACCOUNTING_REFERENCE_ACCOUNTS.map((a) => ({
+            tenantId,
+            companyId,
+            key: a.key,
+            category: a.category,
+            displayCode: a.defaultDisplayCode,
+            displayName: a.defaultDisplayName,
+          })),
         });
         await tx.branch.create({
           data: {

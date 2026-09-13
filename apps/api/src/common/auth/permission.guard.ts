@@ -72,7 +72,8 @@ export class PermissionGuard implements CanActivate {
 
     const req = execCtx.switchToHttp().getRequest<FastifyRequest>();
     const target = this.resolveTarget(execCtx, req);
-    const decision = this.engine.can(ctx, required, target);
+    const stepUpExempt = this.meta<boolean>(execCtx, NO_STEP_UP_KEY) === true;
+    const decision = this.engine.can(ctx, required, target, { stepUpExempt });
     if (decision.allowed) return true;
 
     switch (decision.reason) {
