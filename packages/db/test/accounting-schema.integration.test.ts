@@ -766,4 +766,212 @@ describe('packages/db — Task 3b.1 sealed-journal DB backstop', () => {
       }
     });
   });
+
+  // ── hardening round 2, fix 2 — account.key/category DB-level immutability ──
+  describe('account.key / account.category DB-level immutability (hardening review round 2)', () => {
+    it('UPDATE account SET key = ... is rejected', async () => {
+      const result = await inTransaction(async (c) => {
+        await c.query(`UPDATE account SET "key" = 'ASSET.SOMETHING_ELSE' WHERE id = $1`, [
+          ACCOUNT_CASH,
+        ]);
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toMatch(/immutable after creation/i);
+      }
+    });
+
+    it('UPDATE account SET category = ... is rejected', async () => {
+      const result = await inTransaction(async (c) => {
+        await c.query(`UPDATE account SET "category" = 'LIABILITY' WHERE id = $1`, [ACCOUNT_CASH]);
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toMatch(/immutable after creation/i);
+      }
+    });
+
+    it('UPDATE account SET displayCode = ... (only) succeeds', async () => {
+      const result = await inTransaction(async (c) => {
+        await c.query(
+          `UPDATE account SET "displayCode" = '1001', "updatedAt" = now() WHERE id = $1`,
+          [ACCOUNT_CASH],
+        );
+      });
+      expect(result.ok).toBe(true);
+      const { rows } = await pool.query<{ displayCode: string; key: string }>(
+        `SELECT "displayCode", "key" FROM account WHERE id = $1`,
+        [ACCOUNT_CASH],
+      );
+      expect(rows[0]!.displayCode).toBe('1001');
+      expect(rows[0]!.key).toBe('ASSET.CASH_ON_HAND');
+      // restore for any later test relying on the original displayCode
+      await pool.query(
+        `UPDATE account SET "displayCode" = '1000', "updatedAt" = now() WHERE id = $1`,
+        [ACCOUNT_CASH],
+      );
+    });
+
+    it('UPDATE account SET displayName = ... (only) succeeds', async () => {
+      const result = await inTransaction(async (c) => {
+        await c.query(
+          `UPDATE account SET "displayName" = 'Petty Cash', "updatedAt" = now() WHERE id = $1`,
+          [ACCOUNT_CASH],
+        );
+      });
+      expect(result.ok).toBe(true);
+      const { rows } = await pool.query<{ displayName: string; category: string }>(
+        `SELECT "displayName", "category" FROM account WHERE id = $1`,
+        [ACCOUNT_CASH],
+      );
+      expect(rows[0]!.displayName).toBe('Petty Cash');
+      expect(rows[0]!.category).toBe('ASSET');
+      // restore
+      await pool.query(
+        `UPDATE account SET "displayName" = 'Cash on Hand', "updatedAt" = now() WHERE id = $1`,
+        [ACCOUNT_CASH],
+      );
+    });
+
+    it('a combined update that re-sends the SAME key/category (unchanged) alongside a display edit succeeds — the trigger checks for an actual value CHANGE, not mere presence in the SET clause', async () => {
+      const result = await inTransaction(async (c) => {
+        await c.query(
+          `UPDATE account
+              SET "key" = "key", "category" = "category",
+                  "displayCode" = '1000', "displayName" = 'Cash on Hand', "updatedAt" = now()
+            WHERE id = $1`,
+          [ACCOUNT_CASH],
+        );
+      });
+      expect(result.ok).toBe(true);
+    });
+  });
+});
+
+// ── hardening round 2, fix 1 — country.defaultTimezone production-safe backfill ──
+describe('packages/db — Task 3b.1 hardening: country.defaultTimezone migration backfill', () => {
+  let container: StartedPostgreSqlContainer;
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    container = await new PostgreSqlContainer('postgres:17')
+      .withDatabase('flower')
+      .withUsername('flower')
+      .withPassword('flower_test')
+      .start();
+    const url = container.getConnectionUri();
+    execFileSync(
+      'node',
+      [path.join(pkgDir, 'node_modules/prisma/build/index.js'), 'migrate', 'deploy'],
+      { cwd: pkgDir, env: { ...process.env, DATABASE_URL: url }, encoding: 'utf8' },
+    );
+    pool = new pg.Pool({ connectionString: url });
+    await pool.query(
+      `INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr")
+       VALUES ('AED', 2, 'د.إ', 'UAE Dirham', 'درهم إماراتي') ON CONFLICT (code) DO NOTHING`,
+    );
+  }, 180_000);
+
+  afterAll(async () => {
+    await pool?.end();
+    await container?.stop();
+  });
+
+  // The migration's own UPDATE statements, extracted verbatim from
+  // `20260917120000_accounting_hardening/migration.sql`, run here against a
+  // country table state that mimics production: rows that already exist
+  // (however they got there — NOT this migration's concern) with
+  // `defaultTimezone` still NULL, exactly the state every pre-3b.1 `country`
+  // row is in. This is the correct way to test a data-only migration whose
+  // effect depends on rows that a DIFFERENT process is responsible for
+  // creating (country reference-data bootstrap is a pre-existing, disclosed,
+  // out-of-scope gap — this migration only fixes the timezone COLUMN
+  // deterministically for whichever of these six rows already exist).
+  async function runBackfill(): Promise<void> {
+    await pool.query(
+      `UPDATE "country" SET "defaultTimezone" = 'Asia/Dubai'   WHERE "code" = 'AE' AND "defaultTimezone" IS NULL`,
+    );
+    await pool.query(
+      `UPDATE "country" SET "defaultTimezone" = 'Asia/Riyadh'  WHERE "code" = 'SA' AND "defaultTimezone" IS NULL`,
+    );
+    await pool.query(
+      `UPDATE "country" SET "defaultTimezone" = 'Asia/Qatar'   WHERE "code" = 'QA' AND "defaultTimezone" IS NULL`,
+    );
+    await pool.query(
+      `UPDATE "country" SET "defaultTimezone" = 'Asia/Kuwait'  WHERE "code" = 'KW' AND "defaultTimezone" IS NULL`,
+    );
+    await pool.query(
+      `UPDATE "country" SET "defaultTimezone" = 'Asia/Bahrain' WHERE "code" = 'BH' AND "defaultTimezone" IS NULL`,
+    );
+    await pool.query(
+      `UPDATE "country" SET "defaultTimezone" = 'Asia/Muscat'  WHERE "code" = 'OM' AND "defaultTimezone" IS NULL`,
+    );
+  }
+
+  async function insertCountry(code: string, defaultTimezone: string | null): Promise<void> {
+    await pool.query(
+      `INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "defaultTimezone", "updatedAt")
+       VALUES ($1, $1, $1, 'gcc', 'AED', 'SAT_SUN', true, $2, now())
+       ON CONFLICT (code) DO NOTHING`,
+      [code, defaultTimezone],
+    );
+  }
+
+  it('the six approved GCC rows receive exactly the approved defaultTimezone values', async () => {
+    for (const code of ['AE', 'SA', 'QA', 'KW', 'BH', 'OM']) await insertCountry(code, null);
+    await runBackfill();
+
+    const expected: Record<string, string> = {
+      AE: 'Asia/Dubai',
+      SA: 'Asia/Riyadh',
+      QA: 'Asia/Qatar',
+      KW: 'Asia/Kuwait',
+      BH: 'Asia/Bahrain',
+      OM: 'Asia/Muscat',
+    };
+    const { rows } = await pool.query<{ code: string; defaultTimezone: string }>(
+      `SELECT code, "defaultTimezone" FROM country WHERE code = ANY($1)`,
+      [Object.keys(expected)],
+    );
+    for (const row of rows) expect(row.defaultTimezone).toBe(expected[row.code]);
+    expect(rows).toHaveLength(6);
+  });
+
+  it('no unrelated country row is touched by the backfill', async () => {
+    await insertCountry('US', null);
+    await runBackfill();
+    const { rows } = await pool.query<{ defaultTimezone: string | null }>(
+      `SELECT "defaultTimezone" FROM country WHERE code = 'US'`,
+    );
+    expect(rows[0]!.defaultTimezone).toBeNull();
+  });
+
+  it('the backfill is idempotent and non-destructive of an already-set value (never overwrites)', async () => {
+    // simulate a row that already carries a value from some other path
+    // (e.g. a future country-bootstrap process) BEFORE this migration runs —
+    // the IS NULL guard must never clobber it.
+    await insertCountry('KW', 'Asia/Kuwait'); // no-op if already inserted above with NULL
+    await pool.query(`UPDATE country SET "defaultTimezone" = 'Custom/Value' WHERE code = 'KW'`);
+    await runBackfill();
+    const { rows: first } = await pool.query<{ defaultTimezone: string }>(
+      `SELECT "defaultTimezone" FROM country WHERE code = 'KW'`,
+    );
+    expect(first[0]!.defaultTimezone).toBe('Custom/Value');
+
+    // re-running the backfill again (idempotency) must not error and must not
+    // change any of the six approved rows that are already correctly set.
+    await runBackfill();
+    const { rows: second } = await pool.query<{ code: string; defaultTimezone: string }>(
+      `SELECT code, "defaultTimezone" FROM country WHERE code = ANY($1)`,
+      [['AE', 'SA', 'QA', 'BH', 'OM']],
+    );
+    const expected: Record<string, string> = {
+      AE: 'Asia/Dubai',
+      SA: 'Asia/Riyadh',
+      QA: 'Asia/Qatar',
+      BH: 'Asia/Bahrain',
+      OM: 'Asia/Muscat',
+    };
+    for (const row of second) expect(row.defaultTimezone).toBe(expected[row.code]);
+  });
 });

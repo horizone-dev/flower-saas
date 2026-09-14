@@ -3773,6 +3773,114 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     });
   });
 
+  // ── accounting permission role backfill (task 3b.1, hardening review round 2) ──
+  describe('accounting permissions role backfill (task 3b.1)', () => {
+    it('owner/admin get accounting:view+manage, owner ALONE also gets accounting:period:manage, manager gets none, unrelated pre-existing permissions are preserved, backfill is idempotent (owner D2-6/HG3-PERMISSION-STABILITY)', async () => {
+      // seed a minimal tenant with owner/admin/manager + a custom role,
+      // exactly the Task 3.2 precedent pattern above.
+      const T = '0000cccc-0000-7000-8000-00000000cc44';
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1,'acct-bf','acct-bf','AE','ACTIVE','00000000-0000-7000-8000-000000000002', now())
+         ON CONFLICT (id) DO NOTHING`,
+        [T],
+      );
+      const roleIds: Record<string, string> = {};
+      for (const [key, isSystem] of [
+        ['owner', true],
+        ['admin', true],
+        ['manager', true],
+        ['custom_role', false],
+      ] as const) {
+        const r = await pool.query(
+          `INSERT INTO role (id,"tenantId",key,name,"isSystem","updatedAt")
+           VALUES (uuidv7(),$1,$2,$2,$3, now()) RETURNING id`,
+          [T, key, isSystem],
+        );
+        roleIds[key] = r.rows[0].id;
+      }
+
+      // simulate pre-existing permissions from an EARLIER phase backfill
+      // (e.g. task 3.2's catalog:view/manage) already present on these
+      // roles — the accounting backfill must never touch these.
+      await pool.query(`ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;`);
+      await pool.query(
+        `INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+         VALUES (uuidv7(), $1, $2, 'catalog:view'), (uuidv7(), $1, $3, 'catalog:view')`,
+        [T, roleIds['owner'], roleIds['admin']],
+      );
+      await pool.query(`ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`);
+
+      // re-run the migration's exact accounting backfill statements
+      // (`20260916120000_accounting_permissions/migration.sql`) — FORCE-toggle
+      // so a NOBYPASSRLS owner can write cross-tenant, then the two
+      // idempotent INSERT ... SELECT ... ON CONFLICT DO NOTHING.
+      const backfill = `
+        ALTER TABLE "role"            NO FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", k.key
+          FROM "role" r CROSS JOIN (VALUES ('accounting:view'), ('accounting:manage')) AS k(key)
+         WHERE r."isSystem" = true AND r."key" IN ('owner', 'admin')
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", 'accounting:period:manage'
+          FROM "role" r
+         WHERE r."isSystem" = true AND r."key" = 'owner'
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        ALTER TABLE "role"            FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`;
+      await pool.query(backfill);
+      await pool.query(backfill); // twice — must not create duplicates
+
+      const perms = async (roleId: string): Promise<string[]> =>
+        (
+          await pool.query<{ permissionKey: string }>(
+            `SELECT "permissionKey" FROM "role_permission" WHERE "roleId" = $1 ORDER BY "permissionKey"`,
+            [roleId],
+          )
+        ).rows.map((r) => r.permissionKey);
+
+      expect(await perms(roleIds['owner']!)).toEqual([
+        'accounting:manage',
+        'accounting:period:manage',
+        'accounting:view',
+        'catalog:view', // pre-existing permission preserved, not removed
+      ]);
+      expect(await perms(roleIds['admin']!)).toEqual([
+        'accounting:manage',
+        'accounting:view',
+        'catalog:view', // pre-existing permission preserved, not removed
+      ]);
+      expect(await perms(roleIds['admin']!)).not.toContain('accounting:period:manage');
+      expect(await perms(roleIds['manager']!)).toEqual([]);
+      expect(await perms(roleIds['custom_role']!)).toEqual([]); // untouched
+
+      // the FORCE toggle restored FORCE on both tables
+      const force = await pool.query<{ relname: string; f: boolean }>(
+        `SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relname = ANY($1)`,
+        [['role', 'role_permission']],
+      );
+      for (const r of force.rows) expect(r.f, `${r.relname} FORCE restored`).toBe(true);
+
+      await pool.query(`DELETE FROM "role_permission" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "role" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "tenant" WHERE id = $1`, [T]);
+    });
+
+    it('Platform Super Admin is a separate auth realm, never modeled as a tenant `role` row', async () => {
+      // structural proof: no `role.key`/`role.name` value in this migration's
+      // backfill (or anywhere in the seeded system roles) is a Super-Admin
+      // variant — accounting:period:manage is granted to the tenant `owner`
+      // role alone, never to a platform-level construct.
+      const { rows } = await pool.query<{ key: string }>(
+        `SELECT DISTINCT key FROM role WHERE "isSystem" = true`,
+      );
+      const keys = rows.map((r) => r.key);
+      for (const k of keys) expect(k.toLowerCase()).not.toMatch(/super[\s_-]?admin/);
+    });
+  });
+
   // ── RLS behaviour (the ADR-0010 GO pattern) ────────────────────────────────
   describe('RLS behaviour as flower_app', () => {
     const A = TENANT_A;
