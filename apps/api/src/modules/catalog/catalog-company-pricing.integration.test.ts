@@ -1105,13 +1105,14 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
         ).map((r) => r.tablename),
       );
       // branch_variant_* IS created by the task 3.8 migration that this suite's
-      // DB runs; the inventory / order / payment domain stays forbidden.
+      // DB runs; `order`/`order_line`/`invoice`/`document_number_counter` are
+      // task 3b.3 (Phase 3b, approved); the inventory / payment domain stays
+      // forbidden.
       for (const t of [
         'inventory_item',
         'inventory_movement',
         'branch_inventory_balance',
         'stock_reservation',
-        'order',
         'payment',
       ]) {
         expect(present.has(t), t).toBe(false);

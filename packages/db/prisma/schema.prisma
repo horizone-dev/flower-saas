@@ -249,22 +249,26 @@ model Tenant {
   createdAt                  DateTime              @default(now()) @db.Timestamptz(6)
   updatedAt                  DateTime              @updatedAt @db.Timestamptz(6)
 
-  entitlements        TenantEntitlement[]
-  limits              TenantLimit[]
-  settings            TenantSetting[]
-  users               User[]
-  roles               Role[]
-  companies           Company[]
-  branches            Branch[]
-  posTerminals        PosTerminal[]
-  providerCreds       ProviderCredential[]
-  catalogCapabilities TenantCatalogCapability[]
-  accounts            Account[]
-  accountingPeriods   AccountingPeriod[]
-  journalEntries      JournalEntry[]
-  journalLines        JournalLine[]
-  customers           Customer[]
-  customerAccounts    CustomerCompanyAccount[]
+  entitlements           TenantEntitlement[]
+  limits                 TenantLimit[]
+  settings               TenantSetting[]
+  users                  User[]
+  roles                  Role[]
+  companies              Company[]
+  branches               Branch[]
+  posTerminals           PosTerminal[]
+  providerCreds          ProviderCredential[]
+  catalogCapabilities    TenantCatalogCapability[]
+  accounts               Account[]
+  accountingPeriods      AccountingPeriod[]
+  journalEntries         JournalEntry[]
+  journalLines           JournalLine[]
+  customers              Customer[]
+  customerAccounts       CustomerCompanyAccount[]
+  orders                 Order[]
+  orderLines             OrderLine[]
+  invoices               Invoice[]
+  documentNumberCounters DocumentNumberCounter[]
 
   @@map("tenant")
 }
@@ -543,43 +547,46 @@ model DataScopeAssignment {
 // ──────────────────────────────── org (tenant) ────────────────────────────────
 
 model Company {
-  id                 String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId           String                   @db.Uuid
-  tenant             Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  legalNameEn        String
-  legalNameAr        String?
-  crNumber           String?
+  id                     String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId               String                   @db.Uuid
+  tenant                 Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalNameEn            String
+  legalNameAr            String?
+  crNumber               String?
   /// tax registration number / VAT number
-  trn                String?
-  registeredAddress  String?
+  trn                    String?
+  registeredAddress      String?
   /// The legal-entity country — THE fiscal source (currency / VAT / e-invoicing),
   /// never `tenant.region` (architecture correction 4). Nullable in the Phase
   /// 2-core expand migration; task 2.7 provisioning sets it. FK -> country.code.
-  countryCode        String?
+  countryCode            String?
   /// resolved from the country at provisioning; a branch may override *display*
   /// currency only, never the legal currency. FK -> currency.code.
-  defaultCurrency    String?
+  defaultCurrency        String?
   /// non-secret fiscal profile (e-invoicing provider ref, invoice-series policy).
-  fiscalConfig       Json?
+  fiscalConfig           Json?
   /// task 3b.1 — the SOLE financial-posting-authority timezone (IANA, e.g.
   /// "Asia/Dubai"). Nullable at rollout (existing companies require an explicit
   /// Accounting Setup action to configure it — never auto-backfilled); financial
   /// posting fails closed (ACCOUNTING_TIMEZONE_NOT_CONFIGURED) while null. Never
   /// falls back to Branch.timezone / Country.defaultTimezone / POS / client tz.
-  accountingTimezone String?
+  accountingTimezone     String?
   /// ACTIVE | INACTIVE
-  status             String                   @default("ACTIVE")
-  createdAt          DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt          DateTime                 @updatedAt @db.Timestamptz(6)
-  tradeLicenses      TradeLicense[]
-  branches           Branch[]
-  posTerminals       PosTerminal[]
-  providerCreds      ProviderCredential[]
-  accounts           Account[]
-  accountingPeriods  AccountingPeriod[]
-  journalEntries     JournalEntry[]
-  journalLines       JournalLine[]
-  customerAccounts   CustomerCompanyAccount[]
+  status                 String                   @default("ACTIVE")
+  createdAt              DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                 @updatedAt @db.Timestamptz(6)
+  tradeLicenses          TradeLicense[]
+  branches               Branch[]
+  posTerminals           PosTerminal[]
+  providerCreds          ProviderCredential[]
+  accounts               Account[]
+  accountingPeriods      AccountingPeriod[]
+  journalEntries         JournalEntry[]
+  journalLines           JournalLine[]
+  customerAccounts       CustomerCompanyAccount[]
+  orders                 Order[]
+  invoices               Invoice[]
+  documentNumberCounters DocumentNumberCounter[]
 
   /// task 3.7 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`                  ← `company_variant_price_set` tenant-safe FK
@@ -613,24 +620,27 @@ model TradeLicense {
 }
 
 model Branch {
-  id            String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId      String               @db.Uuid
-  tenant        Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  companyId     String               @db.Uuid
-  company       Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  name          String
+  id               String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId         String               @db.Uuid
+  tenant           Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId        String               @db.Uuid
+  company          Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  name             String
   /// IANA tz, e.g. "Asia/Dubai"
-  timezone      String               @default("Asia/Dubai")
+  timezone         String               @default("Asia/Dubai")
   /// FRI_SAT | SAT_SUN | SUN_ONLY … (GCC weekend model)
-  weekendModel  String               @default("FRI_SAT")
+  weekendModel     String               @default("FRI_SAT")
   /// ACTIVE | INACTIVE
-  status        String               @default("ACTIVE")
-  createdAt     DateTime             @default(now()) @db.Timestamptz(6)
-  updatedAt     DateTime             @updatedAt @db.Timestamptz(6)
-  settings      BranchSetting[]
-  posTerminals  PosTerminal[]
-  providerCreds ProviderCredential[]
-  journalLines  JournalLine[]
+  status           String               @default("ACTIVE")
+  createdAt        DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime             @updatedAt @db.Timestamptz(6)
+  settings         BranchSetting[]
+  posTerminals     PosTerminal[]
+  providerCreds    ProviderCredential[]
+  journalLines     JournalLine[]
+  originOrders     Order[]              @relation("OrderOriginBranch")
+  fulfillingOrders Order[]              @relation("OrderFulfillingBranch")
+  invoices         Invoice[]
 
   /// task 3.8 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`             ← `branch_variant_*` tenant-safe FK
@@ -672,6 +682,7 @@ model PosTerminal {
   createdAt    DateTime      @default(now()) @db.Timestamptz(6)
   updatedAt    DateTime      @updatedAt @db.Timestamptz(6)
   journalLines JournalLine[]
+  orders       Order[]
 
   /// task 3b.1 — FK target only: `journal_line.(tenantId, companyId, branchId,
   /// posTerminalId)` proves a POS attribution dimension belongs to the same
@@ -871,6 +882,7 @@ model Customer {
   updatedAt       DateTime @updatedAt @db.Timestamptz(6)
 
   companyAccounts CustomerCompanyAccount[]
+  orders          Order[]
 
   /// FK target: `customer_company_account.(tenantId, customerId)` proves the
   /// association belongs to the same tenant as the customer itself.
@@ -912,6 +924,447 @@ model CustomerCompanyAccount {
 
   @@unique([tenantId, companyId, customerId])
   @@map("customer_company_account")
+}
+
+// ───────────────── orders + invoice + numbering (task 3b.3) ───────────────────
+// docs/phase-3/PHASE-3B-PLAN.md §C.3 (D3b-7: Order != Invoice). `order` is the
+// mutable operational/commercial transaction; `invoice` is the immutable
+// financial obligation/document produced only by a later internal final-
+// issuance primitive (Task 3b.3 Checkpoint C — NOT called by any public route
+// in this task). Checkpoint A ships schema/RLS/composite-FK/CHECK structure
+// ONLY — no service, no controller, no trigger-based cross-row immutability
+// backstop (those are explicitly reserved for Checkpoint C, see the migration
+// SQL header comment for the exact deferred trigger set).
+//
+// Status/kind/discount-mode are closed sets enforced by a CHECK constraint on
+// a plain TEXT column — the SAME convention already used by every comparable
+// closed vocabulary in this schema (`product.status`, `customer.status`,
+// `variant.status`, `accounting_period.status`, `item_identifier.codeType`),
+// never a native Postgres ENUM type. Reference tables with their own rows
+// (`tax_category`, `currency`, `country`) are reserved for genuinely
+// business-configurable/translatable data — the Order status/kind/discount-mode
+// vocabularies are fixed, non-tenant-editable, and change only via a future
+// additive migration, exactly like every other CHECK-constrained status field
+// here.
+
+/// The mutable operational/commercial transaction (D3b-7). Full frozen 16-value
+/// status vocabulary from `docs/architecture/DOMAIN-MODEL.md`'s Order aggregate
+/// exists from this migration onward; Task 3b.3 wires ONLY the walk-in-relevant
+/// public transitions `DRAFT <-> HELD` (owner correction, this task) — `PLACED`
+/// and every status beyond `CONFIRMED` are structurally valid but have no
+/// producer in this task. `HELD -> CONFIRMED` is invalid; only a later internal
+/// final-issuance primitive may perform `DRAFT -> CONFIRMED`, and only once a
+/// complete Task 3b.4 tax snapshot exists on every referenced `OrderLine`
+/// (enforced at the Invoice INSERT boundary — see migration SQL).
+///
+/// `posTerminalId` is identity/origin/attribution ONLY (CLAUDE.md rule 8) —
+/// bound to `originBranchId` by a composite FK, never a data-isolation axis.
+/// `customerId` is nullable — anonymous WALK_IN is valid (no fabricated
+/// walk-in Customer row is ever created).
+///
+/// `orderNumber` stays NULL for every DRAFT/HELD row — the company-scoped
+/// gapless counter is allocated only inside the later internal final-issuance
+/// transaction (never from any Task 3b.3 public path). `version` +
+/// `commercialSnapshotFingerprint` are the optimistic-concurrency /
+/// content-integrity pair a later `PaymentAttempt` (Task 3b.5) binds against.
+///
+/// Document-level discount mirrors `OrderLine`'s line-level discount shape
+/// exactly (owner-frozen shape, this task) — always structurally separate from
+/// it; Task 3b.4 owns tax interaction, document-discount-to-line allocation,
+/// and rounding.
+model Order {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  /// CHECKPOINT B FROZEN RULE (owner hardening review, this task) — for the
+  /// WALK_IN producer only: `originBranchId` = the route/data-scope Branch
+  /// (never client-chosen independently of it); `fulfillingBranchId` MUST
+  /// equal `originBranchId` for a normal walk-in POS draft — the client never
+  /// selects a different fulfilling branch. This is a Checkpoint B *service*
+  /// rule, not a DB constraint: a DB-level equality CHECK would incorrectly
+  /// block future order kinds (PICKUP/DELIVERY/order-transfer) that
+  /// legitimately need `originBranchId != fulfillingBranchId` in their own
+  /// owning phase.
+  originBranchId     String @db.Uuid
+  originBranch       Branch @relation("OrderOriginBranch", fields: [originBranchId], references: [id], onDelete: Restrict)
+  fulfillingBranchId String @db.Uuid
+  fulfillingBranch   Branch @relation("OrderFulfillingBranch", fields: [fulfillingBranchId], references: [id], onDelete: Restrict)
+
+  /// attribution ONLY — never an isolation axis (CLAUDE.md rule 8).
+  /// CHECKPOINT B FROZEN RULE (owner hardening review, this task): for a
+  /// registered POS/device session, Checkpoint B derives this value from the
+  /// trusted authenticated/device context — NEVER from a client-supplied
+  /// value in the request body. For a non-POS authorized creation path with
+  /// no POS context, it may remain NULL if the final route design allows it.
+  posTerminalId String?      @db.Uuid
+  posTerminal   PosTerminal? @relation(fields: [posTerminalId], references: [id], onDelete: Restrict)
+
+  /// nullable — anonymous WALK_IN is valid (D3b-6). The FK above is
+  /// tenant-safe ONLY. CHECKPOINT B MANDATORY HARD GATE (owner hardening
+  /// review, this task): a Company A caller supplying `customerId` MUST be
+  /// rejected unless that Customer is associated with Company A through the
+  /// existing Task 3b.2 `CustomerCompanyAccount` join (`CustomerRepository`'s
+  /// `*ForCompany` gating) — sharing a Tenant is NOT sufficient. An
+  /// unauthorized/non-associated Customer produces a non-disclosing
+  /// not-found/domain result, exactly like Task 3b.2's own PII-isolation
+  /// discipline. Deliberately NO additional schema FK here — company-level
+  /// gating is a service/repository-layer concern in this codebase (the
+  /// `account`/`accounting_period`/`customer_company_account` precedent), not
+  /// an RLS or DB-FK concern.
+  customerId String?   @db.Uuid
+  customer   Customer? @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Restrict)
+
+  /// WALK_IN | PICKUP | DELIVERY | SCHEDULED | EVENT | SUBSCRIPTION_INSTANCE |
+  /// QUOTATION (CHECK) — exact frozen vocabulary, `DOMAIN-MODEL.md` Order
+  /// aggregate. Only WALK_IN has any producer/behavior in Task 3b.3.
+  kind String
+
+  /// exact frozen 16-value vocabulary (CHECK) — `DOMAIN-MODEL.md` Order
+  /// aggregate state machine. Task 3b.3 publicly wires only DRAFT <-> HELD.
+  status String @default("DRAFT")
+
+  /// the order's single accounting currency — inherited from
+  /// `Company.defaultCurrency` at create time (immutable thereafter, no FX);
+  /// required so `documentDiscountAmountMinor` below is always interpretable
+  /// (Money-shape discipline, matching every other Money-bearing table).
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  /// NONE | AMOUNT | PERCENT_BPS (CHECK) — see the shape CHECK constraint in
+  /// the migration SQL for the exact cross-column invariant per mode.
+  documentDiscountMode        String  @default("NONE")
+  documentDiscountBps         Int?
+  documentDiscountAmountMinor BigInt  @default(0)
+  documentDiscountReason      String?
+
+  /// NULL for every DRAFT/HELD row (§14) — allocated only by the later
+  /// internal final-issuance primitive, company-scoped, gapless, format
+  /// `ORD-000001` (never SEQUENCE, never MAX()+1 — see `DocumentNumberCounter`).
+  orderNumber String?
+
+  /// optimistic concurrency (If-Match pattern, matching every other mutation)
+  version                       Int    @default(1)
+  /// canonical-hash content-integrity pair a later `PaymentAttempt`
+  /// (Task 3b.5) binds against together with `version` above. NOT NULL —
+  /// Checkpoint A hardening review: every Order has a canonical fingerprint
+  /// from creation onward, including an empty DRAFT (a DRAFT with zero lines
+  /// still has a well-defined canonical-hash of its own commercial state — the
+  /// empty case is not a "no fingerprint yet" case). Checkpoint B computes it
+  /// on create and recomputes it on every commercial mutation; no repository/
+  /// transactional reason requires a transient NULL window (Order creation is
+  /// a single INSERT, not a multi-statement build-then-seal sequence like
+  /// Task 3b.1's `journal_entry.sealedAt`).
+  commercialSnapshotFingerprint String
+
+  /// who was authenticated when the row was created — never overwritten
+  /// (CLAUDE.md rule 12). Write-once, DB-enforced (see the migration's
+  /// `fn_enforce_order_attribution_immutable` trigger, Checkpoint C
+  /// final-hardening §2) — immutable in every status, not only post-issuance.
+  createdByUserId String? @db.Uuid
+  /// who is authenticated and acting at ORDER-CREATION time — never conflated
+  /// with staff attribution (a separate, not-yet-modelled Task 3b.3 concept;
+  /// CLAUDE.md rule 12). Write-once, DB-enforced identically to
+  /// `createdByUserId` (owner correction, Checkpoint C final-hardening §2 —
+  /// this is original creation-time attribution, NOT a mutable "last actor"
+  /// concept; that belongs in audit/events if a future phase needs it).
+  actingUserId    String? @db.Uuid
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  lines   OrderLine[]
+  invoice Invoice?
+
+  /// FK targets: `order_line.(tenantId, companyId, orderId)` and
+  /// `invoice.(tenantId, companyId, orderId)`.
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  /// company-scoped gapless order-number uniqueness (§24) — NULL values are
+  /// distinct under standard PostgreSQL unique-index semantics, so any number
+  /// of DRAFT/HELD rows with `orderNumber IS NULL` coexist without conflict.
+  @@unique([tenantId, companyId, orderNumber])
+  /// company-wide status list (Owner/Admin cross-branch dashboard view)
+  @@index([tenantId, companyId, status])
+  /// branch-scoped status list (index-review hardening pass, this task) —
+  /// Branch is THE operational scope (CLAUDE.md rule 8); the dominant
+  /// Manager/Cashier/POS read path filters by a single branch + status, which
+  /// the company-wide index above cannot serve efficiently at scale.
+  /// `fulfillingBranchId` deliberately gets NO index yet — no planned query
+  /// filters by it in Task 3b.3; add one only when a real consumer needs it.
+  @@index([tenantId, companyId, originBranchId, status])
+  @@map("order")
+}
+
+/// The immutable-once-issued commercial snapshot of one line of an `Order`
+/// (D3b-7 / plan §C.3). Captured once, at create/edit time, via Phase 3a's
+/// read-only resolution services (`BranchPricingService.resolvePrice`,
+/// `TaxResolutionService.resolve`) — Task 3b.3 NEVER computes a tax amount
+/// (D2-8 / D3b-8 remain Task 3b.4's job). `priceTaxMode`/`roundingScope`/
+/// `roundingMode`/`lineTaxAmountMinor` are RESERVED nullable columns whose
+/// *population logic* belongs to Task 3b.4 — Task 3b.3 leaves them NULL on
+/// every row it creates.
+///
+/// Historical display + UOM-conversion snapshot fields are immutable copies
+/// taken once at line-creation time — a later Product/Variant rename or a
+/// later `UomConversion` ratio edit never rewrites an already-created line
+/// (mirrors `item_identifier.packBaseQty`'s frozen-at-create precedent).
+model OrderLine {
+  id        String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String @db.Uuid
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String @db.Uuid
+  orderId   String @db.Uuid
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// CHECKPOINT C final-hardening (§1) — the ONE authoritative, server-
+  /// assigned persistence ordering: 1-based, unique within
+  /// `(tenantId, companyId, orderId)`, assigned from the submitted line
+  /// array's order at CREATE time and regenerated deterministically (1..N in
+  /// the new submitted order) on a full-line-replacement PATCH. Immutable
+  /// after issuance with the rest of this row. NEVER derive line order from
+  /// `createdAt` (every line of one Order shares the same value — it is
+  /// `CURRENT_TIMESTAMP`, i.e. transaction start time, not statement time)
+  /// nor from physical/UUID row order — every read that reconstructs
+  /// commercial line order MUST `ORDER BY linePosition ASC`.
+  linePosition Int
+
+  /// CHECKPOINT B FROZEN RULE (owner hardening review, this task): every
+  /// value below this point is SERVER-DERIVED commercial intent, never a
+  /// client-authoritative snapshot — the client submits `productId` +
+  /// `variantId` + `selectedUomCode` + `quantity` (+ optional discount
+  /// intent) ONLY. Checkpoint B must independently: (1) verify the variant
+  /// belongs to the product (defense-in-depth on top of the DB composite FK
+  /// below); (2) verify the selected UOM is valid for that Variant/Product's
+  /// commercial configuration; (3) source `unitPrice*`/the UOM conversion
+  /// snapshot/the historical display snapshot from the CURRENT authoritative
+  /// Catalog/UOM state at write time — NEVER accept a client-supplied
+  /// `conversionNumerator`/`conversionDenominator`/`unitPriceCurrencyExponent`
+  /// or a client-supplied `unitPriceAmountMinor`; (4) resolve price via
+  /// `BranchPricingService.resolvePrice` and tax reference via
+  /// `TaxResolutionService.resolve` — never trust a client-supplied price or
+  /// tax value.
+  productId String @db.Uuid
+  variantId String @db.Uuid
+
+  /// quantity in `selectedUomCode` units (the natural ordering unit — see the
+  /// UOM conversion snapshot below for the exact base-UOM-equivalent ratio;
+  /// `DOMAIN-MODEL.md`'s "quantities stored in the item's base UOM" convention
+  /// applies to the Phase-5 inventory ledger, a different concept — Task 3b.3
+  /// creates no inventory row).
+  quantity Decimal @db.Decimal(18, 4)
+
+  /// resolved sell Money snapshot — `BranchPricingService.resolvePrice`'s
+  /// result at line-creation time, never recomputed later.
+  unitPriceAmountMinor      BigInt
+  unitPriceCurrencyCode     String
+  unitPriceCurrencyExponent Int    @db.SmallInt
+
+  /// NONE | AMOUNT | PERCENT_BPS (CHECK) — structurally separate from the
+  /// Order-level document discount (§7/§15); see the migration SQL for the
+  /// exact per-mode shape CHECK.
+  discountMode        String  @default("NONE")
+  discountBps         Int?
+  discountAmountMinor BigInt  @default(0)
+  discountReason      String?
+
+  /// tax-reference snapshot — `TaxResolutionService.resolve`'s result at
+  /// line-creation time. `taxCategoryKey`/`rateBps`/`effectiveFrom` are
+  /// genuinely nullable (a resolvable-but-unconfigured tax category is a real,
+  /// non-error terminal state — never fabricated `0`/today). `resolutionSource`
+  /// mirrors `TaxCategorySource` (`VARIANT`/`PRODUCT`/`NONE`, CHECK-enforced).
+  ///
+  /// Only 3 structural shapes are legitimate per the actual
+  /// `TaxResolutionResult` contract (`packages/shared-types`) — CHECK-enforced
+  /// in the migration SQL, never a same-row all-4-non-null requirement (that
+  /// would incorrectly reject the first two real shapes):
+  ///   1. `NO_CATEGORY_ASSIGNED`  — resolutionSource='NONE', taxCategoryKey,
+  ///      rateBps and effectiveFrom all NULL.
+  ///   2. `REGIME_NONE` / `NO_RATE_FOR_CATEGORY` — resolutionSource='VARIANT'
+  ///      or 'PRODUCT', taxCategoryKey NOT NULL, rateBps and effectiveFrom NULL
+  ///      (a category was resolved but no rate applies/exists).
+  ///   3. fully resolved — resolutionSource='VARIANT'/'PRODUCT',
+  ///      taxCategoryKey NOT NULL, rateBps and effectiveFrom both NOT NULL
+  ///      (rateBps `0` is a real configured zero-rate, never confused with
+  ///      "unresolved").
+  /// Universal invariants (true across all 3 shapes, CHECK-enforced):
+  /// `resolutionSource = 'NONE' <=> taxCategoryKey IS NULL`;
+  /// `rateBps IS NULL <=> effectiveFrom IS NULL` (they are always resolved
+  /// together from the same `tax_rate` row); `rateBps IS NOT NULL =>
+  /// taxCategoryKey IS NOT NULL` (a rate never exists without a category).
+  taxCategoryKey   String?
+  rateBps          Int?
+  effectiveFrom    DateTime? @db.Date
+  resolutionSource String
+
+  /// RESERVED for Task 3b.4 — NULL on every row Task 3b.3 creates. An issued
+  /// Invoice's referenced OrderLines must have ALL FOUR non-NULL (the CRITICAL
+  /// INVOICE TAX INVARIANT). This stays nullable in Checkpoint A/B because
+  /// DRAFT/HELD OrderLines legitimately exist before Task 3b.4 exists at all
+  /// — NOT NULL here would make it impossible to ever create an OrderLine
+  /// today. MANDATORY FOR CHECKPOINT C (owner hardening review, this task,
+  /// restated): this is a CROSS-ROW condition (every OrderLine of the
+  /// candidate Order vs. the about-to-be-inserted Invoice row), so it is
+  /// deliberately NOT expressed as a same-row CHECK on `order_line` (a
+  /// same-row CHECK cannot see sibling rows and would either do nothing or
+  /// wrongly block a legitimate NULL DRAFT line). Enforcement lives in TWO
+  /// places, both mandatory: (1) the internal `issueFinalInvoice` primitive's
+  /// own transactional validation, first-line defense; (2) a `BEFORE INSERT`
+  /// trigger on `invoice` re-checking the same condition directly in
+  /// Postgres — the same "never trust the caller alone" discipline as Task
+  /// 3b.1's sealed-journal backstop — so that even a future application bug
+  /// cannot insert an Invoice referencing an OrderLine with an incomplete tax
+  /// snapshot. A zero tax amount is valid; a NULL mandatory field on an
+  /// issued Invoice's line is not.
+  priceTaxMode       String?
+  roundingScope      String?
+  roundingMode       String?
+  lineTaxAmountMinor BigInt?
+
+  /// historical display snapshot (§9) — live `productId`/`variantId` FKs are
+  /// retained separately above; a later Product/Variant rename never rewrites
+  /// these.
+  productNameEnSnapshot   String
+  productNameArSnapshot   String?
+  variantNameEnSnapshot   String
+  variantNameArSnapshot   String?
+  skuSnapshot             String?
+  selectedUomCode         String
+  uomDisplayLabelSnapshot String
+
+  /// UOM conversion snapshot (§10) — the exact-ratio pair in force at
+  /// line-creation time, mirroring `UomConversion.num`/`den`'s own exact-ratio
+  /// representation. Immutable historical record; a later Catalog conversion
+  /// edit never alters an already-created line's base-equivalent quantity. No
+  /// stock deduction, no stock ledger, no inventory reservation (Task 3b.3
+  /// non-scope).
+  baseUomCode           String
+  conversionNumerator   BigInt
+  conversionDenominator BigInt
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  /// FK target: composite tenant/company-safe FKs added by hand in the
+  /// migration SQL (`order`, `product`, `variant` — the last additionally
+  /// proving `variantId` belongs to the SAME `productId`, §18).
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, orderId, linePosition])
+  @@index([tenantId, companyId, orderId])
+  @@map("order_line")
+}
+
+/// The immutable financial obligation/document (D3b-7). A row exists ONLY
+/// after final issuance — there is no draft/incomplete Invoice shell, ever
+/// (owner correction, this task). Task 3b.3 ships this table and its
+/// structural invariants; NO code path in Task 3b.3 inserts a row into it (the
+/// internal final-issuance primitive that will do so belongs to Checkpoint C
+/// and is never routed from a controller in this task).
+///
+/// `invoicePaymentStatus` exists here per plan §C.3 ("column exists here,
+/// populated by Task 3b.6's logic") — `UNPAID` is the only value Task 3b.3
+/// ever writes (definitionally correct at issuance: zero obligation has been
+/// satisfied yet, since no `Payment`/`PaymentAllocation` table exists before
+/// Task 3b.5), never a derived/computed value.
+model Invoice {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  /// CHECKPOINT B/C FROZEN RULE (owner hardening review, this task, supersedes
+  /// this field's original doc comment): `Invoice.branchId` = the confirmed
+  /// Order's `originBranchId`, NEVER `fulfillingBranchId` — Invoice/sales
+  /// attribution belongs to the branch where the commercial sale originated;
+  /// `Order.fulfillingBranchId` remains a separate operational/fulfillment
+  /// attribution that later inventory logic may use independently. The
+  /// internal final-issuance primitive (Checkpoint C) MUST derive this value
+  /// server-side from `Order.originBranchId` — it is never accepted from the
+  /// client, and no Invoice row is created before Checkpoint C exists.
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  orderId String @unique @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// company-scoped gapless number, independent counter from Order's, format
+  /// `INV-000001` (never SEQUENCE, never MAX()+1)
+  invoiceNumber String
+
+  issuedAt    DateTime @db.Timestamptz(6)
+  /// Company-timezone-derived civil date — same contract discipline as Task
+  /// 3.9's fiscal date / Task 3b.1's `postingDate` (D3b-16), a distinct field
+  /// from either.
+  invoiceDate DateTime @db.Date
+
+  /// name-only snapshot, never phone/email (no PII beyond a display name) —
+  /// the live `Order.customerId` FK still resolves current contact info for
+  /// any authorized purpose.
+  customerDisplayNameSnapshot String?
+
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  subtotalAmountMinor         BigInt
+  documentDiscountAmountMinor BigInt
+  taxTotalAmountMinor         BigInt
+  totalAmountMinor            BigInt
+
+  /// UNPAID | PARTIAL | PAID | SETTLED | PARTIALLY_REFUNDED | REFUNDED |
+  /// CANCELLED | VOID (CHECK) — ADR-0019 §2 vocabulary. Task 3b.3 never writes
+  /// anything but the `UNPAID` default; derivation logic is Task 3b.6's.
+  invoicePaymentStatus String @default("UNPAID")
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  /// FK targets: composite tenant/company-safe FKs added by hand in the
+  /// migration SQL. UPDATE/DELETE are unconditionally DB-blocked (Checkpoint A
+  /// trigger — an Invoice row only ever exists in its final, issued form).
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  /// one Invoice per Order (§11/§24)
+  @@unique([tenantId, companyId, orderId])
+  @@unique([tenantId, companyId, invoiceNumber])
+  @@index([tenantId, companyId])
+  @@map("invoice")
+}
+
+/// The durable, company-scoped gapless-numbering counter row (§13) — mirrors
+/// `OutboxTenantSeq`'s proven transactional-counter-row pattern (`UPDATE …
+/// RETURNING`, never a Postgres `SEQUENCE`, never `MAX()+1`); unlike
+/// `OutboxTenantSeq` this table IS tenant-owned application data (RLS
+/// ENABLE+FORCE), since the counter increment must itself roll back with the
+/// caller's own issuance transaction (Task 3b.1/OutboxTenantSeq's counter is
+/// owned by the platform dispatcher, a different durability domain).
+///
+/// ONE generic table keyed by `documentType`, not a dedicated table per
+/// document kind (Checkpoint A design choice, §13) — `ORDER` and `INVOICE`
+/// need genuinely independent counters today, and Task 3b.8 is already
+/// expected to need its own Credit-Note numbering scheme later (plan §I); a
+/// generic table lets that arrive as a new `documentType` CHECK value with no
+/// new table, no new allocator function, and no schema churn.
+model DocumentNumberCounter {
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  /// ORDER | INVOICE (CHECK) — closed set, extended only by a future additive
+  /// migration (never a value invented by application code).
+  documentType String
+
+  /// the next number to allocate — incremented via `UPDATE … SET "nextNumber"
+  /// = "nextNumber" + 1 RETURNING` inside the caller's own issuance
+  /// transaction (Checkpoint C); a rolled-back issuance rolls the increment
+  /// back with it (true gaplessness under rollback).
+  nextNumber BigInt @default(1)
+
+  updatedAt DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@id([tenantId, companyId, documentType])
+  @@map("document_number_counter")
 }
 
 // ───────────────────────── secrets vault shell (tenant) ───────────────────────

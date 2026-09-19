@@ -185,6 +185,19 @@ export const AUDITABLE_ACTIONS = {
   'customer.archived': { resourceType: 'customer', security: false },
   'customer.credit_config_updated': { resourceType: 'customer_company_account', security: false },
 
+  // ── orders: Orders + Invoice + Numbering (task 3b.3 Checkpoint B) ─────────
+  // Bounded payloads only — never raw commercial snapshot / customer PII /
+  // unbounded DTO body. IDs, counts, booleans, and changed-section names only.
+  'order.created': { resourceType: 'order', security: false },
+  'order.updated': { resourceType: 'order', security: false },
+  'order.held': { resourceType: 'order', security: false },
+  'order.resumed': { resourceType: 'order', security: false },
+  /** Checkpoint C — the internal final-issuance primitive only; never a
+   *  public route's own audit action. Bounded: order/invoice ids + document
+   *  numbers + a safe state-transition label only, never a raw line/PII dump. */
+  'order.confirmed': { resourceType: 'order', security: false },
+  'invoice.issued': { resourceType: 'invoice', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

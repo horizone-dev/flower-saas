@@ -337,6 +337,25 @@ export type Phase3b2TenantPermission = (typeof PHASE_3B_2_TENANT_PERMISSIONS)[nu
 export type Phase3b1TenantPermission = (typeof PHASE_3B_1_TENANT_PERMISSIONS)[number];
 
 /**
+ * Task 3b.3 (docs/phase-3/PHASE-3B-PLAN.md §E.1) — Orders + Invoice +
+ * Numbering, Checkpoint A/B. The frozen 3-key contract. Registered in
+ * `permission_registry` and assigned to built-in system roles per the
+ * owner-frozen matrix (Checkpoint A hardening pass): `owner`/`admin`/
+ * `manager` gain all 3; `cashier`/`sales` gain `orders:view` +
+ * `orders:manage` only. `orders:cancel` is registered/backfilled as a
+ * capability only — Task 3b.3 implements no cancellation endpoint or
+ * transition; execution remains Task 3b.8. Existing tenants get the
+ * identical backfill in the task 3b.3 permissions migration.
+ */
+export const PHASE_3B_3_TENANT_PERMISSIONS = [
+  'orders:view',
+  'orders:manage',
+  'orders:cancel',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b3TenantPermission = (typeof PHASE_3B_3_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the

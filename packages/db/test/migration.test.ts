@@ -797,15 +797,15 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       // branch_variant_price_set / branch_variant_uom_price /
       // branch_variant_availability (task 3.8) are created below — the rest stay
       // forbidden through Phase 3a. `account` / `accounting_period` /
-      // `journal_entry` / `journal_line` are task 3b.1 (Phase 3b, approved) —
-      // `inventory_*` / `order` / `payment` remain Phase 5 / later 3b tasks.
+      // `journal_entry` / `journal_line` are task 3b.1 (Phase 3b, approved);
+      // `order` / `order_line` / `invoice` / `document_number_counter` are
+      // task 3b.3 Checkpoint A (Phase 3b, approved) — `inventory_*` / `payment`
+      // remain Phase 5 / later 3b tasks.
       for (const forbidden of [
         'inventory_item',
         'branch_inventory_balance',
         'inventory_movement',
         'stock_reservation',
-        'order',
-        'order_line',
         'payment',
       ]) {
         expect(present.has(forbidden), `${forbidden} must NOT exist yet`).toBe(false);

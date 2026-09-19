@@ -18,6 +18,7 @@ import {
   PHASE_3_8_TENANT_PERMISSIONS,
   PHASE_3B_1_TENANT_PERMISSIONS,
   PHASE_3B_2_TENANT_PERMISSIONS,
+  PHASE_3B_3_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -68,6 +69,9 @@ describe('cross-tenant isolation probe suite', () => {
     uomConversionId: '',
     accountingPeriodId: '',
     customerId: '',
+    orderId: '',
+    orderVersion: 0,
+    invoiceId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -76,6 +80,7 @@ describe('cross-tenant isolation probe suite', () => {
   let ownerBTok: string;
   let ownerBAccountingTok: string; // tenant B, task 3b.1 accounting:* permissions
   let ownerBCustomerTok: string; // tenant B, task 3b.2 customers:* permissions
+  let ownerBOrderTok: string; // tenant B, task 3b.3 orders:* permissions
   let branchUserATok: string; // tenant A, scoped to branch A1 only
 
   beforeAll(async () => {
@@ -149,6 +154,19 @@ describe('cross-tenant isolation probe suite', () => {
          VALUES (uuidv7(),$1,$2,$3,now())`,
         [A.tenantId, A.companyId, A.customerId],
       );
+      // task 3b.3 — an A-owned WALK_IN DRAFT order to probe for (a raw
+      // INSERT — bypasses the atomic create primitive, which is fine here
+      // since this is a fixture, not the code under test).
+      const orderRow = await one(
+        `INSERT INTO "order"
+           (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,
+            "currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'probe-fixture-fingerprint',now())
+         RETURNING id, version`,
+        [A.tenantId, A.companyId, A.branchId],
+      );
+      A.orderId = orderRow.id;
+      A.orderVersion = orderRow.version;
       // a real branch_setting on A1 — a read leak would expose this value
       await c.query(
         `INSERT INTO branch_setting ("tenantId","branchId",key,value,"updatedAt")
@@ -229,6 +247,13 @@ describe('cross-tenant isolation probe suite', () => {
       accountType: 'OWNER',
       permissions: [...PHASE_3B_2_TENANT_PERMISSIONS],
     });
+    ownerBOrderTok = await mint('probe-owner-b-order', {
+      realm: 'tenant',
+      tenantId: B.tenantId,
+      userId: B.ownerId,
+      accountType: 'OWNER',
+      permissions: [...PHASE_3B_3_TENANT_PERMISSIONS],
+    });
 
     // seed a couple of A-owned resources to probe for
     A.roleId = (
@@ -293,6 +318,43 @@ describe('cross-tenant isolation probe suite', () => {
             A.tenantId,
             A.productId,
           ])
+        ).rows[0].id;
+        // task 3b.3 Checkpoint C — a SEPARATE A-owned issued Order + Invoice
+        // (raw INSERT — bypasses the internal issuance primitive, fine here
+        // since this is a fixture; kept separate from A.orderId so the DRAFT
+        // Hold/Resume/PATCH probes above are never affected by issuance).
+        const issuedOrderRow = (
+          await c2.query(
+            `INSERT INTO "order"
+               (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,
+                "currencyCode","currencyExponent","commercialSnapshotFingerprint","orderNumber","updatedAt")
+             VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','CONFIRMED','AED',2,'probe-issued-fingerprint','ORD-900001',now())
+             RETURNING id`,
+            [A.tenantId, A.companyId, A.branchId],
+          )
+        ).rows[0];
+        await c2.query(
+          `INSERT INTO order_line
+             (id,"tenantId","companyId","orderId","linePosition","productId","variantId",quantity,
+              "unitPriceAmountMinor","unitPriceCurrencyCode","unitPriceCurrencyExponent",
+              "priceTaxMode","roundingScope","roundingMode","lineTaxAmountMinor",
+              "resolutionSource","selectedUomCode","uomDisplayLabelSnapshot","baseUomCode",
+              "conversionNumerator","conversionDenominator","productNameEnSnapshot","variantNameEnSnapshot","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,1,$4,$5,'1.0000',1000,'AED',2,
+                   'EXCLUSIVE','LINE','HALF_UP',0,
+                   'NONE','piece','Piece','piece',1,1,'Probe Product','Probe Variant',now())`,
+          [A.tenantId, A.companyId, issuedOrderRow.id, A.productId, A.variantId],
+        );
+        A.invoiceId = (
+          await c2.query(
+            `INSERT INTO invoice
+               (id,"tenantId","companyId","branchId","orderId","invoiceNumber","issuedAt","invoiceDate",
+                "currencyCode","currencyExponent","subtotalAmountMinor","documentDiscountAmountMinor",
+                "taxTotalAmountMinor","totalAmountMinor")
+             VALUES (uuidv7(),$1,$2,$3,$4,'INV-900001',now(),CURRENT_DATE,'AED',2,1000,0,0,1000)
+             RETURNING id`,
+            [A.tenantId, A.companyId, A.branchId, issuedOrderRow.id],
+          )
         ).rows[0].id;
         A.optionGroupId = (
           await c2.query(
@@ -1330,6 +1392,108 @@ describe('cross-tenant isolation probe suite', () => {
         expectDenied: [403, 404],
         attempt: asStatus('GET', `/v1/customers/${A.customerId}`, ownerBCustomerTok),
       },
+      // ── task 3b.3: Order is company+branch scoped — every route is
+      // branch-nested (`@ScopedParam({ company, branch })`), so a cross-tenant
+      // target company/branch/order 404s, never leaks. ownerBOrderTok is a
+      // genuine tenant-B Owner with full orders:* permissions — the denial
+      // proves real scoping, not merely a missing permission.
+      {
+        name: "POST create a WALK_IN order under A's company/branch as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/orders`,
+          ownerBOrderTok,
+          {
+            // structurally valid (passes Zod) but semantically fake — the
+            // company/branch tenant check must reject this BEFORE any
+            // product/variant lookup ever runs.
+            lines: [
+              {
+                productId: '00000000-0000-7000-8000-000000000001',
+                variantId: '00000000-0000-7000-8000-000000000002',
+                selectedUomCode: 'piece',
+                quantity: '1',
+              },
+            ],
+          },
+          { 'idempotency-key': 'probe-order-create-0001' },
+        ),
+      },
+      {
+        name: "GET A's orders list as ownerB — empty, no leak",
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/companies/${A.companyId}/branches/${A.branchId}/orders`,
+            ownerBOrderTok,
+          );
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode,
+            leaked: res.statusCode === 200 && !blob.includes('"data":[]'),
+          };
+        },
+      },
+      {
+        name: "GET A's order by id as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.orderId}`,
+          ownerBOrderTok,
+        ),
+      },
+      {
+        name: "PATCH A's order as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PATCH',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.orderId}`,
+          ownerBOrderTok,
+          { documentDiscountMode: 'NONE' },
+          { 'if-match': String(A.orderVersion) },
+        ),
+      },
+      {
+        name: "POST hold A's order as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.orderId}/hold`,
+          ownerBOrderTok,
+          undefined,
+          { 'if-match': String(A.orderVersion) },
+        ),
+      },
+      {
+        name: "POST resume A's order as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.orderId}/resume`,
+          ownerBOrderTok,
+          undefined,
+          { 'if-match': String(A.orderVersion) },
+        ),
+      },
+      // task 3b.3 Checkpoint C — GET Invoice, same branch-nested scope rules.
+      {
+        name: "GET A's issued Invoice as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/invoices/${A.invoiceId}`,
+          ownerBOrderTok,
+        ),
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -1561,6 +1725,12 @@ describe('cross-tenant isolation probe suite', () => {
       // A's Customer or CustomerCompanyAccount, company-scoped or tenant-wide).
       '/v1/companies/:companyId/customers',
       '/v1/customers',
+      // task 3b.3 — probed above (tenant B cannot create/read/patch/hold/
+      // resume tenant A's WALK_IN order, branch-nested company+branch scope).
+      '/v1/companies/:companyId/branches/:branchId/orders',
+      // task 3b.3 Checkpoint C — probed above (tenant B cannot read tenant
+      // A's issued Invoice, same branch-nested scope rules).
+      '/v1/companies/:companyId/branches/:branchId/invoices',
     ];
     const unprobed = nonPublic.filter((r) => {
       const key = `${r.httpMethod} ${r.path}`;

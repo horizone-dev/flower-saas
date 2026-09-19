@@ -1011,14 +1011,14 @@ describe('typed attributes (task 3.3, integration)', () => {
     // `item_identifier` (3.5) + `uom` / `uom_conversion` (3.6) +
     // `company_variant_*` (3.7) + `branch_variant_*` (3.8) are created by the
     // migration this suite runs; Task 3.9 adds NO table (only nullable
-    // `product`/`variant.tax_category_key` columns). `inventory_*` / `order` /
-    // `payment` = Phase 3b / 5.
+    // `product`/`variant.tax_category_key` columns). `order`/`order_line`/
+    // `invoice`/`document_number_counter` are task 3b.3 (Phase 3b, approved) —
+    // `inventory_*` / `payment` remain Phase 5 / later 3b tasks.
     for (const forbidden of [
       'inventory_item',
       'inventory_movement',
       'branch_inventory_balance',
       'stock_reservation',
-      'order',
       'payment',
     ]) {
       expect(present.has(forbidden), `${forbidden} must NOT exist`).toBe(false);

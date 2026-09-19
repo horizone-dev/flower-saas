@@ -141,6 +141,11 @@ import {
     VariantTaxCategoryController,
     CatalogTaxController,
   ],
-  exports: [CatalogCapabilityService],
+  // `BranchPricingService` / `TaxResolutionService` are exported additively
+  // for task 3b.3's `OrderModule` to reuse `resolvePrice`/`resolve` unmodified
+  // (the frozen Phase 3a authoritative resolution services — Orders never
+  // reimplements pricing/tax logic) — no behavior change to any existing
+  // consumer (still resolved from these same provider instances).
+  exports: [CatalogCapabilityService, BranchPricingService, TaxResolutionService],
 })
 export class CatalogModule {}

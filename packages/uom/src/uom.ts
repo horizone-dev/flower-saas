@@ -316,6 +316,47 @@ export class UomRegistry {
   }
 
   /**
+   * The EFFECTIVE exact `from → to` ratio itself — same resolution order as
+   * `convert`/`convertExact` (an explicit `opts.conversions` entry, either
+   * direction, then same-family `perBase` cross-multiplication), but returns
+   * the raw `{ num, den }` pair instead of applying it to a `Quantity`.
+   *
+   * This exists because `convertExact(Quantity.parse('1'), from, to)` is NOT
+   * a safe way to obtain "the ratio" — a legitimate exact ratio such as
+   * `1/3` has no scale-4-exact representation for a single `from` unit
+   * (`InexactConversionError` would fire on `Quantity(1)` alone), even
+   * though a real submitted quantity of `3` converts to `to` EXACTLY. Ratio
+   * resolution and quantity-exactness validation are deliberately two
+   * separate concerns — this method is the former; `assertPermitted` /
+   * `convertExact` (called with the ACTUAL requested quantity, never a
+   * synthetic `1`) remain the latter.
+   *
+   * `from === to` ⇒ the identity ratio `1/1`. Neither operand is reduced
+   * (no GCD simplification) — the returned pair is the exact authoritative
+   * value from its source (an explicit `UomConversion` row's own `num`/`den`,
+   * or the cross-multiplied `perBase` ratio), never a decimal approximation.
+   */
+  effectiveRatio(fromCode: string, toCode: string): Ratio {
+    if (fromCode === toCode) return { num: 1n, den: 1n };
+
+    for (const c of this.conversions) {
+      const cn = BigInt(c.num);
+      const cd = BigInt(c.den ?? 1n);
+      if (c.from === fromCode && c.to === toCode) return { num: cn, den: cd };
+      if (c.from === toCode && c.to === fromCode) return { num: cd, den: cn };
+    }
+
+    const from = this.get(fromCode);
+    const to = this.get(toCode);
+    if (from.family !== to.family) throw new UomFamilyMismatchError(fromCode, toCode);
+    if (from.family === 'EACH') throw new UomConversionUnavailableError(fromCode, toCode);
+    return {
+      num: from.perBase.num * to.perBase.den,
+      den: from.perBase.den * to.perBase.num,
+    };
+  }
+
+  /**
    * Whether `from → to` is already resolvable by authoritative same-family
    * `perBase` semantics (built-in OR a registered tenant physical/COUNT unit) —
    * an EXPLICIT scoped `uom_conversion` for such a pair is redundant and Task

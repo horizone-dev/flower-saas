@@ -95,6 +95,65 @@ describe('@flower/uom — Quantity.scaleByExact', () => {
   });
 });
 
+describe('@flower/uom — UomRegistry.effectiveRatio (task 3b.3 Checkpoint B hardening — the exact ratio-snapshot primitive)', () => {
+  const reg = new UomRegistry({
+    units: [
+      { code: 'box', family: 'EACH', perBase: { num: 1n, den: 1n }, maxDecimals: 0 },
+      { code: 'third', family: 'EACH', perBase: { num: 1n, den: 1n }, maxDecimals: 4 },
+    ],
+    conversions: [
+      { from: 'box', to: 'piece', num: 12 },
+      // 1 'third' = exactly 1/3 piece — NOT scale-4-representable for Quantity(1)
+      { from: 'third', to: 'piece', num: 1, den: 3 },
+    ],
+  });
+
+  it('A. identity: ratio snapshot is exactly 1/1', () => {
+    expect(reg.effectiveRatio('piece', 'piece')).toEqual({ num: 1n, den: 1n });
+  });
+
+  it('B. simple explicit conversion snapshots exactly (12/1)', () => {
+    expect(reg.effectiveRatio('box', 'piece')).toEqual({ num: 12n, den: 1n });
+  });
+
+  it('C. a nontrivial rational (1/3) is preserved exactly — never approximated via Quantity(1)', () => {
+    expect(reg.effectiveRatio('third', 'piece')).toEqual({ num: 1n, den: 3n });
+    // the inverse direction is the reciprocal, also exact
+    expect(reg.effectiveRatio('piece', 'third')).toEqual({ num: 3n, den: 1n });
+  });
+
+  it('D. quantity 3 under a 1/3 ratio converts exactly to 1 base unit', () => {
+    expect(reg.convertExact(Quantity.parse('3'), 'third', 'piece').toString()).toBe('1');
+  });
+
+  it('E. quantity 1 under a 1/3 ratio is rejected by quantity-exactness validation, without corrupting the resolved ratio', () => {
+    // the ratio itself resolves fine even though quantity=1 does not convert exactly
+    expect(reg.effectiveRatio('third', 'piece')).toEqual({ num: 1n, den: 3n });
+    expect(() => reg.convertExact(Quantity.parse('1'), 'third', 'piece')).toThrow(
+      InexactConversionError,
+    );
+  });
+
+  it('H. built-in/perBase cross-family-safe ratio resolves correctly (no explicit conversion row involved)', () => {
+    const physical = new UomRegistry();
+    // centimeter -> meter: perBase(cm)=1/100, perBase(m)=1/1 -> num=1*1=1, den=100*1=100
+    expect(physical.effectiveRatio('centimeter', 'meter')).toEqual({ num: 1n, den: 100n });
+    // kilogram -> gram: perBase(kg)=1000/1, perBase(g)=1/1 -> num=1000*1=1000, den=1*1=1
+    expect(physical.effectiveRatio('kilogram', 'gram')).toEqual({ num: 1000n, den: 1n });
+  });
+
+  it('cross-family / EACH-without-explicit-rule ratios are rejected, not silently approximated', () => {
+    const eachOnly = new UomRegistry({
+      units: [
+        { code: 'crate', family: 'EACH', perBase: { num: 1n, den: 1n }, maxDecimals: 0 },
+        { code: 'pallet', family: 'EACH', perBase: { num: 1n, den: 1n }, maxDecimals: 0 },
+      ],
+    });
+    expect(() => eachOnly.effectiveRatio('crate', 'pallet')).toThrow(UomConversionUnavailableError);
+    expect(() => new UomRegistry().effectiveRatio('meter', 'gram')).toThrow(UomFamilyMismatchError);
+  });
+});
+
 describe('@flower/uom — UomRegistry.convertExact (Task 3.6 pack identity)', () => {
   const reg = new UomRegistry({
     units: [

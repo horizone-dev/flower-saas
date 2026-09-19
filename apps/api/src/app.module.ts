@@ -14,6 +14,7 @@ import { LocalizationModule } from './modules/localization/localization.module.j
 import { CatalogModule } from './modules/catalog/catalog.module.js';
 import { AccountingModule } from './modules/accounting/accounting.module.js';
 import { CustomerModule } from './modules/customers/customer.module.js';
+import { OrderModule } from './modules/orders/order.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
@@ -38,6 +39,7 @@ import { HealthModule } from './health/health.module.js';
     CatalogModule,
     AccountingModule,
     CustomerModule,
+    OrderModule,
     HealthModule,
   ],
 })

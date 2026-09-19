@@ -17,5 +17,10 @@ import { CustomerController, CustomerTenantController } from './customer.control
   imports: [AccountingModule],
   controllers: [CustomerController, CustomerTenantController],
   providers: [CustomerRepository, CustomerService, CustomerCreateFingerprintProvider],
+  // `CustomerRepository` is exported additively for task 3b.3's `OrderModule`
+  // to reuse `getForCompany` (the exact Task 3b.2 join-gated company-
+  // association check, called INSIDE the Order module's own transaction) —
+  // no behavior change to any existing consumer.
+  exports: [CustomerRepository],
 })
 export class CustomerModule {}
