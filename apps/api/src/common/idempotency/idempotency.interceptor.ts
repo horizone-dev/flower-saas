@@ -6,7 +6,7 @@ import {
   type NestInterceptor,
 } from '@nestjs/common';
 import { HTTP_CODE_METADATA } from '@nestjs/common/constants.js';
-import { Reflector } from '@nestjs/core';
+import { ModuleRef, Reflector } from '@nestjs/core';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { catchError, from, mergeMap, type Observable, throwError } from 'rxjs';
@@ -34,6 +34,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
   constructor(
     private readonly reflector: Reflector,
     private readonly repo: IdempotencyRepository,
+    private readonly moduleRef: ModuleRef,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -95,7 +96,71 @@ export class IdempotencyInterceptor implements NestInterceptor {
     }
 
     const identity: IdemIdentity = { tenantId, scope: options.scope, principalId, key };
-    const hash = requestHash({
+    const httpStatus =
+      this.reflector.get<number>(HTTP_CODE_METADATA, execCtx.getHandler()) ??
+      (req.method === 'POST' ? 201 : 200);
+
+    return from(this.buildHash(req, options, routePattern, tenantId, principalId)).pipe(
+      mergeMap((hash) =>
+        from(this.resolve(identity, hash)).pipe(
+          mergeMap((decision) => {
+            if (decision.execute) {
+              const { claimToken } = decision;
+              return next.handle().pipe(
+                mergeMap((value) => from(this.onSuccess(identity, claimToken, httpStatus, value))),
+                catchError((err: unknown) =>
+                  from(this.repo.release(identity, claimToken).catch(() => undefined)).pipe(
+                    mergeMap(() => throwError(() => err)),
+                  ),
+                ),
+              );
+            }
+            // a replayed result
+            reply.header('idempotency-replayed', 'true');
+            if (!decision.snapshotStored) {
+              return throwError(
+                () =>
+                  new DomainError(
+                    'IDEMPOTENCY_REPLAY_UNAVAILABLE',
+                    'the original request succeeded but its response was not cached — re-fetch the resource',
+                    409,
+                  ),
+              );
+            }
+            void reply.status(decision.httpStatus);
+            return from(Promise.resolve(decision.snapshot));
+          }),
+        ),
+      ),
+    );
+  }
+
+  /**
+   * Default path (no `options.semanticFingerprintProvider`): hashes
+   * `req.body` verbatim — BYTE-IDENTICAL to the pre-extension behavior, so
+   * every existing `@Idempotent()` route (including task 3b.1's
+   * AccountingPeriod create) is completely unaffected.
+   *
+   * Opt-in path: resolves the route's own provider app-wide via `ModuleRef`
+   * (no static import of any domain module from this generic file) and hashes
+   * its `computeSemanticBody(req)` result instead. This call happens BEFORE
+   * `this.resolve(...)` ever acquires an idempotency claim — a thrown error
+   * (e.g. an invalid phone) surfaces as an ordinary request failure and never
+   * creates or poisons an idempotency-store row.
+   */
+  private async buildHash(
+    req: FastifyRequest,
+    options: IdempotentOptions,
+    routePattern: string,
+    tenantId: string,
+    principalId: string,
+  ): Promise<string> {
+    const body = options.semanticFingerprintProvider
+      ? await this.moduleRef
+          .get(options.semanticFingerprintProvider, { strict: false })
+          .computeSemanticBody(req)
+      : (req.body ?? null);
+    return requestHash({
       method: req.method,
       routePattern,
       pathParams: req.params ?? {},
@@ -103,42 +168,8 @@ export class IdempotencyInterceptor implements NestInterceptor {
       scope: options.scope,
       tenantId,
       principalId,
-      body: req.body ?? null,
+      body,
     });
-
-    const httpStatus =
-      this.reflector.get<number>(HTTP_CODE_METADATA, execCtx.getHandler()) ??
-      (req.method === 'POST' ? 201 : 200);
-
-    return from(this.resolve(identity, hash)).pipe(
-      mergeMap((decision) => {
-        if (decision.execute) {
-          const { claimToken } = decision;
-          return next.handle().pipe(
-            mergeMap((value) => from(this.onSuccess(identity, claimToken, httpStatus, value))),
-            catchError((err: unknown) =>
-              from(this.repo.release(identity, claimToken).catch(() => undefined)).pipe(
-                mergeMap(() => throwError(() => err)),
-              ),
-            ),
-          );
-        }
-        // a replayed result
-        reply.header('idempotency-replayed', 'true');
-        if (!decision.snapshotStored) {
-          return throwError(
-            () =>
-              new DomainError(
-                'IDEMPOTENCY_REPLAY_UNAVAILABLE',
-                'the original request succeeded but its response was not cached — re-fetch the resource',
-                409,
-              ),
-          );
-        }
-        void reply.status(decision.httpStatus);
-        return from(Promise.resolve(decision.snapshot));
-      }),
-    );
   }
 
   /**

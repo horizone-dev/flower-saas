@@ -176,6 +176,15 @@ export const AUDITABLE_ACTIONS = {
   'accounting.journal_posted': { resourceType: 'journal_entry', security: false },
   'accounting.journal_reversed': { resourceType: 'journal_entry', security: false },
 
+  // ── customers: CRM / Customer Core (task 3b.2) ─────────────────────────────
+  // Bounded payloads only — never raw PII (displayName/phoneE164/emailNormalized)
+  // and never a credit-limit amount. IDs, booleans, and changed-field NAMES only.
+  'customer.created': { resourceType: 'customer', security: false },
+  'customer.company_account_created': { resourceType: 'customer_company_account', security: false },
+  'customer.updated': { resourceType: 'customer', security: false },
+  'customer.archived': { resourceType: 'customer', security: false },
+  'customer.credit_config_updated': { resourceType: 'customer_company_account', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

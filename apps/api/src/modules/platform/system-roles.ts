@@ -6,6 +6,7 @@ import {
   PHASE_3_7_TENANT_PERMISSIONS,
   PHASE_3_8_TENANT_PERMISSIONS,
   PHASE_3B_1_TENANT_PERMISSIONS,
+  PHASE_3B_2_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -45,6 +46,16 @@ import {
  * `accounting:period:manage` (Owner-tier only — no tenant "Super Admin" role
  * is invented; `manager` gets neither). Existing tenants get the identical
  * backfill in the task 3b.1 migration.
+ *
+ * Phase 3b task 3b.2 (docs/phase-3/PHASE-3B-PLAN.md §E, owner-frozen role
+ * matrix): `owner` gains all 4 `customers:*` keys; `admin` gains
+ * `customers:view` + `customers:manage` + `customers:credit:manage` (NOT
+ * `customers:credit:override` — Owner-tier only, mirrors
+ * `accounting:period:manage`'s precedent); `manager`/`cashier`/`sales` each
+ * gain `customers:view` + `customers:manage` only (customer lookup AND
+ * on-the-spot creation are realistic POS-floor needs; credit configuration
+ * stays restricted to Owner/Admin). All other roles get nothing. Existing
+ * tenants get the identical backfill in the task 3b.2 migration.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
@@ -61,6 +72,16 @@ const CATALOG_VIEW = 'catalog:view';
 const ACCOUNTING = PHASE_3B_1_TENANT_PERMISSIONS.filter((k) => k !== 'accounting:period:manage');
 /** accounting:period:manage — Owner-tier only (3b.1). */
 const ACCOUNTING_PERIOD_MANAGE = 'accounting:period:manage';
+/** customers:view + customers:manage + customers:credit:manage — shared by owner + admin (3b.2). */
+const CUSTOMERS_ADMIN = PHASE_3B_2_TENANT_PERMISSIONS.filter(
+  (k) => k !== 'customers:credit:override',
+);
+/** customers:view + customers:manage only — manager/cashier/sales (3b.2). */
+const CUSTOMERS_OPERATIONAL = PHASE_3B_2_TENANT_PERMISSIONS.filter(
+  (k) => k === 'customers:view' || k === 'customers:manage',
+);
+/** customers:credit:override — Owner-tier only (3b.2). */
+const CUSTOMERS_CREDIT_OVERRIDE = 'customers:credit:override';
 
 export interface SystemRoleTemplate {
   key: string;
@@ -72,17 +93,34 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
   {
     key: 'owner',
     name: 'Owner',
-    permissions: [...P, ...CATALOG, ...ACCOUNTING, ACCOUNTING_PERIOD_MANAGE],
+    permissions: [
+      ...P,
+      ...CATALOG,
+      ...ACCOUNTING,
+      ACCOUNTING_PERIOD_MANAGE,
+      ...CUSTOMERS_ADMIN,
+      CUSTOMERS_CREDIT_OVERRIDE,
+    ],
   },
-  { key: 'admin', name: 'Admin', permissions: [...P, ...CATALOG, ...ACCOUNTING] },
+  {
+    key: 'admin',
+    name: 'Admin',
+    permissions: [...P, ...CATALOG, ...ACCOUNTING, ...CUSTOMERS_ADMIN],
+  },
   {
     key: 'manager',
     name: 'Manager',
-    permissions: ['users:view', 'audit:view', 'settings:branch:manage', CATALOG_VIEW],
+    permissions: [
+      'users:view',
+      'audit:view',
+      'settings:branch:manage',
+      CATALOG_VIEW,
+      ...CUSTOMERS_OPERATIONAL,
+    ],
   },
   { key: 'supervisor', name: 'Supervisor', permissions: ['users:view'] },
-  { key: 'cashier', name: 'Cashier', permissions: ['users:view'] },
-  { key: 'sales', name: 'Sales', permissions: ['users:view'] },
+  { key: 'cashier', name: 'Cashier', permissions: ['users:view', ...CUSTOMERS_OPERATIONAL] },
+  { key: 'sales', name: 'Sales', permissions: ['users:view', ...CUSTOMERS_OPERATIONAL] },
   { key: 'florist', name: 'Florist', permissions: ['users:view'] },
   { key: 'storekeeper', name: 'Storekeeper', permissions: ['users:view'] },
   { key: 'purchase_staff', name: 'Purchase Staff', permissions: ['users:view'] },

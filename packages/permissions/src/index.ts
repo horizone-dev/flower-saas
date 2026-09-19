@@ -78,13 +78,19 @@ export const PERMISSIONS = {
     'staff:commission:manage',
     'attendance_device:manage',
   ],
+  // task 3b.2 — CRM / Customer Core. The frozen 4-key contract is
+  // `customers:view` / `customers:manage` / `customers:credit:manage` /
+  // `customers:credit:override` (docs/phase-3/PHASE-3B-PLAN.md §E.1) —
+  // replaces the stale Phase-0 placeholder keys `credit:view`/`credit:manage`/
+  // `advance:manage`/`giftcards:manage` (confirmed zero runtime consumers
+  // repo-wide before removal; Gift Cards remain deferred per D3b-20).
+  // `payments:refund:approve`/`reports:view`/`reports:tenant` are left as-is —
+  // unrelated stale keys, out of this task's scope.
   customers: [
     'customers:view',
     'customers:manage',
-    'credit:view',
-    'credit:manage',
-    'advance:manage',
-    'giftcards:manage',
+    'customers:credit:manage',
+    'customers:credit:override',
     'payments:refund:approve',
     'reports:view',
     'reports:tenant',
@@ -306,6 +312,28 @@ export const PHASE_3B_1_TENANT_PERMISSIONS = [
   'accounting:period:manage',
 ] as const satisfies readonly PermissionKey[];
 
+/**
+ * Task 3b.2 (docs/phase-3/PHASE-3B-PLAN.md §E) — CRM / Customer Core. The
+ * frozen 4-key contract. Registered in `permission_registry` and assigned to
+ * built-in system roles: `owner` gains all 4; `admin`/`manager`/`cashier`/
+ * `sales` gain `customers:view` + `customers:manage` (`admin` additionally
+ * gains `customers:credit:manage`) — `customers:credit:override` is
+ * Owner-tier only (no tenant "Super Admin" role invented; Platform Super
+ * Admin is a wholly separate auth realm, never a tenant role). Registering
+ * `customers:credit:override` now is permission-only — its actual override
+ * *behavior* is Task 3b.6 (step-up, reason-required, audited, not built
+ * here). Existing tenants get the identical backfill in the task 3b.2
+ * migration.
+ */
+export const PHASE_3B_2_TENANT_PERMISSIONS = [
+  'customers:view',
+  'customers:manage',
+  'customers:credit:manage',
+  'customers:credit:override',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b2TenantPermission = (typeof PHASE_3B_2_TENANT_PERMISSIONS)[number];
+
 export type Phase3b1TenantPermission = (typeof PHASE_3B_1_TENANT_PERMISSIONS)[number];
 
 /**
@@ -356,6 +384,12 @@ export const STEP_UP_PERMISSIONS: ReadonlySet<string> = new Set<string>([
   // both a step-up-worthy mutation and a `@NoStepUp()` lower-risk route).
   'accounting:manage',
   'accounting:period:manage',
+  // Task 3b.2 — credit-limit configuration gates future money-exposure even
+  // though it posts nothing itself (docs/phase-3/PHASE-3B-PLAN.md scope
+  // review §0.16, mirrors accounting:period:manage's precedent). No other
+  // customers:* route uses this key, so no `@NoStepUp()` opt-out is needed
+  // anywhere for it.
+  'customers:credit:manage',
   ...PLATFORM_PERMISSIONS.filter(
     (k) =>
       k === 'platform:tenants:manage' ||

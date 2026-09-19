@@ -17,6 +17,7 @@ import {
   PHASE_3_7_TENANT_PERMISSIONS,
   PHASE_3_8_TENANT_PERMISSIONS,
   PHASE_3B_1_TENANT_PERMISSIONS,
+  PHASE_3B_2_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -66,6 +67,7 @@ describe('cross-tenant isolation probe suite', () => {
     uomCode: '',
     uomConversionId: '',
     accountingPeriodId: '',
+    customerId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -73,6 +75,7 @@ describe('cross-tenant isolation probe suite', () => {
   let ownerATok: string;
   let ownerBTok: string;
   let ownerBAccountingTok: string; // tenant B, task 3b.1 accounting:* permissions
+  let ownerBCustomerTok: string; // tenant B, task 3b.2 customers:* permissions
   let branchUserATok: string; // tenant A, scoped to branch A1 only
 
   beforeAll(async () => {
@@ -131,6 +134,21 @@ describe('cross-tenant isolation probe suite', () => {
           [A.tenantId, A.companyId],
         )
       ).id;
+      // task 3b.2 — an A-owned Customer, associated with A's own company, to
+      // probe for (a raw INSERT — bypasses the atomic create primitive, which
+      // is fine here since this is a fixture, not the code under test).
+      A.customerId = (
+        await one(
+          `INSERT INTO customer (id,"tenantId","displayName","updatedAt")
+           VALUES (uuidv7(),$1,'A-only Customer',now()) RETURNING id`,
+          [A.tenantId],
+        )
+      ).id;
+      await c.query(
+        `INSERT INTO customer_company_account (id,"tenantId","companyId","customerId","updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,now())`,
+        [A.tenantId, A.companyId, A.customerId],
+      );
       // a real branch_setting on A1 — a read leak would expose this value
       await c.query(
         `INSERT INTO branch_setting ("tenantId","branchId",key,value,"updatedAt")
@@ -203,6 +221,13 @@ describe('cross-tenant isolation probe suite', () => {
       userId: B.ownerId,
       accountType: 'OWNER',
       permissions: [...PHASE_3B_1_TENANT_PERMISSIONS],
+    });
+    ownerBCustomerTok = await mint('probe-owner-b-customer', {
+      realm: 'tenant',
+      tenantId: B.tenantId,
+      userId: B.ownerId,
+      accountType: 'OWNER',
+      permissions: [...PHASE_3B_2_TENANT_PERMISSIONS],
     });
 
     // seed a couple of A-owned resources to probe for
@@ -1197,6 +1222,114 @@ describe('cross-tenant isolation probe suite', () => {
           { accountingTimezone: 'Asia/Riyadh' },
         ),
       },
+      // ── task 3b.2: Customer is tenant-scoped identity, CustomerCompanyAccount
+      // is the company-scoped association — every company-scoped route is
+      // join-gated (a cross-tenant target company/customer 404s, never leaks).
+      // The tenant-wide routes (/v1/customers) additionally require
+      // companyScope==='ALL' at the repository layer (§10/§19) — ownerBCustomerTok
+      // has that scope for tenant B only, so this also proves the tenant-wide
+      // list/read never returns A's customer even though the caller is
+      // genuinely tenant-wide-scoped (just for the wrong tenant).
+      {
+        name: "GET A company's customers as ownerB (customers:view) — empty, no leak",
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send(
+            'GET',
+            `/v1/companies/${A.companyId}/customers`,
+            ownerBCustomerTok,
+          );
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode,
+            leaked: res.statusCode === 200 && !blob.includes('"data":[]'),
+          };
+        },
+      },
+      {
+        name: "GET A's customer by id as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/customers/${A.customerId}`,
+          ownerBCustomerTok,
+        ),
+      },
+      {
+        name: "PATCH A's customer profile as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PATCH',
+          `/v1/companies/${A.companyId}/customers/${A.customerId}`,
+          ownerBCustomerTok,
+          { displayName: 'hacked' },
+          { 'if-match': '1' },
+        ),
+      },
+      {
+        name: "POST archive on A's customer as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/customers/${A.customerId}/archive`,
+          ownerBCustomerTok,
+          undefined,
+          { 'if-match': '1' },
+        ),
+      },
+      {
+        name: "POST associate A's customer into A's company as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/customers/${A.customerId}/associate`,
+          ownerBCustomerTok,
+        ),
+      },
+      {
+        name: "GET A's CustomerCompanyAccount as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/customers/${A.customerId}/account`,
+          ownerBCustomerTok,
+        ),
+      },
+      {
+        name: "PATCH A's customer credit config as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PATCH',
+          `/v1/companies/${A.companyId}/customers/${A.customerId}/account/credit`,
+          ownerBCustomerTok,
+          { creditEnabled: true, creditLimitMinor: '1000' },
+          { 'if-match': '1' },
+        ),
+      },
+      {
+        name: "GET tenant-wide /v1/customers as ownerB (companyScope=ALL, but tenant B) — never includes A's customer",
+        axis: 'tenant',
+        attempt: async (): Promise<ProbeOutcome> => {
+          const res = await send('GET', '/v1/customers', ownerBCustomerTok);
+          const blob = JSON.stringify(res.json());
+          return {
+            status: res.statusCode,
+            leaked: res.statusCode === 200 && blob.includes(A.customerId),
+          };
+        },
+      },
+      {
+        name: "GET tenant-wide /v1/customers/:id for A's customer as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus('GET', `/v1/customers/${A.customerId}`, ownerBCustomerTok),
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -1424,6 +1557,10 @@ describe('cross-tenant isolation probe suite', () => {
       // task 3b.1 — probed above (tenant B cannot read/mutate tenant A's CoA /
       // accounting periods / timezone config).
       '/v1/companies/:companyId/accounting',
+      // task 3b.2 — probed above (tenant B cannot read/mutate/associate tenant
+      // A's Customer or CustomerCompanyAccount, company-scoped or tenant-wide).
+      '/v1/companies/:companyId/customers',
+      '/v1/customers',
     ];
     const unprobed = nonPublic.filter((r) => {
       const key = `${r.httpMethod} ${r.path}`;

@@ -263,6 +263,8 @@ model Tenant {
   accountingPeriods   AccountingPeriod[]
   journalEntries      JournalEntry[]
   journalLines        JournalLine[]
+  customers           Customer[]
+  customerAccounts    CustomerCompanyAccount[]
 
   @@map("tenant")
 }
@@ -541,9 +543,9 @@ model DataScopeAssignment {
 // ──────────────────────────────── org (tenant) ────────────────────────────────
 
 model Company {
-  id                 String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId           String               @db.Uuid
-  tenant             Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id                 String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId           String                   @db.Uuid
+  tenant             Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   legalNameEn        String
   legalNameAr        String?
   crNumber           String?
@@ -566,9 +568,9 @@ model Company {
   /// falls back to Branch.timezone / Country.defaultTimezone / POS / client tz.
   accountingTimezone String?
   /// ACTIVE | INACTIVE
-  status             String               @default("ACTIVE")
-  createdAt          DateTime             @default(now()) @db.Timestamptz(6)
-  updatedAt          DateTime             @updatedAt @db.Timestamptz(6)
+  status             String                   @default("ACTIVE")
+  createdAt          DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime                 @updatedAt @db.Timestamptz(6)
   tradeLicenses      TradeLicense[]
   branches           Branch[]
   posTerminals       PosTerminal[]
@@ -577,6 +579,7 @@ model Company {
   accountingPeriods  AccountingPeriod[]
   journalEntries     JournalEntry[]
   journalLines       JournalLine[]
+  customerAccounts   CustomerCompanyAccount[]
 
   /// task 3.7 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`                  ← `company_variant_price_set` tenant-safe FK
@@ -828,6 +831,87 @@ model JournalLine {
   @@index([journalEntryId])
   @@index([tenantId, companyId])
   @@map("journal_line")
+}
+
+// ───────────── customer core (task 3b.2) ───────────────────────────────────
+// `Customer` is TENANT-scoped identity (D3b-5) — one row per person/entity, never
+// duplicated per Company. `CustomerCompanyAccount` is the explicit, Company-scoped
+// financial-relationship boundary — created atomically the moment a Customer is
+// first associated with a Company (never lazily on first credit-config use).
+// Company financial config (creditEnabled/creditLimit) is independent per
+// CustomerCompanyAccount row — Company A can never affect Company B (D3b-5/§C.2).
+// PII access for a Company/Branch-scoped caller is gated by joining THROUGH this
+// association table at the repository layer (`listForCompany`) — RLS stays
+// tenant-only, company-level PII separation is a service/query-layer concern, not
+// an RLS concern, matching the account/accounting_period precedent from 3b.1.
+// No AR/Advance/Settlement truth here — `currentOutstanding`/`availableCredit`/
+// `advanceBalance` are 3b.6 additive columns once the append-only subledger exists.
+
+/// UUID-only tenant identity (D3b-5) — no customer code/number. V1 fields are
+/// deliberately minimal (§C.2 "name, contact, status") — no firstName/lastName
+/// split, DOB, gender, notes, loyalty or marketing fields (owner-frozen, task
+/// 3b.2 scope review). `phoneE164`/`emailNormalized` are NOT unique — duplicates
+/// are allowed by design (shared family phones, shared business emails, no
+/// hidden auto-merge); the indexes below are for exact-match lookup only.
+model Customer {
+  id              String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  displayName     String
+  /// canonical E.164 form only — never a locally-formatted string (task 3b.2 §7)
+  phoneE164       String?
+  /// trim + lowercase only — no provider-specific rewriting (task 3b.2 §7)
+  emailNormalized String?
+  /// ACTIVE | ARCHIVED — no public hard-delete in V1
+  status          String   @default("ACTIVE")
+  /// optimistic concurrency (If-Match pattern, matching every other mutation)
+  version         Int      @default(1)
+  createdByUserId String?  @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+
+  companyAccounts CustomerCompanyAccount[]
+
+  /// FK target: `customer_company_account.(tenantId, customerId)` proves the
+  /// association belongs to the same tenant as the customer itself.
+  @@unique([tenantId, id])
+  @@index([tenantId, phoneE164])
+  @@index([tenantId, emailNormalized])
+  @@map("customer")
+}
+
+/// The explicit Customer <-> Company financial-relationship boundary (D3b-5).
+/// Created atomically when a Customer is first associated with a Company —
+/// never lazily. `creditLimit*` is a self-describing Money snapshot (mirrors
+/// `CompanyVariantUomPrice`'s `purchaseAmountMinor`/`purchaseCurrencyCode`/
+/// `purchaseCurrencyExponent` 3-column pattern) so a later Company-currency
+/// change can never cause `creditLimitMinor` to be silently reinterpreted —
+/// all three NULL or all three present (CHECK, migration SQL). No
+/// `currentOutstanding`/`availableCredit`/`advanceBalance` in V1 — those are
+/// 3b.6 additive columns, populated once the append-only AR/Advance subledger
+/// exists to derive them from.
+model CustomerCompanyAccount {
+  id         String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId   String @db.Uuid
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId  String @db.Uuid
+  customerId String @db.Uuid
+
+  creditEnabled               Boolean @default(false)
+  creditLimitMinor            BigInt?
+  creditLimitCurrencyCode     String?
+  creditLimitCurrencyExponent Int?    @db.SmallInt
+
+  /// optimistic concurrency (If-Match pattern, matching every other mutation)
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  customer Customer @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Restrict)
+  company  Company  @relation(fields: [tenantId, companyId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, companyId, customerId])
+  @@map("customer_company_account")
 }
 
 // ───────────────────────── secrets vault shell (tenant) ───────────────────────

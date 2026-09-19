@@ -3881,6 +3881,118 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
     });
   });
 
+  // ── customer permission role backfill (task 3b.2) ──────────────────────────
+  describe('customer permissions role backfill (task 3b.2)', () => {
+    it('owner gets all 4 customers:* keys, admin gets view+manage+credit:manage (NOT override), manager/cashier/sales get view+manage only, other roles get none, unrelated pre-existing permissions are preserved, backfill is idempotent', async () => {
+      const T = '0000cccc-0000-7000-8000-00000000cc55';
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1,'cust-bf','cust-bf','AE','ACTIVE','00000000-0000-7000-8000-000000000002', now())
+         ON CONFLICT (id) DO NOTHING`,
+        [T],
+      );
+      const roleIds: Record<string, string> = {};
+      for (const [key, isSystem] of [
+        ['owner', true],
+        ['admin', true],
+        ['manager', true],
+        ['cashier', true],
+        ['sales', true],
+        ['supervisor', true],
+        ['custom_role', false],
+      ] as const) {
+        const r = await pool.query(
+          `INSERT INTO role (id,"tenantId",key,name,"isSystem","updatedAt")
+           VALUES (uuidv7(),$1,$2,$2,$3, now()) RETURNING id`,
+          [T, key, isSystem],
+        );
+        roleIds[key] = r.rows[0].id;
+      }
+
+      // simulate pre-existing permissions from an EARLIER phase backfill
+      // (e.g. task 3b.1's accounting:view) already present on owner/admin —
+      // the customer backfill must never touch these.
+      await pool.query(`ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;`);
+      await pool.query(
+        `INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+         VALUES (uuidv7(), $1, $2, 'accounting:view'), (uuidv7(), $1, $3, 'accounting:view')`,
+        [T, roleIds['owner'], roleIds['admin']],
+      );
+      await pool.query(`ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`);
+
+      // re-run the migration's exact customer backfill statements
+      // (`20260918130000_customer_permissions/migration.sql`).
+      const backfill = `
+        ALTER TABLE "role"            NO FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", k.key
+          FROM "role" r CROSS JOIN (VALUES ('customers:view'), ('customers:manage')) AS k(key)
+         WHERE r."isSystem" = true AND r."key" IN ('owner', 'admin', 'manager', 'cashier', 'sales')
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", 'customers:credit:manage'
+          FROM "role" r
+         WHERE r."isSystem" = true AND r."key" IN ('owner', 'admin')
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", 'customers:credit:override'
+          FROM "role" r
+         WHERE r."isSystem" = true AND r."key" = 'owner'
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        ALTER TABLE "role"            FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`;
+      await pool.query(backfill);
+      await pool.query(backfill); // twice — must not create duplicates
+
+      const perms = async (roleId: string): Promise<string[]> =>
+        (
+          await pool.query<{ permissionKey: string }>(
+            `SELECT "permissionKey" FROM "role_permission" WHERE "roleId" = $1 ORDER BY "permissionKey"`,
+            [roleId],
+          )
+        ).rows.map((r) => r.permissionKey);
+
+      expect(await perms(roleIds['owner']!)).toEqual([
+        'accounting:view', // pre-existing permission preserved, not removed
+        'customers:credit:manage',
+        'customers:credit:override',
+        'customers:manage',
+        'customers:view',
+      ]);
+      expect(await perms(roleIds['admin']!)).toEqual([
+        'accounting:view', // pre-existing permission preserved, not removed
+        'customers:credit:manage',
+        'customers:manage',
+        'customers:view',
+      ]);
+      expect(await perms(roleIds['admin']!)).not.toContain('customers:credit:override');
+      expect(await perms(roleIds['manager']!)).toEqual(['customers:manage', 'customers:view']);
+      expect(await perms(roleIds['cashier']!)).toEqual(['customers:manage', 'customers:view']);
+      expect(await perms(roleIds['sales']!)).toEqual(['customers:manage', 'customers:view']);
+      expect(await perms(roleIds['supervisor']!)).toEqual([]); // untouched
+      expect(await perms(roleIds['custom_role']!)).toEqual([]); // untouched
+
+      const force = await pool.query<{ relname: string; f: boolean }>(
+        `SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relname = ANY($1)`,
+        [['role', 'role_permission']],
+      );
+      for (const r of force.rows) expect(r.f, `${r.relname} FORCE restored`).toBe(true);
+
+      await pool.query(`DELETE FROM "role_permission" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "role" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "tenant" WHERE id = $1`, [T]);
+    });
+
+    it('no stale customer placeholder key (credit:view/credit:manage/advance:manage/giftcards:manage) remains registered', async () => {
+      const { rows } = await pool.query<{ key: string }>(
+        `SELECT key FROM permission_registry WHERE key = ANY($1)`,
+        [['credit:view', 'credit:manage', 'advance:manage', 'giftcards:manage']],
+      );
+      expect(rows).toEqual([]);
+    });
+  });
+
   // ── RLS behaviour (the ADR-0010 GO pattern) ────────────────────────────────
   describe('RLS behaviour as flower_app', () => {
     const A = TENANT_A;

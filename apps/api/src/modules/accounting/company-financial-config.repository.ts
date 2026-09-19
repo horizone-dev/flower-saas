@@ -83,13 +83,48 @@ export class CompanyFinancialConfigRepository extends ScopedRepository {
     });
   }
 
-  async lockForPosting(tx: ScopedTx, companyId: string): Promise<CompanyFinancialConfig> {
+  /**
+   * Locks the company row `FOR SHARE` and returns its raw financial-config
+   * columns, unvalidated. Private — every public entry point below decides
+   * for itself which of these fields it actually requires, so a caller that
+   * only needs `defaultCurrency` (e.g. task 3b.2's credit configuration)
+   * never has to satisfy `accountingTimezone`/posting-readiness prerequisites
+   * that are irrelevant to it. Extracted from the original single-purpose
+   * `lockForPosting` body — task 3b.2 checkpoint B, behavior-preserving.
+   */
+  private async lockCompanyRow(
+    tx: ScopedTx,
+    companyId: string,
+  ): Promise<{ id: string; defaultCurrency: string | null; accountingTimezone: string | null }> {
     const rows = await tx.$queryRaw<
       { id: string; defaultCurrency: string | null; accountingTimezone: string | null }[]
     >`SELECT "id", "defaultCurrency", "accountingTimezone" FROM "company"
         WHERE "id" = ${companyId}::uuid FOR SHARE`;
     const row = rows[0];
     if (!row) throw new DomainError('NOT_FOUND', 'company not found', 404);
+    return row;
+  }
+
+  /**
+   * Currency-only lock — for callers that need a stable `Company.defaultCurrency`
+   * read (e.g. task 3b.2 credit-limit configuration) but have no posting-
+   * readiness requirement of their own (no `accountingTimezone`/open-period
+   * dependency). Fails closed only on the currency, never on timezone.
+   */
+  async lockCurrencyOnly(tx: ScopedTx, companyId: string): Promise<{ defaultCurrency: string }> {
+    const row = await this.lockCompanyRow(tx, companyId);
+    if (!row.defaultCurrency) {
+      throw new DomainError(
+        'ACCOUNTING_CURRENCY_NOT_CONFIGURED',
+        'Company.defaultCurrency must be configured before financial posting',
+        422,
+      );
+    }
+    return { defaultCurrency: row.defaultCurrency };
+  }
+
+  async lockForPosting(tx: ScopedTx, companyId: string): Promise<CompanyFinancialConfig> {
+    const row = await this.lockCompanyRow(tx, companyId);
     if (!row.defaultCurrency) {
       throw new DomainError(
         'ACCOUNTING_CURRENCY_NOT_CONFIGURED',

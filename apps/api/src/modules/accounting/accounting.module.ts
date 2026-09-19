@@ -27,6 +27,9 @@ import { AccountingController } from './accounting.controller.js';
     PostingEngineService,
     SystemClock,
   ],
-  exports: [PostingEngineService],
+  // `CompanyFinancialConfigRepository` is exported additively for task 3b.2's
+  // `CustomerModule` to reuse `lockCurrencyOnly` — no behavior change to any
+  // task 3b.1 consumer (still resolved from this same provider instance).
+  exports: [PostingEngineService, CompanyFinancialConfigRepository],
 })
 export class AccountingModule {}

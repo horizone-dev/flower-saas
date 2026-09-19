@@ -1,4 +1,5 @@
 export { Idempotent, IDEMPOTENT_META, type IdempotentOptions } from './idempotent.decorator.js';
+export type { SemanticFingerprintProvider } from './semantic-fingerprint.provider.js';
 export { IdempotencyModule } from './idempotency.module.js';
 export { IdempotencyService } from './idempotency.service.js';
 export { IdempotencyRepository } from './idempotency.repository.js';

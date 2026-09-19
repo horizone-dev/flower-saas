@@ -13,6 +13,7 @@ import { SecretsModule } from './modules/secrets/secrets.module.js';
 import { LocalizationModule } from './modules/localization/localization.module.js';
 import { CatalogModule } from './modules/catalog/catalog.module.js';
 import { AccountingModule } from './modules/accounting/accounting.module.js';
+import { CustomerModule } from './modules/customers/customer.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
@@ -36,6 +37,7 @@ import { HealthModule } from './health/health.module.js';
     LocalizationModule,
     CatalogModule,
     AccountingModule,
+    CustomerModule,
     HealthModule,
   ],
 })
