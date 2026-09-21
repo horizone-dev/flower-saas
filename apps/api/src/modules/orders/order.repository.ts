@@ -19,9 +19,11 @@ import { loadEffectiveVariantRegistry } from '../catalog/uom.repository.js';
 import { BranchPricingService } from '../catalog/branch-pricing.service.js';
 import { TaxResolutionService } from '../catalog/tax-resolution.service.js';
 import { CustomerRepository } from '../customers/customer.repository.js';
+import { LocalizationService } from '../localization/localization.service.js';
 import type { OrderLineInputDto } from './dto/order-line-input.dto.js';
 import {
-  computeCommercialSnapshotFingerprint,
+  computeCommercialSnapshotFingerprintV2,
+  computeCommercialSnapshotFingerprintByVersion,
   type CommercialSnapshotLine,
 } from './commercial-snapshot.js';
 
@@ -46,6 +48,10 @@ export interface OrderRow {
   orderNumber: string | null;
   version: number;
   commercialSnapshotFingerprint: string;
+  commercialSnapshotFingerprintVersion: number;
+  taxPriceMode: string;
+  taxRoundingScope: string;
+  taxRoundingMode: string;
   createdByUserId: string | null;
   actingUserId: string | null;
   createdAt: Date;
@@ -139,6 +145,10 @@ function mapOrderRow(raw: Record<string, unknown>): OrderRow {
     orderNumber: (raw['orderNumber'] as string | null) ?? null,
     version: raw['version'] as number,
     commercialSnapshotFingerprint: raw['commercialSnapshotFingerprint'] as string,
+    commercialSnapshotFingerprintVersion: raw['commercialSnapshotFingerprintVersion'] as number,
+    taxPriceMode: raw['taxPriceMode'] as string,
+    taxRoundingScope: raw['taxRoundingScope'] as string,
+    taxRoundingMode: raw['taxRoundingMode'] as string,
     createdByUserId: (raw['createdByUserId'] as string | null) ?? null,
     actingUserId: (raw['actingUserId'] as string | null) ?? null,
     createdAt: raw['createdAt'] as Date,
@@ -215,6 +225,7 @@ export class OrderRepository extends ScopedRepository {
     private readonly branchPricing: BranchPricingService,
     private readonly taxResolution: TaxResolutionService,
     private readonly customers: CustomerRepository,
+    private readonly localization: LocalizationService,
   ) {
     super(db);
   }
@@ -233,7 +244,15 @@ export class OrderRepository extends ScopedRepository {
   }): Promise<{ order: OrderRow; lines: OrderLineRow[] }> {
     const { tenantId } = requireTenantContext();
     const currencyCode = await this.resolveCompanyCurrency(input.companyId);
-    const resolvedLines = await this.resolveLines(input.companyId, input.branchId, input.lines);
+    const {
+      lines: resolvedLines,
+      today,
+      countryCode,
+    } = await this.resolveLines(input.companyId, input.branchId, input.lines);
+    // Task 3b.4 Checkpoint C (§C5) — the SAME `today`/`countryCode` line
+    // tax-reference resolution just used, resolved ONCE at creation, never
+    // re-resolved (§C10 — immutable forever from here on).
+    const fiscalPolicy = await this.localization.resolveFiscalPolicyOn(countryCode, today);
 
     const grossAfterLines = resolvedLines.reduce(
       (acc, l) => acc.add(Money.ofMinor(l.netAmountMinor, currencyCode)),
@@ -266,20 +285,27 @@ export class OrderRepository extends ScopedRepository {
         input.customerId,
       );
 
-      const fingerprint = computeCommercialSnapshotFingerprint({
-        tenantId,
-        companyId: input.companyId,
-        originBranchId: input.branchId,
-        fulfillingBranchId: input.branchId,
-        customerId,
-        kind: 'WALK_IN',
-        currencyCode,
-        lines: resolvedLines.map(toSnapshotLine),
-        documentDiscountMode: documentDiscount.mode,
-        documentDiscountBps: documentDiscount.bps,
-        documentDiscountAmountMinor: documentDiscount.amountMinor.toString(),
-        documentDiscountReason: input.documentDiscountReason ?? null,
-      });
+      const fingerprint = computeCommercialSnapshotFingerprintV2(
+        {
+          tenantId,
+          companyId: input.companyId,
+          originBranchId: input.branchId,
+          fulfillingBranchId: input.branchId,
+          customerId,
+          kind: 'WALK_IN',
+          currencyCode,
+          lines: resolvedLines.map(toSnapshotLine),
+          documentDiscountMode: documentDiscount.mode,
+          documentDiscountBps: documentDiscount.bps,
+          documentDiscountAmountMinor: documentDiscount.amountMinor.toString(),
+          documentDiscountReason: input.documentDiscountReason ?? null,
+        },
+        {
+          taxPriceMode: fiscalPolicy.priceTaxMode,
+          taxRoundingScope: fiscalPolicy.roundingScope,
+          taxRoundingMode: fiscalPolicy.roundingMode,
+        },
+      );
 
       const order = await tx.order.create({
         data: {
@@ -298,6 +324,10 @@ export class OrderRepository extends ScopedRepository {
           documentDiscountAmountMinor: documentDiscount.amountMinor,
           documentDiscountReason: input.documentDiscountReason ?? null,
           commercialSnapshotFingerprint: fingerprint,
+          commercialSnapshotFingerprintVersion: 2,
+          taxPriceMode: fiscalPolicy.priceTaxMode,
+          taxRoundingScope: fiscalPolicy.roundingScope,
+          taxRoundingMode: fiscalPolicy.roundingMode,
           createdByUserId,
           actingUserId: createdByUserId,
         },
@@ -424,10 +454,12 @@ export class OrderRepository extends ScopedRepository {
     const { tenantId } = requireTenantContext();
 
     // resolve BEFORE the write transaction opens — same "no partial Order"
-    // discipline as create (§16/§19).
+    // discipline as create (§16/§19). Task 3b.4 Checkpoint C (§C17) — a PATCH
+    // NEVER re-resolves fiscal policy: `today`/`countryCode` are discarded
+    // here, unlike create's use of the identical `resolveLines` call.
     const resolvedLines =
       input.lines !== undefined
-        ? await this.resolveLines(input.companyId, input.branchId, input.lines)
+        ? (await this.resolveLines(input.companyId, input.branchId, input.lines)).lines
         : null;
 
     return this.scoped(async (tx) => {
@@ -551,20 +583,33 @@ export class OrderRepository extends ScopedRepository {
             : currentOrder.documentDiscountReason;
       }
 
-      const fingerprint = computeCommercialSnapshotFingerprint({
-        tenantId,
-        companyId: input.companyId,
-        originBranchId: currentOrder.originBranchId,
-        fulfillingBranchId: currentOrder.fulfillingBranchId,
-        customerId,
-        kind: currentOrder.kind,
-        currencyCode: currentOrder.currencyCode,
-        lines: snapshotLines,
-        documentDiscountMode,
-        documentDiscountBps,
-        documentDiscountAmountMinor: documentDiscountAmountMinor.toString(),
-        documentDiscountReason,
-      });
+      // Task 3b.4 Checkpoint C (§C9) — dispatch on the Order's OWN persisted
+      // `commercialSnapshotFingerprintVersion`: V1 stays V1 forever, V2 stays
+      // V2 forever. Policy fields (V2 only) come from `currentOrder` itself —
+      // they are immutable from creation (§C10), so a PATCH never re-resolves
+      // them, only reuses the already-frozen values.
+      const fingerprint = computeCommercialSnapshotFingerprintByVersion(
+        currentOrder.commercialSnapshotFingerprintVersion,
+        {
+          tenantId,
+          companyId: input.companyId,
+          originBranchId: currentOrder.originBranchId,
+          fulfillingBranchId: currentOrder.fulfillingBranchId,
+          customerId,
+          kind: currentOrder.kind,
+          currencyCode: currentOrder.currencyCode,
+          lines: snapshotLines,
+          documentDiscountMode,
+          documentDiscountBps,
+          documentDiscountAmountMinor: documentDiscountAmountMinor.toString(),
+          documentDiscountReason,
+        },
+        {
+          taxPriceMode: currentOrder.taxPriceMode,
+          taxRoundingScope: currentOrder.taxRoundingScope,
+          taxRoundingMode: currentOrder.taxRoundingMode,
+        },
+      );
 
       const updated = await tx.order.update({
         where: { id: currentOrder.id },
@@ -754,11 +799,20 @@ export class OrderRepository extends ScopedRepository {
    * entirely as reads (no write) — see the class doc comment for why this
    * happens before the write transaction opens.
    */
+  /**
+   * Task 3b.4 Checkpoint C (§C5) — resolves lines AND returns the SAME
+   * `today` civil date + authoritative `countryCode` used for line
+   * tax-reference resolution, so a caller resolving fiscal policy too (Order
+   * CREATE only — see `createWalkInDraftForBranchScoped`) uses the identical
+   * date/country, never a second independently-derived value. `clock.now()`
+   * is called exactly once, inside this method — a caller must never call it
+   * again for the same Order.
+   */
   private async resolveLines(
     companyId: string,
     branchId: string,
     inputs: OrderLineInputDto[],
-  ): Promise<ResolvedLine[]> {
+  ): Promise<{ lines: ResolvedLine[]; today: string; countryCode: string }> {
     const { tenantId } = requireTenantContext();
     const { defaultCurrency: currencyCode, accountingTimezone } =
       await this.resolveCompanyFiscalContext(companyId);
@@ -767,6 +821,9 @@ export class OrderRepository extends ScopedRepository {
     // timezone, via the exact proven helper Task 3b.1 already uses for
     // `postingDate` (never UTC truncation, never Branch/POS/browser tz).
     const today = derivePostingDate(this.clock.now(), accountingTimezone);
+    // the SAME authoritative country as fiscal-policy resolution below reuses
+    // (§C5 — one civil date, one country, shared by both resolutions).
+    const countryCode = await this.localization.resolveCompanyCountry(companyId);
 
     const catalog = await this.scoped(async (tx) => {
       const variantIds = [...new Set(inputs.map((l) => l.variantId))];
@@ -1019,7 +1076,7 @@ export class OrderRepository extends ScopedRepository {
         netAmountMinor: netMoney.amountMinor,
       });
     }
-    return resolved;
+    return { lines: resolved, today, countryCode };
   }
 
   /**

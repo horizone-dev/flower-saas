@@ -160,8 +160,11 @@ describe('cross-tenant isolation probe suite', () => {
       const orderRow = await one(
         `INSERT INTO "order"
            (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,
-            "currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
-         VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'probe-fixture-fingerprint',now())
+            "currencyCode","currencyExponent","commercialSnapshotFingerprint",
+            "commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode",
+            "updatedAt")
+         VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'probe-fixture-fingerprint',
+                 2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())
          RETURNING id, version`,
         [A.tenantId, A.companyId, A.branchId],
       );
@@ -327,8 +330,11 @@ describe('cross-tenant isolation probe suite', () => {
           await c2.query(
             `INSERT INTO "order"
                (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,
-                "currencyCode","currencyExponent","commercialSnapshotFingerprint","orderNumber","updatedAt")
-             VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','CONFIRMED','AED',2,'probe-issued-fingerprint','ORD-900001',now())
+                "currencyCode","currencyExponent","commercialSnapshotFingerprint",
+                "commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode",
+                "orderNumber","updatedAt")
+             VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','CONFIRMED','AED',2,'probe-issued-fingerprint',
+                     2,'TAX_EXCLUSIVE','LINE','HALF_UP','ORD-900001',now())
              RETURNING id`,
             [A.tenantId, A.companyId, A.branchId],
           )
@@ -341,7 +347,7 @@ describe('cross-tenant isolation probe suite', () => {
               "resolutionSource","selectedUomCode","uomDisplayLabelSnapshot","baseUomCode",
               "conversionNumerator","conversionDenominator","productNameEnSnapshot","variantNameEnSnapshot","updatedAt")
            VALUES (uuidv7(),$1,$2,$3,1,$4,$5,'1.0000',1000,'AED',2,
-                   'EXCLUSIVE','LINE','HALF_UP',0,
+                   'TAX_EXCLUSIVE','LINE','HALF_UP',0,
                    'NONE','piece','Piece','piece',1,1,'Probe Product','Probe Variant',now())`,
           [A.tenantId, A.companyId, issuedOrderRow.id, A.productId, A.variantId],
         );
@@ -1787,8 +1793,9 @@ async function seed(url: string): Promise<void> {
       -- packages/db/prisma/gcc-reference-data.ts and its own test.
       INSERT INTO tax_category (key, "nameEn", "nameAr")
       VALUES ('STANDARD', 'Standard', 'x'), ('ZERO_RATED', 'Zero-rated', 'x'), ('EXEMPT', 'Exempt', 'x');
-      INSERT INTO country_tax_config ("countryCode", "effectiveFrom", "effectiveTo", regime)
-      VALUES ('AE', '2018-01-01', NULL, 'VAT');
+      INSERT INTO country_tax_config ("countryCode", "effectiveFrom", "effectiveTo", regime, config)
+      VALUES ('AE', '2018-01-01', NULL, 'VAT',
+              '{"priceTaxMode":"TAX_EXCLUSIVE","roundingScope":"LINE","roundingMode":"HALF_UP"}'::jsonb);
       INSERT INTO tax_rate ("countryCode", "taxCategoryKey", "rateBps", "effectiveFrom", "effectiveTo")
       VALUES ('AE', 'STANDARD', 500, '2018-01-01', NULL), ('AE', 'ZERO_RATED', 0, '2018-01-01', NULL);
       INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")

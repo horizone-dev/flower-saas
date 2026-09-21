@@ -17,6 +17,11 @@ describe('divRound', () => {
     expect(divRound(7n, 2n, 'DOWN')).toBe(3n);
     expect(divRound(7n, 2n, 'UP')).toBe(4n);
   });
+  it('fails closed on an out-of-vocabulary mode rather than silently rounding DOWN (found during Task 3b.4 Checkpoint F — a caller casting an untyped runtime value to `RoundingMode` bypasses TS exhaustiveness checking)', () => {
+    expect(() => divRound(7n, 2n, 'CEIL' as unknown as Parameters<typeof divRound>[2])).toThrow(
+      RangeError,
+    );
+  });
 });
 
 describe('Money — construction & representation', () => {

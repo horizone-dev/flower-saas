@@ -13,7 +13,7 @@ import { DomainError, NotFoundError } from '../../common/errors/domain-error.js'
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { SystemClock } from '../../common/clock/clock.js';
 import { derivePostingDate } from '../accounting/posting-date.js';
-import { computeCommercialSnapshotFingerprint } from './commercial-snapshot.js';
+import { computeCommercialSnapshotFingerprintByVersion } from './commercial-snapshot.js';
 
 export interface FinalizedLineTax {
   orderLineId: string;
@@ -103,12 +103,17 @@ export class InvoiceIssuanceRepository {
         documentDiscountReason: string | null;
         originBranchId: string;
         fulfillingBranchId: string;
+        commercialSnapshotFingerprintVersion: number;
+        taxPriceMode: string;
+        taxRoundingScope: string;
+        taxRoundingMode: string;
       }[]
     >`
       SELECT "id", "tenantId", "companyId", "status", "version", "commercialSnapshotFingerprint",
              "customerId", "kind", "currencyCode", "currencyExponent", "documentDiscountMode",
              "documentDiscountBps", "documentDiscountAmountMinor", "documentDiscountReason",
-             "originBranchId", "fulfillingBranchId"
+             "originBranchId", "fulfillingBranchId", "commercialSnapshotFingerprintVersion",
+             "taxPriceMode", "taxRoundingScope", "taxRoundingMode"
         FROM "order"
        WHERE "id" = ${input.orderId}::uuid
          AND "tenantId" = ${input.tenantId}::uuid
@@ -198,47 +203,57 @@ export class InvoiceIssuanceRepository {
     //       matches the CURRENT persisted Order + OrderLine rows a
     //       raw-SQL/application-bug write could have changed without
     //       recomputing it. Reconstruct the canonical snapshot from the
-    //       LOCKED, persisted state — reusing the ONE shared
-    //       `computeCommercialSnapshotFingerprint` builder, never a second
-    //       hashing implementation — and require it to match BOTH the
-    //       stored column AND the caller's expectation. Finalized tax fields
-    //       (`priceTaxMode`/`roundingScope`/`roundingMode`/
-    //       `lineTaxAmountMinor`, Task 3b.4-owned) are deliberately excluded
-    //       — they were never part of the frozen fingerprint contract
-    //       (`commercial-snapshot.ts`) and do not exist yet at this point in
-    //       the transaction (written in step 7, below).
-    const recomputedFingerprint = computeCommercialSnapshotFingerprint({
-      tenantId: order.tenantId,
-      companyId: order.companyId,
-      originBranchId: order.originBranchId,
-      fulfillingBranchId: order.fulfillingBranchId,
-      customerId: order.customerId,
-      kind: order.kind,
-      currencyCode: order.currencyCode,
-      lines: lineRows.map((l) => ({
-        productId: l.productId,
-        variantId: l.variantId,
-        quantity: l.quantity.toFixed(4),
-        selectedUomCode: l.selectedUomCode,
-        baseUomCode: l.baseUomCode,
-        conversionNumerator: l.conversionNumerator.toString(),
-        conversionDenominator: l.conversionDenominator.toString(),
-        unitPriceAmountMinor: l.unitPriceAmountMinor.toString(),
-        unitPriceCurrencyCode: l.unitPriceCurrencyCode,
-        unitPriceCurrencyExponent: l.unitPriceCurrencyExponent,
-        discountMode: l.discountMode,
-        discountBps: l.discountBps,
-        discountAmountMinor: l.discountAmountMinor.toString(),
-        taxCategoryKey: l.taxCategoryKey,
-        rateBps: l.rateBps,
-        effectiveFrom: l.effectiveFrom ? l.effectiveFrom.toISOString().slice(0, 10) : null,
-        resolutionSource: l.resolutionSource,
-      })),
-      documentDiscountMode: order.documentDiscountMode,
-      documentDiscountBps: order.documentDiscountBps,
-      documentDiscountAmountMinor: order.documentDiscountAmountMinor.toString(),
-      documentDiscountReason: order.documentDiscountReason,
-    });
+    //       LOCKED, persisted state — reusing the ONE shared version-dispatch
+    //       helper (`computeCommercialSnapshotFingerprintByVersion`, Task
+    //       3b.4 §C9), dispatching on the Order's OWN persisted
+    //       `commercialSnapshotFingerprintVersion` — never a second hashing
+    //       implementation, never assuming the latest version — and require
+    //       it to match BOTH the stored column AND the caller's expectation.
+    //       Finalized tax fields (`priceTaxMode`/`roundingScope`/
+    //       `roundingMode`/`lineTaxAmountMinor` on OrderLine, Task 3b.4-owned)
+    //       are deliberately excluded — they were never part of the frozen
+    //       fingerprint contract (`commercial-snapshot.ts`) and do not exist
+    //       yet at this point in the transaction (written in step 7, below).
+    const recomputedFingerprint = computeCommercialSnapshotFingerprintByVersion(
+      order.commercialSnapshotFingerprintVersion,
+      {
+        tenantId: order.tenantId,
+        companyId: order.companyId,
+        originBranchId: order.originBranchId,
+        fulfillingBranchId: order.fulfillingBranchId,
+        customerId: order.customerId,
+        kind: order.kind,
+        currencyCode: order.currencyCode,
+        lines: lineRows.map((l) => ({
+          productId: l.productId,
+          variantId: l.variantId,
+          quantity: l.quantity.toFixed(4),
+          selectedUomCode: l.selectedUomCode,
+          baseUomCode: l.baseUomCode,
+          conversionNumerator: l.conversionNumerator.toString(),
+          conversionDenominator: l.conversionDenominator.toString(),
+          unitPriceAmountMinor: l.unitPriceAmountMinor.toString(),
+          unitPriceCurrencyCode: l.unitPriceCurrencyCode,
+          unitPriceCurrencyExponent: l.unitPriceCurrencyExponent,
+          discountMode: l.discountMode,
+          discountBps: l.discountBps,
+          discountAmountMinor: l.discountAmountMinor.toString(),
+          taxCategoryKey: l.taxCategoryKey,
+          rateBps: l.rateBps,
+          effectiveFrom: l.effectiveFrom ? l.effectiveFrom.toISOString().slice(0, 10) : null,
+          resolutionSource: l.resolutionSource,
+        })),
+        documentDiscountMode: order.documentDiscountMode,
+        documentDiscountBps: order.documentDiscountBps,
+        documentDiscountAmountMinor: order.documentDiscountAmountMinor.toString(),
+        documentDiscountReason: order.documentDiscountReason,
+      },
+      {
+        taxPriceMode: order.taxPriceMode,
+        taxRoundingScope: order.taxRoundingScope,
+        taxRoundingMode: order.taxRoundingMode,
+      },
+    );
     if (
       recomputedFingerprint !== order.commercialSnapshotFingerprint ||
       recomputedFingerprint !== input.commercialSnapshotFingerprint
@@ -252,7 +267,18 @@ export class InvoiceIssuanceRepository {
 
     const lineIds = new Set(lineRows.map((l) => l.id));
     const suppliedIds = new Set(input.lines.map((l) => l.orderLineId));
-    if (lineIds.size !== suppliedIds.size || [...lineIds].some((id) => !suppliedIds.has(id))) {
+    // Checkpoint E adversarial finding (§E15): a `Set`-only comparison is
+    // insufficient — a malicious caller could supply a DUPLICATE entry for
+    // one real line (inflating `input.lines.length` beyond the real line
+    // count) while still covering every real id, which `suppliedIds.size`
+    // alone cannot detect (`Set` silently dedupes). Comparing the RAW array
+    // length against the real line count closes that gap; the existing
+    // `Set`-based checks remain for the "wrong id" / "missing id" cases.
+    if (
+      input.lines.length !== lineIds.size ||
+      lineIds.size !== suppliedIds.size ||
+      [...lineIds].some((id) => !suppliedIds.has(id))
+    ) {
       throw new DomainError(
         'ORDER_LINE_TAX_SNAPSHOT_INCOMPLETE',
         "the supplied finalized tax snapshot does not cover exactly the order's current line set",
@@ -274,6 +300,27 @@ export class InvoiceIssuanceRepository {
         throw new DomainError(
           'ORDER_LINE_TAX_SNAPSHOT_INCOMPLETE',
           `order line ${l.orderLineId} has an incomplete mandatory finalized tax snapshot`,
+          422,
+        );
+      }
+    }
+
+    // ── 3b. POLICY-UNIFORMITY HARD GATE (Task 3b.4 Checkpoint D, §D12-A) —
+    //       every supplied line's policy fields must equal the Order's OWN
+    //       frozen, immutable fiscal policy (Task 3b.4 Checkpoint C). The
+    //       Order's policy is document-wide and set once at creation; no
+    //       per-line override, no normalization, no silent correction —
+    //       fails BEFORE any tax-field write, number allocation, Invoice, or
+    //       audit. ─────────────────────────────────────────────────────────
+    for (const l of input.lines) {
+      if (
+        l.priceTaxMode !== order.taxPriceMode ||
+        l.roundingScope !== order.taxRoundingScope ||
+        l.roundingMode !== order.taxRoundingMode
+      ) {
+        throw new DomainError(
+          'ORDER_LINE_TAX_POLICY_MISMATCH',
+          `order line ${l.orderLineId}'s finalized tax policy does not match the order's own frozen fiscal policy`,
           422,
         );
       }
@@ -320,14 +367,26 @@ export class InvoiceIssuanceRepository {
         422,
       );
     }
+    // Task 3b.4 Checkpoint D (§D12-B) — mode-conditional expected total,
+    // replacing the pre-3b.4 EXCLUSIVE-only placeholder. TAX_INCLUSIVE tax is
+    // already contained within `subtotalAmountMinor` (each line's commercial
+    // amount is the tax-inclusive amount tax was EXTRACTED from) — adding
+    // `taxTotalAmountMinor` again would double-count it. The Order's own
+    // frozen `taxPriceMode` (Task 3b.4 Checkpoint C) is authoritative; this
+    // primitive never computes a tax amount itself, only validates the
+    // caller-supplied totals are internally consistent with it.
     const expectedTotal =
-      input.totals.subtotalAmountMinor -
-      input.totals.documentDiscountAmountMinor +
-      input.totals.taxTotalAmountMinor;
+      order.taxPriceMode === 'TAX_INCLUSIVE'
+        ? input.totals.subtotalAmountMinor - input.totals.documentDiscountAmountMinor
+        : input.totals.subtotalAmountMinor -
+          input.totals.documentDiscountAmountMinor +
+          input.totals.taxTotalAmountMinor;
     if (expectedTotal !== input.totals.totalAmountMinor) {
       throw new DomainError(
         'ORDER_FINALIZED_TOTALS_INVALID',
-        'finalized totalAmountMinor != subtotal - documentDiscount + taxTotal',
+        order.taxPriceMode === 'TAX_INCLUSIVE'
+          ? 'finalized totalAmountMinor != subtotal - documentDiscount (TAX_INCLUSIVE — tax is already contained in the subtotal)'
+          : 'finalized totalAmountMinor != subtotal - documentDiscount + taxTotal',
         422,
       );
     }

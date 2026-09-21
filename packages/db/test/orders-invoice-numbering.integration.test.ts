@@ -168,6 +168,10 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     documentDiscountAmountMinor?: number;
     orderNumber?: string | null;
     commercialSnapshotFingerprint?: string;
+    commercialSnapshotFingerprintVersion?: number;
+    taxPriceMode?: string;
+    taxRoundingScope?: string;
+    taxRoundingMode?: string;
     createdByUserId?: string | null;
     actingUserId?: string | null;
   }
@@ -216,6 +220,10 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
       currencyCode: 'AED',
       currencyExponent: 2,
       commercialSnapshotFingerprint: 'fp-' + crypto.randomUUID(),
+      commercialSnapshotFingerprintVersion: 2,
+      taxPriceMode: 'TAX_EXCLUSIVE',
+      taxRoundingScope: 'LINE',
+      taxRoundingMode: 'HALF_UP',
       ...overrides,
     };
   }
@@ -225,8 +233,10 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
       `INSERT INTO "order"
          (id, "tenantId", "companyId", "originBranchId", "fulfillingBranchId", "posTerminalId",
           "customerId", kind, status, "currencyCode", "currencyExponent", "orderNumber",
-          "commercialSnapshotFingerprint", "createdByUserId", "actingUserId", "updatedAt")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())`,
+          "commercialSnapshotFingerprint", "commercialSnapshotFingerprintVersion",
+          "taxPriceMode", "taxRoundingScope", "taxRoundingMode",
+          "createdByUserId", "actingUserId", "updatedAt")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now())`,
       [
         o.id,
         o.tenantId,
@@ -241,6 +251,10 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
         o.currencyExponent,
         o.orderNumber ?? null,
         o.commercialSnapshotFingerprint,
+        o.commercialSnapshotFingerprintVersion ?? 2,
+        o.taxPriceMode ?? 'TAX_EXCLUSIVE',
+        o.taxRoundingScope ?? 'LINE',
+        o.taxRoundingMode ?? 'HALF_UP',
         o.createdByUserId ?? null,
         o.actingUserId ?? null,
       ],
@@ -502,8 +516,8 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
       await client.query('SET LOCAL ROLE flower_app');
 
       await expectRejectedInsert(
-        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
-           VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'fp-cross-tenant-insert',now())`,
+        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'fp-cross-tenant-insert',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
         [TENANT, COMPANY, BRANCH],
       );
 
@@ -585,8 +599,8 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
         await client.query('SAVEPOINT sp');
         await expect(
           client.query(
-            `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
-             VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'fp-rls-insert-proof',now())`,
+            `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+             VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'fp-rls-insert-proof',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
             [OTHER_TENANT, OTHER_TENANT_COMPANY, otherBranchId],
           ),
         ).rejects.toThrow(/row-level security/i);
@@ -596,8 +610,8 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
         // that actually matches its claimed tenant.
         await client.query(`SET LOCAL app.tenant_id = '${OTHER_TENANT}'`);
         const ok = await client.query(
-          `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
-           VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'fp-rls-insert-proof-ok',now()) RETURNING id`,
+          `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,$3,'WALK_IN','DRAFT','AED',2,'fp-rls-insert-proof-ok',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now()) RETURNING id`,
           [OTHER_TENANT, OTHER_TENANT_COMPANY, otherBranchId],
         );
         expect(ok.rows).toHaveLength(1);
@@ -631,8 +645,8 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
       );
       const otherOrderId = crypto.randomUUID();
       await pool.query(
-        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
-         VALUES ($1,$2,$3,$4,$4,'WALK_IN','DRAFT','AED',2,'fp-rls-proof-parent-order',now())`,
+        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+         VALUES ($1,$2,$3,$4,$4,'WALK_IN','DRAFT','AED',2,'fp-rls-proof-parent-order',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
         [otherOrderId, OTHER_TENANT, OTHER_TENANT_COMPANY, otherBranchId],
       );
 
@@ -719,7 +733,7 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
       const orderId = await insertMinimalOrder(); // TENANT / COMPANY / BRANCH
       await insertLine(
         baseLine(orderId, {
-          priceTaxMode: 'EXCLUSIVE',
+          priceTaxMode: 'TAX_EXCLUSIVE',
           roundingScope: 'LINE',
           roundingMode: 'HALF_UP',
           lineTaxAmountMinor: 0n,
@@ -828,29 +842,29 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     ).resolves.toBeUndefined();
     await expect(
       pool.query(
-        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","updatedAt")
-         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'NONE',NULL,500,'fp-shape-1',now())`,
+        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'NONE',NULL,500,'fp-shape-1',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
         [crypto.randomUUID(), TENANT, COMPANY, BRANCH, BRANCH],
       ),
     ).rejects.toThrow(/order_document_discount_shape_chk|violates check constraint/i);
     await expect(
       pool.query(
-        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","updatedAt")
-         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'PERCENT_BPS',NULL,0,'fp-shape-2',now())`,
+        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'PERCENT_BPS',NULL,0,'fp-shape-2',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
         [crypto.randomUUID(), TENANT, COMPANY, BRANCH, BRANCH],
       ),
     ).rejects.toThrow(/order_document_discount_shape_chk|violates check constraint/i);
     await expect(
       pool.query(
-        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","updatedAt")
-         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'PERCENT_BPS',10001,0,'fp-shape-3',now())`,
+        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'PERCENT_BPS',10001,0,'fp-shape-3',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
         [crypto.randomUUID(), TENANT, COMPANY, BRANCH, BRANCH],
       ),
     ).rejects.toThrow(/order_document_discount_shape_chk|violates check constraint/i);
     await expect(
       pool.query(
-        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","updatedAt")
-         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'PERCENT_BPS',500,25,'fp-shape-4',now())`,
+        `INSERT INTO "order" (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,"currencyCode","currencyExponent","documentDiscountMode","documentDiscountBps","documentDiscountAmountMinor","commercialSnapshotFingerprint","commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,'WALK_IN','DRAFT','AED',2,'PERCENT_BPS',500,25,'fp-shape-4',2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
         [crypto.randomUUID(), TENANT, COMPANY, BRANCH, BRANCH],
       ),
     ).resolves.toBeTruthy();
@@ -888,7 +902,11 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     await expect(insertLine(baseLine(orderId))).resolves.toBeTruthy(); // all-NULL, default
     await expect(
       insertLine(
-        baseLine(orderId, { id: crypto.randomUUID(), linePosition: 2, priceTaxMode: 'EXCLUSIVE' }),
+        baseLine(orderId, {
+          id: crypto.randomUUID(),
+          linePosition: 2,
+          priceTaxMode: 'TAX_EXCLUSIVE',
+        }),
       ),
     ).rejects.toThrow(/order_line_tax_snapshot_shape_chk|violates check constraint/i);
     await expect(
@@ -896,7 +914,7 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
         baseLine(orderId, {
           id: crypto.randomUUID(),
           linePosition: 2,
-          priceTaxMode: 'EXCLUSIVE',
+          priceTaxMode: 'TAX_EXCLUSIVE',
           roundingScope: 'LINE',
           roundingMode: 'HALF_UP',
           lineTaxAmountMinor: 50n,
@@ -1119,7 +1137,7 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
       baseLine(orderId, {
         id: crypto.randomUUID(),
         linePosition: posRows[0]!.next,
-        priceTaxMode: 'EXCLUSIVE',
+        priceTaxMode: 'TAX_EXCLUSIVE',
         roundingScope: 'LINE',
         roundingMode: 'HALF_UP',
         lineTaxAmountMinor: 0n,
@@ -1165,7 +1183,7 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     const orderId = await insertMinimalOrder();
     await insertLine(
       baseLine(orderId, {
-        priceTaxMode: 'EXCLUSIVE',
+        priceTaxMode: 'TAX_EXCLUSIVE',
         roundingScope: 'LINE',
         roundingMode: 'HALF_UP',
         lineTaxAmountMinor: 0n,
@@ -1202,7 +1220,7 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     const orderId = await insertMinimalOrder();
     await insertLine(
       baseLine(orderId, {
-        priceTaxMode: 'EXCLUSIVE',
+        priceTaxMode: 'TAX_EXCLUSIVE',
         roundingScope: 'LINE',
         roundingMode: 'HALF_UP',
         lineTaxAmountMinor: 0n,
@@ -1226,7 +1244,7 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     async function insertLineFor(orderId: string): Promise<void> {
       await insertLine(
         baseLine(orderId, {
-          priceTaxMode: 'EXCLUSIVE',
+          priceTaxMode: 'TAX_EXCLUSIVE',
           roundingScope: 'LINE',
           roundingMode: 'HALF_UP',
           lineTaxAmountMinor: 0n,

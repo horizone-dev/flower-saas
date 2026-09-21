@@ -1059,6 +1059,29 @@ model Order {
   /// Task 3b.1's `journal_entry.sealedAt`).
   commercialSnapshotFingerprint String
 
+  /// Task 3b.4 Checkpoint C — dispatch tag for `commercialSnapshotFingerprint`'s
+  /// payload shape: 1 = the frozen pre-3b.4 Task 3b.3 shape (no fiscal-policy
+  /// fields — every Order that existed before this migration), 2 = that same
+  /// payload PLUS `taxPriceMode`/`taxRoundingScope`/`taxRoundingMode` as
+  /// top-level canonical fields (every Order created from this migration
+  /// onward). Server-owned, immutable forever once set — see
+  /// `fn_enforce_order_creation_attributes_immutable`. NOT included inside the
+  /// hash payload itself (`commercial-snapshot.ts`).
+  commercialSnapshotFingerprintVersion Int
+
+  /// Task 3b.4 Checkpoint C — the 3 document-wide fiscal-policy fields,
+  /// resolved ONCE at Order creation from the historically-effective
+  /// `CountryTaxConfig.config` for the company's country on the order's
+  /// creation civil date (`LocalizationService.resolveFiscalPolicyOn`), never
+  /// re-resolved afterward and never client-suppliable. Server-owned,
+  /// document-wide (no per-line override), immutable forever — see
+  /// `fn_enforce_order_creation_attributes_immutable`. TAX_EXCLUSIVE |
+  /// TAX_INCLUSIVE / LINE | DOCUMENT / HALF_UP | HALF_EVEN | DOWN | UP |
+  /// HALF_DOWN (CHECK-enforced, see the migration SQL).
+  taxPriceMode     String
+  taxRoundingScope String
+  taxRoundingMode  String
+
   /// who was authenticated when the row was created — never overwritten
   /// (CLAUDE.md rule 12). Write-once, DB-enforced (see the migration's
   /// `fn_enforce_order_attribution_immutable` trigger, Checkpoint C

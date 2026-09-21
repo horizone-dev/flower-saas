@@ -361,7 +361,10 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
            VALUES ('QA', '2026-01-01', 'NONE')`,
         ),
       ).resolves.toBeTruthy();
-      await pool.query(`DELETE FROM country_tax_config WHERE "countryCode" = 'QA'`);
+      // NOTE: no cleanup DELETE — task 3b.4 Checkpoint C makes
+      // `country_tax_config` immutable history (DELETE unconditionally
+      // blocked, proven by the fiscal-policy migration tests). This row is a
+      // harmless permanent fixture, isolated to the 'QA' country code.
     });
   });
 

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { LocalizationRepository } from './localization.repository.js';
+import { parseFiscalPolicyConfig, type FiscalPolicyConfig } from './fiscal-policy.js';
 import type {
   CompanyLocalizationProfileDto,
   CountryDto,
@@ -198,6 +199,52 @@ export class LocalizationService {
       },
       reason: null,
     };
+  }
+
+  /**
+   * Task 3b.4 Checkpoint C (final-integrity pass, owner correction) — the
+   * single effective `country_tax_config.config` (strict-parsed) for
+   * `countryCode` on the civil calendar date `onDate` (`YYYY-MM-DD`,
+   * `::date`-cast raw SQL — same DATE CONTRACT as
+   * `resolveRegimeOn`/`resolveTaxRate`, no instant, no timezone). CHECK-1-style
+   * fail-closed, with ONE deliberate deviation from `resolveRegimeOn`'s pure
+   * 500-everywhere convention:
+   *   - 0 effective rows -> `409 ORDER_COMPANY_TAX_POLICY_NOT_CONFIGURED` —
+   *     this represents required Company-level fiscal configuration that has
+   *     not yet been set up (a caller-actionable, tenant-fixable gap), the
+   *     same class of condition `COMPANY_LOCALIZATION_NOT_CONFIGURED` already
+   *     uses 409 for elsewhere in this service — NOT a 500, unlike
+   *     `TAX_REGIME_NOT_CONFIGURED`/`TAX_RATE_AMBIGUOUS` (those concern the
+   *     platform-owned tax-RATE reference table, a different configuration
+   *     surface with no per-company setup step).
+   *   - `> 1` effective rows (any shape overlap) -> `500 TAX_POLICY_AMBIGUOUS`
+   *     — corrupt PLATFORM reference data, never resolved by picking one
+   *     (newest-wins, first-row-wins, and any content-based fallback are all
+   *     forbidden). Never a caller-fixable condition, so 500, not 409.
+   *   - exactly 1 -> strict-parse `config`; a malformed config independently
+   *     fails closed with `500 TAX_POLICY_CONFIG_INVALID` (never a silent
+   *     TAX_EXCLUSIVE/HALF_UP default) — also platform reference-data
+   *     corruption, never a caller-fixable condition.
+   * `countryCode` MUST already be authoritative (`company.countryCode`) —
+   * this method never accepts one from a client.
+   */
+  async resolveFiscalPolicyOn(countryCode: string, onDate: string): Promise<FiscalPolicyConfig> {
+    const rows = await this.repo.findCountryTaxConfigOn(countryCode, onDate);
+    if (rows.length === 0) {
+      throw new DomainError(
+        'ORDER_COMPANY_TAX_POLICY_NOT_CONFIGURED',
+        `no fiscal policy is configured for ${countryCode} on ${onDate}`,
+        409,
+      );
+    }
+    if (rows.length > 1) {
+      throw new DomainError(
+        'TAX_POLICY_AMBIGUOUS',
+        `more than one country_tax_config row is in force for ${countryCode} on ${onDate} — ambiguous reference data`,
+        500,
+      );
+    }
+    return parseFiscalPolicyConfig(rows[0]!.config, `${countryCode} on ${onDate}`);
   }
 
   private async countryDto(

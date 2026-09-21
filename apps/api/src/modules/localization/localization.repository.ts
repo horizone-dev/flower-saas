@@ -36,6 +36,9 @@ export interface TaxRegimeRow {
   effectiveFrom: Date;
   effectiveTo: Date | null;
 }
+export interface CountryTaxConfigConfigRow {
+  config: unknown;
+}
 export interface CompanyProfileRow {
   id: string;
   countryCode: string | null;
@@ -180,6 +183,31 @@ export class LocalizationRepository extends ScopedRepository {
       (tx) =>
         tx.$queryRaw<TaxRegimeRow[]>`
         SELECT "regime", "effectiveFrom", "effectiveTo"
+          FROM "country_tax_config"
+         WHERE "countryCode" = ${countryCode}
+           AND "effectiveFrom" <= ${onDate}::date
+           AND ("effectiveTo" IS NULL OR "effectiveTo" >= ${onDate}::date)
+         ORDER BY "effectiveFrom" DESC`,
+    );
+  }
+
+  /**
+   * Task 3b.4 Checkpoint C — the `country_tax_config` rows (raw `config`
+   * JSON, unparsed) in force for `countryCode` on the civil calendar date
+   * `onDate` (`YYYY-MM-DD`). Same `::date`-cast raw-SQL predicate as
+   * {@link findCountryTaxRegimeOn} (DB-session-timezone immune, no `Date`).
+   * The caller (`LocalizationService.resolveFiscalPolicyOn`) fails CLOSED on
+   * `<> 1` row and strict-parses the single match — this repository method
+   * never inspects `config`'s shape itself.
+   */
+  findCountryTaxConfigOn(
+    countryCode: string,
+    onDate: string,
+  ): Promise<CountryTaxConfigConfigRow[]> {
+    return this.scoped(
+      (tx) =>
+        tx.$queryRaw<CountryTaxConfigConfigRow[]>`
+        SELECT "config"
           FROM "country_tax_config"
          WHERE "countryCode" = ${countryCode}
            AND "effectiveFrom" <= ${onDate}::date

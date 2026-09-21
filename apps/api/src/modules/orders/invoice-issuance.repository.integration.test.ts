@@ -11,10 +11,20 @@ import { createPrismaClient, runScoped } from '@flower/db';
 import type { PrismaClient, ScopedTx } from '@flower/db';
 import pg from 'pg';
 import { InvoiceIssuanceRepository } from './invoice-issuance.repository.js';
-import { computeCommercialSnapshotFingerprint } from './commercial-snapshot.js';
+import { computeCommercialSnapshotFingerprintV2 } from './commercial-snapshot.js';
 import type { SystemClock } from '../../common/clock/clock.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import type { DbService } from '../../common/data/index.js';
+
+// Task 3b.4 Checkpoint C — every Order this fixture writes directly via raw
+// SQL is a V2-shaped Order (the current create-path default); a fixed,
+// arbitrary-but-valid fiscal policy, identical across every fixture Order
+// here since NONE of these tests exercise policy resolution itself.
+const TEST_POLICY = {
+  taxPriceMode: 'TAX_EXCLUSIVE',
+  taxRoundingScope: 'LINE',
+  taxRoundingMode: 'HALF_UP',
+} as const;
 
 describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, integration)', () => {
   let stack: TestStack;
@@ -131,40 +141,43 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
   // builder, so a fixture's stored `commercialSnapshotFingerprint` must be the
   // REAL fingerprint of the row shape it inserts — never an arbitrary literal.
   function fingerprintFor(opts: { co: string; br: string; customerId: string | null }): string {
-    return computeCommercialSnapshotFingerprint({
-      tenantId,
-      companyId: opts.co,
-      originBranchId: opts.br,
-      fulfillingBranchId: opts.br,
-      customerId: opts.customerId,
-      kind: 'WALK_IN',
-      currencyCode: 'AED',
-      lines: [
-        {
-          productId,
-          variantId,
-          quantity: '1.0000',
-          selectedUomCode: 'piece',
-          baseUomCode: 'piece',
-          conversionNumerator: '1',
-          conversionDenominator: '1',
-          unitPriceAmountMinor: '1000',
-          unitPriceCurrencyCode: 'AED',
-          unitPriceCurrencyExponent: 2,
-          discountMode: 'NONE',
-          discountBps: null,
-          discountAmountMinor: '0',
-          taxCategoryKey: null,
-          rateBps: null,
-          effectiveFrom: null,
-          resolutionSource: 'NONE',
-        },
-      ],
-      documentDiscountMode: 'NONE',
-      documentDiscountBps: null,
-      documentDiscountAmountMinor: '0',
-      documentDiscountReason: null,
-    });
+    return computeCommercialSnapshotFingerprintV2(
+      {
+        tenantId,
+        companyId: opts.co,
+        originBranchId: opts.br,
+        fulfillingBranchId: opts.br,
+        customerId: opts.customerId,
+        kind: 'WALK_IN',
+        currencyCode: 'AED',
+        lines: [
+          {
+            productId,
+            variantId,
+            quantity: '1.0000',
+            selectedUomCode: 'piece',
+            baseUomCode: 'piece',
+            conversionNumerator: '1',
+            conversionDenominator: '1',
+            unitPriceAmountMinor: '1000',
+            unitPriceCurrencyCode: 'AED',
+            unitPriceCurrencyExponent: 2,
+            discountMode: 'NONE',
+            discountBps: null,
+            discountAmountMinor: '0',
+            taxCategoryKey: null,
+            rateBps: null,
+            effectiveFrom: null,
+            resolutionSource: 'NONE',
+          },
+        ],
+        documentDiscountMode: 'NONE',
+        documentDiscountBps: null,
+        documentDiscountAmountMinor: '0',
+        documentDiscountReason: null,
+      },
+      TEST_POLICY,
+    );
   }
 
   async function mkOrder(
@@ -178,9 +191,21 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
     await client.query(
       `INSERT INTO "order"
          (id,"tenantId","companyId","originBranchId","fulfillingBranchId","customerId",kind,status,
-          "currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
-       VALUES ($1,$2,$3,$4,$4,$5,'WALK_IN','DRAFT','AED',2,$6,now())`,
-      [orderId, tenantId, co, br, customerId, fingerprint],
+          "currencyCode","currencyExponent","commercialSnapshotFingerprint",
+          "commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode",
+          "updatedAt")
+       VALUES ($1,$2,$3,$4,$4,$5,'WALK_IN','DRAFT','AED',2,$6,2,$7,$8,$9,now())`,
+      [
+        orderId,
+        tenantId,
+        co,
+        br,
+        customerId,
+        fingerprint,
+        TEST_POLICY.taxPriceMode,
+        TEST_POLICY.taxRoundingScope,
+        TEST_POLICY.taxRoundingMode,
+      ],
     );
     const lineId = randomUUID();
     await client.query(
@@ -218,9 +243,9 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
       lines: [
         {
           orderLineId: lineId,
-          priceTaxMode: 'EXCLUSIVE',
-          roundingScope: 'LINE',
-          roundingMode: 'HALF_UP',
+          priceTaxMode: TEST_POLICY.taxPriceMode,
+          roundingScope: TEST_POLICY.taxRoundingScope,
+          roundingMode: TEST_POLICY.taxRoundingMode,
           lineTaxAmountMinor: overrides.lineTaxAmountMinor ?? 0n,
         },
       ],
@@ -728,26 +753,40 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
       const orderId = randomUUID();
       const line1Id = randomUUID();
       const line2Id = randomUUID();
-      const fingerprint = computeCommercialSnapshotFingerprint({
-        tenantId,
-        companyId,
-        originBranchId: branchId,
-        fulfillingBranchId: branchId,
-        customerId: null,
-        kind: 'WALK_IN',
-        currencyCode: 'AED',
-        lines: [lineSnapshot('1.0000'), lineSnapshot('2.0000')],
-        documentDiscountMode: 'NONE',
-        documentDiscountBps: null,
-        documentDiscountAmountMinor: '0',
-        documentDiscountReason: null,
-      });
+      const fingerprint = computeCommercialSnapshotFingerprintV2(
+        {
+          tenantId,
+          companyId,
+          originBranchId: branchId,
+          fulfillingBranchId: branchId,
+          customerId: null,
+          kind: 'WALK_IN',
+          currencyCode: 'AED',
+          lines: [lineSnapshot('1.0000'), lineSnapshot('2.0000')],
+          documentDiscountMode: 'NONE',
+          documentDiscountBps: null,
+          documentDiscountAmountMinor: '0',
+          documentDiscountReason: null,
+        },
+        TEST_POLICY,
+      );
       await client.query(
         `INSERT INTO "order"
            (id,"tenantId","companyId","originBranchId","fulfillingBranchId",kind,status,
-            "currencyCode","currencyExponent","commercialSnapshotFingerprint","updatedAt")
-         VALUES ($1,$2,$3,$4,$4,'WALK_IN','DRAFT','AED',2,$5,now())`,
-        [orderId, tenantId, companyId, branchId, fingerprint],
+            "currencyCode","currencyExponent","commercialSnapshotFingerprint",
+            "commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode",
+            "updatedAt")
+         VALUES ($1,$2,$3,$4,$4,'WALK_IN','DRAFT','AED',2,$5,2,$6,$7,$8,now())`,
+        [
+          orderId,
+          tenantId,
+          companyId,
+          branchId,
+          fingerprint,
+          TEST_POLICY.taxPriceMode,
+          TEST_POLICY.taxRoundingScope,
+          TEST_POLICY.taxRoundingMode,
+        ],
       );
       for (const [id, pos, qty] of [
         [line1Id, 1, '1.0000'],
@@ -803,16 +842,16 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
         lines: [
           {
             orderLineId: line1Id,
-            priceTaxMode: 'EXCLUSIVE',
-            roundingScope: 'LINE',
-            roundingMode: 'HALF_UP',
+            priceTaxMode: TEST_POLICY.taxPriceMode,
+            roundingScope: TEST_POLICY.taxRoundingScope,
+            roundingMode: TEST_POLICY.taxRoundingMode,
             lineTaxAmountMinor: 0n,
           },
           {
             orderLineId: line2Id,
-            priceTaxMode: 'EXCLUSIVE',
-            roundingScope: 'LINE',
-            roundingMode: 'HALF_UP',
+            priceTaxMode: TEST_POLICY.taxPriceMode,
+            roundingScope: TEST_POLICY.taxRoundingScope,
+            roundingMode: TEST_POLICY.taxRoundingMode,
             lineTaxAmountMinor: 0n,
           },
         ],

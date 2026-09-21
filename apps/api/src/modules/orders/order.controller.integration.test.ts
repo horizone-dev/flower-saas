@@ -16,7 +16,8 @@ import { SystemClock, type Clock } from '../../common/clock/clock.js';
 import { runScoped } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
 import { InvoiceIssuanceRepository } from './invoice-issuance.repository.js';
-import { computeCommercialSnapshotFingerprint } from './commercial-snapshot.js';
+import { TaxFinalizationService } from './tax-finalization.service.js';
+import { computeCommercialSnapshotFingerprintByVersion } from './commercial-snapshot.js';
 
 const PLAN_V = '00000000-0000-7000-8000-0000003b3001';
 const PLATFORM_USER = '00000000-0000-7000-8000-0000003b3002';
@@ -50,8 +51,9 @@ async function seed(url: string): Promise<void> {
       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
       VALUES ('AE', 'UAE', 'x', 'gcc', 'AED', 'SAT_SUN', true, now())
       ON CONFLICT (code) DO NOTHING;
-      INSERT INTO country_tax_config (id, "countryCode", "effectiveFrom", regime)
-      SELECT uuidv7(), 'AE', '2020-01-01', 'VAT'
+      INSERT INTO country_tax_config (id, "countryCode", "effectiveFrom", regime, config)
+      SELECT uuidv7(), 'AE', '2020-01-01', 'VAT',
+             '{"priceTaxMode":"TAX_EXCLUSIVE","roundingScope":"LINE","roundingMode":"HALF_UP"}'::jsonb
       WHERE NOT EXISTS (SELECT 1 FROM country_tax_config WHERE "countryCode" = 'AE');
       INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
       VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now())
@@ -1833,7 +1835,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
   // sequential simulation: exactly one mutation commits, the other observes a
   // deterministic conflict, never a partial write.
   describe('concurrency', () => {
-    async function createDraft(): Promise<{ id: string; version: number }> {
+    async function createDraft(): Promise<{ id: string; version: number; fingerprint: string }> {
       const productId = await productIdFor(variantId);
       const r = await req(
         'POST',
@@ -1842,8 +1844,14 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
         { lines: [basicLine({ productId, quantity: '1' })] },
         { 'idempotency-key': ik() },
       );
-      const b = r.json() as { order: { id: string; version: number } };
-      return { id: b.order.id, version: b.order.version };
+      const b = r.json() as {
+        order: { id: string; version: number; commercialSnapshotFingerprint: string };
+      };
+      return {
+        id: b.order.id,
+        version: b.order.version,
+        fingerprint: b.order.commercialSnapshotFingerprint,
+      };
     }
 
     function outcomes(results: { statusCode: number }[]): {
@@ -1989,7 +1997,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
         lines: [
           {
             orderLineId: gBody.lines[0]!.id,
-            priceTaxMode: 'EXCLUSIVE',
+            priceTaxMode: 'TAX_EXCLUSIVE',
             roundingScope: 'LINE',
             roundingMode: 'HALF_UP',
             lineTaxAmountMinor: 0n,
@@ -2079,6 +2087,122 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
       );
       expect(Number(invCount[0]!.count)).toBe(issueOk ? 1 : 0);
     });
+
+    // Task 3b.4 Checkpoint E (§E4) — the SAME 3 official-mutation-path races
+    // above, now targeting the NEW `TaxFinalizationService` wrapper directly
+    // (not the raw `InvoiceIssuanceRepository` primitive) — real concurrent
+    // Postgres transactions via `Promise.allSettled`, never sequential
+    // simulation. The 3 tests above are retained UNCHANGED (§E4 instruction).
+    async function finalizeVia(
+      orderId: string,
+      version: number,
+      fingerprint: string,
+    ): Promise<unknown> {
+      const finalization = app.get(TaxFinalizationService);
+      const db = app.get(DbService);
+      return runScoped(db.appClient(), { tenantId: tenantA }, (tx) =>
+        finalization.finalizeAndIssueInvoice(tx, {
+          tenantId: tenantA,
+          companyId: coA,
+          branchId: branchA,
+          orderId,
+          expectedVersion: version,
+          commercialSnapshotFingerprint: fingerprint,
+        }),
+      );
+    }
+
+    it('E4-A. finalize vs finalize (via TaxFinalizationService): exactly one wins, no double Invoice, no duplicate numbering', async () => {
+      const d = await createDraft();
+      const [r1, r2] = await Promise.allSettled([
+        finalizeVia(d.id, d.version, d.fingerprint),
+        finalizeVia(d.id, d.version, d.fingerprint),
+      ]);
+      const outcomes = [r1, r2];
+      const fulfilled = outcomes.filter((r) => r.status === 'fulfilled');
+      if (fulfilled.length === 1) deliberatelyIssuedOrderIds.add(d.id);
+      expect(fulfilled).toHaveLength(1);
+      expect(outcomes.filter((r) => r.status === 'rejected')).toHaveLength(1);
+      const invCount = await sql<{ count: string }>(
+        `SELECT count(*)::text AS count FROM invoice WHERE "orderId"=$1`,
+        [d.id],
+      );
+      expect(Number(invCount[0]!.count)).toBe(1);
+      const orderNumbers = await sql<{ orderNumber: string }>(
+        `SELECT DISTINCT "orderNumber" FROM "order" WHERE id=$1 AND "orderNumber" IS NOT NULL`,
+        [d.id],
+      );
+      expect(orderNumbers).toHaveLength(1);
+    });
+
+    it('E4-B. PATCH vs finalize (via TaxFinalizationService): exactly one wins, no partial finalized tax fields on the loser', async () => {
+      const d = await createDraft();
+      const [patchRes, issueRes] = await Promise.allSettled([
+        req(
+          'PATCH',
+          ORD(coA, branchA, `/${d.id}`),
+          ownerA,
+          { documentDiscountMode: 'NONE' },
+          { 'if-match': String(d.version) },
+        ),
+        finalizeVia(d.id, d.version, d.fingerprint),
+      ]);
+      const patchOk = patchRes.status === 'fulfilled' && patchRes.value.statusCode === 200;
+      const issueOk = issueRes.status === 'fulfilled';
+      if (issueOk) deliberatelyIssuedOrderIds.add(d.id);
+      expect(patchOk).not.toBe(issueOk);
+      const finalBody = (await req('GET', ORD(coA, branchA, `/${d.id}`), ownerA)).json() as {
+        order: { status: string; orderNumber: string | null };
+        lines: { id: string }[];
+      };
+      if (issueOk) {
+        expect(finalBody.order.status).toBe('CONFIRMED');
+        expect(finalBody.order.orderNumber).not.toBeNull();
+      } else {
+        expect(finalBody.order.status).toBe('DRAFT');
+        expect(finalBody.order.orderNumber).toBeNull();
+        // the loser leaves no partially-written finalized tax field.
+        const lineRows = await sql<{ lineTaxAmountMinor: string | null }>(
+          `SELECT "lineTaxAmountMinor"::text AS "lineTaxAmountMinor" FROM order_line WHERE "orderId"=$1`,
+          [d.id],
+        );
+        for (const r of lineRows) expect(r.lineTaxAmountMinor).toBeNull();
+      }
+      const invCount = await sql<{ count: string }>(
+        `SELECT count(*)::text AS count FROM invoice WHERE "orderId"=$1`,
+        [d.id],
+      );
+      expect(Number(invCount[0]!.count)).toBe(issueOk ? 1 : 0);
+    });
+
+    it('E4-C. HOLD vs finalize (via TaxFinalizationService): exactly one wins, no partial HELD+CONFIRMED state', async () => {
+      const d = await createDraft();
+      const [holdRes, issueRes] = await Promise.allSettled([
+        req('POST', ORD(coA, branchA, `/${d.id}/hold`), ownerA, undefined, {
+          'if-match': String(d.version),
+        }),
+        finalizeVia(d.id, d.version, d.fingerprint),
+      ]);
+      const holdOk = holdRes.status === 'fulfilled' && holdRes.value.statusCode === 200;
+      const issueOk = issueRes.status === 'fulfilled';
+      if (issueOk) deliberatelyIssuedOrderIds.add(d.id);
+      expect(holdOk).not.toBe(issueOk);
+      const finalBody = (await req('GET', ORD(coA, branchA, `/${d.id}`), ownerA)).json() as {
+        order: { status: string; orderNumber: string | null };
+      };
+      if (issueOk) {
+        expect(finalBody.order.status).toBe('CONFIRMED');
+        expect(finalBody.order.orderNumber).not.toBeNull();
+      } else {
+        expect(finalBody.order.status).toBe('HELD');
+        expect(finalBody.order.orderNumber).toBeNull();
+      }
+      const invCount = await sql<{ count: string }>(
+        `SELECT count(*)::text AS count FROM invoice WHERE "orderId"=$1`,
+        [d.id],
+      );
+      expect(Number(invCount[0]!.count)).toBe(issueOk ? 1 : 0);
+    });
   });
 
   // ── STRUCTURAL NON-SCOPE ──────────────────────────────────────────────────
@@ -2110,6 +2234,48 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
       expect(rows.map((r) => r.id).sort()).toEqual([...deliberatelyIssuedOrderIds].sort());
       const je = await sql<{ count: string }>(`SELECT count(*)::text FROM "journal_entry"`);
       expect(je[0]!.count).toBe('0');
+    });
+
+    // Task 3b.4 Checkpoint C (§C17) — the fiscal-policy fields + fingerprint
+    // version are server-resolved ONLY; a client can never supply, override,
+    // or bypass them via either create or PATCH body (`.strict()` rejects the
+    // unknown field before any handler code runs).
+    it('a client-supplied taxPriceMode/taxRoundingScope/taxRoundingMode/commercialSnapshotFingerprintVersion on create is rejected (400, unknown field)', async () => {
+      const productId = await productIdFor(variantId);
+      const r = await req(
+        'POST',
+        ORD(coA, branchA),
+        ownerA,
+        {
+          lines: [basicLine({ productId, quantity: '1' })],
+          taxPriceMode: 'TAX_INCLUSIVE',
+          taxRoundingScope: 'DOCUMENT',
+          taxRoundingMode: 'HALF_EVEN',
+          commercialSnapshotFingerprintVersion: 1,
+        },
+        { 'idempotency-key': ik() },
+      );
+      expect(r.statusCode).toBe(400);
+    });
+
+    it('a client-supplied taxPriceMode on PATCH is rejected (400, unknown field) — PATCH never re-resolves policy', async () => {
+      const productId = await productIdFor(variantId);
+      const created = await req(
+        'POST',
+        ORD(coA, branchA),
+        ownerA,
+        { lines: [basicLine({ productId, quantity: '1' })] },
+        { 'idempotency-key': ik() },
+      );
+      const body = created.json() as { order: { id: string; version: number } };
+      const patched = await req(
+        'PATCH',
+        ORD(coA, branchA, `/${body.order.id}`),
+        ownerA,
+        { taxPriceMode: 'TAX_INCLUSIVE' },
+        { 'if-match': String(body.order.version) },
+      );
+      expect(patched.statusCode).toBe(400);
     });
   });
 
@@ -2405,48 +2571,61 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
           documentDiscountBps: number | null;
           documentDiscountAmountMinor: string;
           documentDiscountReason: string | null;
+          commercialSnapshotFingerprintVersion: number;
+          taxPriceMode: string;
+          taxRoundingScope: string;
+          taxRoundingMode: string;
         }>(
           `SELECT "originBranchId","fulfillingBranchId","customerId",kind,"currencyCode",
                   "documentDiscountMode","documentDiscountBps",
                   "documentDiscountAmountMinor"::text AS "documentDiscountAmountMinor",
-                  "documentDiscountReason"
+                  "documentDiscountReason","commercialSnapshotFingerprintVersion",
+                  "taxPriceMode","taxRoundingScope","taxRoundingMode"
              FROM "order" WHERE id = $1`,
           [body.order.id],
         )
       )[0]!;
       const sorted = [...rows].sort((a, b) => a.linePosition - b.linePosition);
-      const recomputed = computeCommercialSnapshotFingerprint({
-        tenantId: tenantA,
-        companyId: coA,
-        originBranchId: orderRow.originBranchId,
-        fulfillingBranchId: orderRow.fulfillingBranchId,
-        customerId: orderRow.customerId,
-        kind: orderRow.kind,
-        currencyCode: orderRow.currencyCode,
-        lines: sorted.map((l) => ({
-          productId: l.productId,
-          variantId: l.variantId,
-          quantity: l.quantity,
-          selectedUomCode: l.selectedUomCode,
-          baseUomCode: l.baseUomCode,
-          conversionNumerator: l.conversionNumerator,
-          conversionDenominator: l.conversionDenominator,
-          unitPriceAmountMinor: l.unitPriceAmountMinor,
-          unitPriceCurrencyCode: l.unitPriceCurrencyCode,
-          unitPriceCurrencyExponent: l.unitPriceCurrencyExponent,
-          discountMode: l.discountMode,
-          discountBps: l.discountBps,
-          discountAmountMinor: l.discountAmountMinor,
-          taxCategoryKey: l.taxCategoryKey,
-          rateBps: l.rateBps,
-          effectiveFrom: l.effectiveFrom,
-          resolutionSource: l.resolutionSource,
-        })),
-        documentDiscountMode: orderRow.documentDiscountMode,
-        documentDiscountBps: orderRow.documentDiscountBps,
-        documentDiscountAmountMinor: orderRow.documentDiscountAmountMinor,
-        documentDiscountReason: orderRow.documentDiscountReason,
-      });
+      const recomputed = computeCommercialSnapshotFingerprintByVersion(
+        orderRow.commercialSnapshotFingerprintVersion,
+        {
+          tenantId: tenantA,
+          companyId: coA,
+          originBranchId: orderRow.originBranchId,
+          fulfillingBranchId: orderRow.fulfillingBranchId,
+          customerId: orderRow.customerId,
+          kind: orderRow.kind,
+          currencyCode: orderRow.currencyCode,
+          lines: sorted.map((l) => ({
+            productId: l.productId,
+            variantId: l.variantId,
+            quantity: l.quantity,
+            selectedUomCode: l.selectedUomCode,
+            baseUomCode: l.baseUomCode,
+            conversionNumerator: l.conversionNumerator,
+            conversionDenominator: l.conversionDenominator,
+            unitPriceAmountMinor: l.unitPriceAmountMinor,
+            unitPriceCurrencyCode: l.unitPriceCurrencyCode,
+            unitPriceCurrencyExponent: l.unitPriceCurrencyExponent,
+            discountMode: l.discountMode,
+            discountBps: l.discountBps,
+            discountAmountMinor: l.discountAmountMinor,
+            taxCategoryKey: l.taxCategoryKey,
+            rateBps: l.rateBps,
+            effectiveFrom: l.effectiveFrom,
+            resolutionSource: l.resolutionSource,
+          })),
+          documentDiscountMode: orderRow.documentDiscountMode,
+          documentDiscountBps: orderRow.documentDiscountBps,
+          documentDiscountAmountMinor: orderRow.documentDiscountAmountMinor,
+          documentDiscountReason: orderRow.documentDiscountReason,
+        },
+        {
+          taxPriceMode: orderRow.taxPriceMode,
+          taxRoundingScope: orderRow.taxRoundingScope,
+          taxRoundingMode: orderRow.taxRoundingMode,
+        },
+      );
       expect(recomputed).toBe(body.order.commercialSnapshotFingerprint);
     });
   });
@@ -2484,7 +2663,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
           lines: [
             {
               orderLineId: body.lines[0]!.id,
-              priceTaxMode: 'EXCLUSIVE',
+              priceTaxMode: 'TAX_EXCLUSIVE',
               roundingScope: 'LINE',
               roundingMode: 'HALF_UP',
               lineTaxAmountMinor: 0n,
