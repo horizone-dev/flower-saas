@@ -1096,7 +1096,7 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
       expect(Number(rows[0]!.n)).toBe(0);
     });
 
-    it('no Task 3.9+ / inventory pull-forward — no inventory / order / payment table', async () => {
+    it('no Task 3.9+ / inventory pull-forward — no inventory table', async () => {
       const present = new Set(
         (
           await sql<{ tablename: string }>(
@@ -1106,14 +1106,14 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
       );
       // branch_variant_* IS created by the task 3.8 migration that this suite's
       // DB runs; `order`/`order_line`/`invoice`/`document_number_counter` are
-      // task 3b.3 (Phase 3b, approved); the inventory / payment domain stays
-      // forbidden.
+      // task 3b.3, and `payment`/`payment_attempt`/`payment_allocation` are
+      // task 3b.5 (Phase 3b, approved and implemented); the inventory domain
+      // stays forbidden (Phase 5).
       for (const t of [
         'inventory_item',
         'inventory_movement',
         'branch_inventory_balance',
         'stock_reservation',
-        'payment',
       ]) {
         expect(present.has(t), t).toBe(false);
       }

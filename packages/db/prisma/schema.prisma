@@ -249,26 +249,32 @@ model Tenant {
   createdAt                  DateTime              @default(now()) @db.Timestamptz(6)
   updatedAt                  DateTime              @updatedAt @db.Timestamptz(6)
 
-  entitlements           TenantEntitlement[]
-  limits                 TenantLimit[]
-  settings               TenantSetting[]
-  users                  User[]
-  roles                  Role[]
-  companies              Company[]
-  branches               Branch[]
-  posTerminals           PosTerminal[]
-  providerCreds          ProviderCredential[]
-  catalogCapabilities    TenantCatalogCapability[]
-  accounts               Account[]
-  accountingPeriods      AccountingPeriod[]
-  journalEntries         JournalEntry[]
-  journalLines           JournalLine[]
-  customers              Customer[]
-  customerAccounts       CustomerCompanyAccount[]
-  orders                 Order[]
-  orderLines             OrderLine[]
-  invoices               Invoice[]
-  documentNumberCounters DocumentNumberCounter[]
+  entitlements            TenantEntitlement[]
+  limits                  TenantLimit[]
+  settings                TenantSetting[]
+  users                   User[]
+  roles                   Role[]
+  companies               Company[]
+  branches                Branch[]
+  posTerminals            PosTerminal[]
+  providerCreds           ProviderCredential[]
+  catalogCapabilities     TenantCatalogCapability[]
+  accounts                Account[]
+  accountingPeriods       AccountingPeriod[]
+  journalEntries          JournalEntry[]
+  journalLines            JournalLine[]
+  customers               Customer[]
+  customerAccounts        CustomerCompanyAccount[]
+  orders                  Order[]
+  orderLines              OrderLine[]
+  invoices                Invoice[]
+  documentNumberCounters  DocumentNumberCounter[]
+  payments                Payment[]
+  paymentAttempts         PaymentAttempt[]
+  paymentAllocations      PaymentAllocation[]
+  paymentAttemptEvents    PaymentAttemptEvent[]
+  providerPaymentEvents   ProviderPaymentEvent[]
+  paymentWebhookEndpoints PaymentWebhookEndpoint[]
 
   @@map("tenant")
 }
@@ -547,46 +553,52 @@ model DataScopeAssignment {
 // ──────────────────────────────── org (tenant) ────────────────────────────────
 
 model Company {
-  id                     String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId               String                   @db.Uuid
-  tenant                 Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  legalNameEn            String
-  legalNameAr            String?
-  crNumber               String?
+  id                      String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                String                   @db.Uuid
+  tenant                  Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalNameEn             String
+  legalNameAr             String?
+  crNumber                String?
   /// tax registration number / VAT number
-  trn                    String?
-  registeredAddress      String?
+  trn                     String?
+  registeredAddress       String?
   /// The legal-entity country — THE fiscal source (currency / VAT / e-invoicing),
   /// never `tenant.region` (architecture correction 4). Nullable in the Phase
   /// 2-core expand migration; task 2.7 provisioning sets it. FK -> country.code.
-  countryCode            String?
+  countryCode             String?
   /// resolved from the country at provisioning; a branch may override *display*
   /// currency only, never the legal currency. FK -> currency.code.
-  defaultCurrency        String?
+  defaultCurrency         String?
   /// non-secret fiscal profile (e-invoicing provider ref, invoice-series policy).
-  fiscalConfig           Json?
+  fiscalConfig            Json?
   /// task 3b.1 — the SOLE financial-posting-authority timezone (IANA, e.g.
   /// "Asia/Dubai"). Nullable at rollout (existing companies require an explicit
   /// Accounting Setup action to configure it — never auto-backfilled); financial
   /// posting fails closed (ACCOUNTING_TIMEZONE_NOT_CONFIGURED) while null. Never
   /// falls back to Branch.timezone / Country.defaultTimezone / POS / client tz.
-  accountingTimezone     String?
+  accountingTimezone      String?
   /// ACTIVE | INACTIVE
-  status                 String                   @default("ACTIVE")
-  createdAt              DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt              DateTime                 @updatedAt @db.Timestamptz(6)
-  tradeLicenses          TradeLicense[]
-  branches               Branch[]
-  posTerminals           PosTerminal[]
-  providerCreds          ProviderCredential[]
-  accounts               Account[]
-  accountingPeriods      AccountingPeriod[]
-  journalEntries         JournalEntry[]
-  journalLines           JournalLine[]
-  customerAccounts       CustomerCompanyAccount[]
-  orders                 Order[]
-  invoices               Invoice[]
-  documentNumberCounters DocumentNumberCounter[]
+  status                  String                   @default("ACTIVE")
+  createdAt               DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime                 @updatedAt @db.Timestamptz(6)
+  tradeLicenses           TradeLicense[]
+  branches                Branch[]
+  posTerminals            PosTerminal[]
+  providerCreds           ProviderCredential[]
+  accounts                Account[]
+  accountingPeriods       AccountingPeriod[]
+  journalEntries          JournalEntry[]
+  journalLines            JournalLine[]
+  customerAccounts        CustomerCompanyAccount[]
+  orders                  Order[]
+  invoices                Invoice[]
+  documentNumberCounters  DocumentNumberCounter[]
+  payments                Payment[]
+  paymentAttempts         PaymentAttempt[]
+  paymentAllocations      PaymentAllocation[]
+  paymentAttemptEvents    PaymentAttemptEvent[]
+  providerPaymentEvents   ProviderPaymentEvent[]
+  paymentWebhookEndpoints PaymentWebhookEndpoint[]
 
   /// task 3.7 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`                  ← `company_variant_price_set` tenant-safe FK
@@ -620,27 +632,33 @@ model TradeLicense {
 }
 
 model Branch {
-  id               String               @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId         String               @db.Uuid
-  tenant           Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  companyId        String               @db.Uuid
-  company          Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  name             String
+  id                      String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                String                   @db.Uuid
+  tenant                  Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId               String                   @db.Uuid
+  company                 Company                  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  name                    String
   /// IANA tz, e.g. "Asia/Dubai"
-  timezone         String               @default("Asia/Dubai")
+  timezone                String                   @default("Asia/Dubai")
   /// FRI_SAT | SAT_SUN | SUN_ONLY … (GCC weekend model)
-  weekendModel     String               @default("FRI_SAT")
+  weekendModel            String                   @default("FRI_SAT")
   /// ACTIVE | INACTIVE
-  status           String               @default("ACTIVE")
-  createdAt        DateTime             @default(now()) @db.Timestamptz(6)
-  updatedAt        DateTime             @updatedAt @db.Timestamptz(6)
-  settings         BranchSetting[]
-  posTerminals     PosTerminal[]
-  providerCreds    ProviderCredential[]
-  journalLines     JournalLine[]
-  originOrders     Order[]              @relation("OrderOriginBranch")
-  fulfillingOrders Order[]              @relation("OrderFulfillingBranch")
-  invoices         Invoice[]
+  status                  String                   @default("ACTIVE")
+  createdAt               DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime                 @updatedAt @db.Timestamptz(6)
+  settings                BranchSetting[]
+  posTerminals            PosTerminal[]
+  providerCreds           ProviderCredential[]
+  journalLines            JournalLine[]
+  originOrders            Order[]                  @relation("OrderOriginBranch")
+  fulfillingOrders        Order[]                  @relation("OrderFulfillingBranch")
+  invoices                Invoice[]
+  payments                Payment[]
+  paymentAttempts         PaymentAttempt[]
+  paymentAllocations      PaymentAllocation[]
+  paymentAttemptEvents    PaymentAttemptEvent[]
+  providerPaymentEvents   ProviderPaymentEvent[]
+  paymentWebhookEndpoints PaymentWebhookEndpoint[]
 
   /// task 3.8 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`             ← `branch_variant_*` tenant-safe FK
@@ -1098,8 +1116,11 @@ model Order {
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  lines   OrderLine[]
-  invoice Invoice?
+  lines           OrderLine[]
+  invoice         Invoice?
+  /// Task 3b.5 — a later PaymentAttempt (Checkpoint B) binds against
+  /// `commercialSnapshotFingerprint` + `version` above.
+  paymentAttempts PaymentAttempt[]
 
   /// FK targets: `order_line.(tenantId, companyId, orderId)` and
   /// `invoice.(tenantId, companyId, orderId)`.
@@ -1342,6 +1363,13 @@ model Invoice {
 
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
+  /// Task 3b.5 — `PaymentAttempt.targetInvoiceId` / `PaymentAllocation.invoiceId`
+  /// back-relations. `invoicePaymentStatus` above is untouched by 3b.5
+  /// (Task 3b.6's exclusively) — these relations exist only so a Payment can
+  /// bind to and be counted against this Invoice.
+  paymentAttempts PaymentAttempt[]
+  allocations     PaymentAllocation[]
+
   /// FK targets: composite tenant/company-safe FKs added by hand in the
   /// migration SQL. UPDATE/DELETE are unconditionally DB-blocked (Checkpoint A
   /// trigger — an Invoice row only ever exists in its final, issued form).
@@ -1419,6 +1447,13 @@ model ProviderCredential {
   updatedByPlatformUser   PlatformUser? @relation(fields: [updatedByPlatformUserId], references: [id], onDelete: SetNull)
   createdAt               DateTime      @default(now()) @db.Timestamptz(6)
   updatedAt               DateTime      @updatedAt @db.Timestamptz(6)
+
+  /// Task 3b.5 — provider-backed PaymentAttempt / the webhook routing mapping
+  /// / the inbound provider-event inbox all reference this row. Reused as-is
+  /// (ADR-0007) — no new secrets primitive; access remains platform-only.
+  paymentAttempts PaymentAttempt[]
+  webhookEndpoint PaymentWebhookEndpoint?
+  providerEvents  ProviderPaymentEvent[]
 
   @@index([tenantId, provider])
   @@map("provider_credential")
@@ -2457,4 +2492,377 @@ model BranchVariantAvailability {
   @@index([tenantId, companyId, branchId])
   @@index([tenantId, variantId])
   @@map("branch_variant_availability")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Task 3b.5 Checkpoint B — Payments: schema, RLS, structural backstops ONLY.
+// Contract frozen across 4 owner review rounds (docs/phase-3/PHASE-3B-PLAN.md
+// §E). No service/repository/controller/provider/webhook/audit/outbox code —
+// those are later checkpoints. Six entities:
+//
+//   Payment                — CONFIRMED RECEIPT ONLY. No status, no version, no
+//                             `invoiceId` (PaymentAllocation is the sole
+//                             authoritative Payment->Invoice link). Fully
+//                             immutable after INSERT — no UPDATE, no DELETE.
+//                             `sourceAttemptId` is the ONE-WAY FK to
+//                             PaymentAttempt (no `resultingPaymentId` back-
+//                             reference — avoids a cyclic insert/update order).
+//   PaymentAttempt         — the mechanical/provider lifecycle. Reuses the
+//                             already-Accepted ARCHITECTURE.md §42-43 state
+//                             vocabulary verbatim. 3b.5's frozen transition
+//                             graph: PENDING -> {REQUIRES_ACTION, AUTHORIZED,
+//                             CAPTURED, FAILED, CANCELED}; REQUIRES_ACTION ->
+//                             {AUTHORIZED, CAPTURED, FAILED, CANCELED};
+//                             AUTHORIZED -> {CAPTURED} only (no accepted-source
+//                             basis for a post-authorization failure/void edge
+//                             — deferred to the concrete provider adapter).
+//                             PARTIALLY_REFUNDED/REFUNDED remain reserved,
+//                             unreachable. Binds to its Order via
+//                             `orderCommercialSnapshotFingerprintAtCreation` +
+//                             `orderVersionAtCreation` (both required to match
+//                             the live Order at capture time — later
+//                             checkpoint, application logic).
+//   PaymentAllocation      — the ONLY authoritative Payment->Invoice
+//                             relationship. Exactly one per Payment in 3b.5
+//                             (`paymentId` UNIQUE), append-only.
+//   PaymentAttemptEvent    — append-only state-transition log, mirrors
+//                             ARCHITECTURE.md's `payment_event`.
+//   ProviderPaymentEvent   — the webhook inbox. `status` RECEIVED ->
+//                             PROCESSED|EXCEPTION only; every other field
+//                             immutable after insert. No raw payload column —
+//                             `payloadHash` + `sanitizedMetadata` only.
+//   PaymentWebhookEndpoint — the opaque webhook-routing primitive, 1:1 with a
+//                             ProviderCredential. Platform-only access
+//                             (mirrors `provider_credential`'s own posture) —
+//                             the pre-scope resolver itself is NOT
+//                             implemented in Checkpoint B.
+//
+// Cross-row financial limit (confirmed allocations + active reservations <=
+// invoice total) is DELIBERATELY NOT a DB CHECK/trigger here — it requires
+// Invoice row locking + transaction orchestration (Checkpoint C/E/G). Its
+// absence here is intentional, not an omission (see the migration SQL header
+// and packages/db/test/payments-core.integration.test.ts).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Confirmed receipt of money only. Conceptually immutable — DB-enforced: no
+/// UPDATE, no DELETE, ever, once inserted (see the migration's
+/// `fn_enforce_payment_no_update` / `fn_enforce_payment_no_delete`).
+/// `sourceAttemptId` is the sole Payment<->PaymentAttempt relationship — no
+/// `invoiceId` here (PaymentAllocation owns that), no `status` (existence IS
+/// the status), no `version` (nothing here is ever patched).
+model Payment {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  /// a plain server-generated correlation tag shared by every component of
+  /// one Multi Payment operation — NOT a domain entity, no status/lifecycle
+  /// of its own, confers no allocation authority (owner contract round 3 §2).
+  paymentGroupId String? @db.Uuid
+
+  /// UNIQUE NOT NULL — the exact attempt whose CAPTURE produced this row.
+  /// One-way FK; PaymentAttempt carries no reverse pointer (owner contract
+  /// round 4 §3 — avoids a cyclic insert/update ordering between the two
+  /// tables).
+  sourceAttemptId String         @unique @db.Uuid
+  sourceAttempt   PaymentAttempt @relation(fields: [sourceAttemptId], references: [id], onDelete: Restrict)
+
+  /// CASH | CARD_TERMINAL | BANK_TRANSFER | ONLINE_GATEWAY | OTHER_MANUAL
+  /// (CHECK) — CREDIT is forbidden as a tender (frozen rule). Mirrors the
+  /// source attempt's own `method` (DB backstop, see the migration SQL).
+  method String
+
+  /// non-null only when `method` was provider-backed for the source attempt
+  /// (ONLINE_GATEWAY always; CARD_TERMINAL only if provider-integrated).
+  providerKey String?
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  createdByUserId String?  @db.Uuid
+  actingUserId    String?  @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+
+  allocation PaymentAllocation?
+
+  /// FK targets: `(tenantId, companyId, branchId, id)` proves scope to
+  /// `payment_allocation`'s own composite FK; `(tenantId, id)` /
+  /// `(tenantId, companyId, id)` mirror the universal tenant-safe pattern.
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  @@unique([tenantId, companyId, branchId, id])
+  @@index([tenantId, companyId])
+  @@index([paymentGroupId])
+  @@map("payment")
+}
+
+/// The mechanical/provider lifecycle record. Exists before any Payment does —
+/// for every tender, synchronous or async. Creation-time attributes are
+/// immutable (DB-enforced); only `state` (through the frozen legal graph),
+/// `providerReference` (narrow set-once), and `updatedAt` may ever change.
+model PaymentAttempt {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// the Invoice this attempt targets. Structural backstop (composite FK, see
+  /// migration SQL): `targetInvoiceId` must be the Invoice whose OWN
+  /// `orderId` equals this attempt's `orderId` — never an arbitrary
+  /// same-tenant Order/Invoice pairing.
+  targetInvoiceId String  @db.Uuid
+  targetInvoice   Invoice @relation(fields: [targetInvoiceId], references: [id], onDelete: Restrict)
+
+  paymentGroupId String? @db.Uuid
+
+  /// CASH | CARD_TERMINAL | BANK_TRANSFER | ONLINE_GATEWAY | OTHER_MANUAL
+  /// (CHECK). CREDIT is forbidden.
+  method String
+
+  providerKey String?
+
+  /// nullable — only provider-backed attempts reference a credential. DB
+  /// backstop (trigger, see migration SQL) requires the referenced
+  /// ProviderCredential to be branch-scoped (companyId AND branchId both
+  /// NOT NULL — a tenant-wide or company-only credential is rejected for
+  /// payment use, though it may still exist for other platform domains) and
+  /// requires an EXACT match on tenant/company/branch against this row's own
+  /// scope, plus `providerKey === ProviderCredential.provider`.
+  providerCredentialId String?             @db.Uuid
+  providerCredential   ProviderCredential? @relation(fields: [providerCredentialId], references: [id], onDelete: Restrict)
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  /// PENDING | REQUIRES_ACTION | AUTHORIZED | CAPTURED | FAILED | CANCELED |
+  /// PARTIALLY_REFUNDED | REFUNDED (CHECK) — the last two are reserved,
+  /// unreachable in 3b.5 (see the migration's transition-graph trigger).
+  state String @default("PENDING")
+
+  /// the capture-staleness gate (application logic, later checkpoint) —
+  /// stored here as an immutable snapshot at creation time only.
+  orderCommercialSnapshotFingerprintAtCreation String
+  orderVersionAtCreation                       Int
+
+  /// narrow set-once lifecycle (DB-enforced, see migration SQL): NULL ->
+  /// non-NULL once; same value again is harmless; non-NULL -> a DIFFERENT
+  /// non-NULL, or non-NULL -> NULL, are both blocked.
+  providerReference String?
+
+  idempotencyKey String
+
+  createdByUserId String?  @db.Uuid
+  actingUserId    String?  @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(6)
+
+  resultingPayment Payment?
+  events           PaymentAttemptEvent[]
+
+  /// FK targets: `(tenantId, companyId, branchId, id)` proves scope to
+  /// `payment`'s own composite FK.
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  @@unique([tenantId, companyId, branchId, id])
+  /// Checkpoint E migration `20260924120000_payments_provider_reference_uniqueness`
+  /// — makes Phase-1 async-attempt reservation idempotent at the DB level
+  /// (`INSERT ... ON CONFLICT (tenantId, createdByUserId, idempotencyKey) DO
+  /// NOTHING`), independent of the shared HTTP idempotency store. PARTIAL —
+  /// `WHERE "providerCredentialId" IS NOT NULL` — so it applies only to
+  /// Checkpoint E's own provider-backed async attempts, never to Checkpoint
+  /// C/D's synchronous Multi Payment rows (which legitimately share one
+  /// idempotencyKey across several `providerCredentialId IS NULL` attempts).
+  /// Prisma DSL cannot express the partial predicate; this plain index
+  /// documents the columns only.
+  @@index([tenantId, createdByUserId, idempotencyKey])
+  @@index([tenantId, companyId])
+  @@index([providerCredentialId])
+  @@index([paymentGroupId])
+  /// the reservation-computation query shape (owner contract round 4 §1):
+  /// `targetInvoiceId` + `state IN (PENDING, REQUIRES_ACTION, AUTHORIZED)` —
+  /// realized as a partial index in the migration SQL (Prisma DSL cannot
+  /// express a partial index; this plain index documents the columns only).
+  @@index([targetInvoiceId, state])
+  /// Checkpoint E migration `20260924120000_payments_provider_reference_uniqueness`
+  /// — `providerReference` cannot be reused across attempts under the SAME
+  /// provider credential. Prisma DSL cannot express the migration's real
+  /// partial `WHERE "providerReference" IS NOT NULL` predicate; this plain
+  /// index documents the columns only.
+  @@index([providerCredentialId, providerReference])
+  @@map("payment_attempt")
+}
+
+/// The ONLY authoritative Payment->Invoice relationship. Append-only —
+/// UPDATE and DELETE are both DB-blocked. Exactly one row per Payment in
+/// 3b.5 (`paymentId` UNIQUE); `amountMinor` must equal the Payment's own
+/// `amountMinor` exactly (DB backstop, see migration SQL).
+model PaymentAllocation {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  paymentId String  @unique @db.Uuid
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  invoiceId String  @db.Uuid
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, companyId])
+  @@index([invoiceId])
+  @@map("payment_allocation")
+}
+
+/// Append-only PaymentAttempt state-transition log — mirrors
+/// ARCHITECTURE.md §42-43's `payment_event`. No UPDATE, no DELETE, ever.
+model PaymentAttemptEvent {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  paymentAttemptId String         @db.Uuid
+  paymentAttempt   PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  fromState String
+  toState   String
+
+  occurredAt DateTime @default(now()) @db.Timestamptz(6)
+
+  /// SYSTEM | WEBHOOK | USER (CHECK)
+  source String
+
+  /// links to the verified inbound provider event that drove this
+  /// transition, where applicable (a local/manual transition has none).
+  providerPaymentEventId String?               @db.Uuid
+  providerPaymentEvent   ProviderPaymentEvent? @relation(fields: [providerPaymentEventId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, companyId])
+  @@index([paymentAttemptId])
+  @@map("payment_attempt_event")
+}
+
+/// The webhook inbox — provider inbound-event idempotency, separate from
+/// `PaymentAttemptEvent`. Dedupe key is `(providerCredentialId,
+/// providerEventId)`, never merely `providerEventId` alone (two branches on
+/// the same provider must not collide). No raw payload column, ever — only
+/// `payloadHash` + `sanitizedMetadata`. `tenantId`/`companyId`/`branchId` are
+/// populated only from the trusted, platform-resolved `ProviderCredential`
+/// scope (never the untrusted webhook body) — that resolution itself is a
+/// later checkpoint; Checkpoint B stores the columns only.
+model ProviderPaymentEvent {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  providerCredentialId String             @db.Uuid
+  providerCredential   ProviderCredential @relation(fields: [providerCredentialId], references: [id], onDelete: Restrict)
+
+  providerEventId String
+  eventType       String
+  receivedAt      DateTime @default(now()) @db.Timestamptz(6)
+  payloadHash     String
+
+  /// RECEIVED | PROCESSED | EXCEPTION (CHECK) — RECEIVED -> PROCESSED /
+  /// EXCEPTION only, both terminal. NO `REJECTED` value: an invalid-signature
+  /// event never reaches this table at all (rejected before durable
+  /// acceptance — Checkpoint F).
+  status String @default("RECEIVED")
+
+  /// shallow JSON-primitive-only content — never the raw/arbitrary provider
+  /// payload. No PAN/CVV/secret ever belongs here.
+  sanitizedMetadata Json @default("{}")
+
+  /// Checkpoint F migration `20260925120000_payments_webhook_inbox_routing`
+  /// — explicit, strongly-typed, immutable-after-insert routing columns
+  /// (owner §F7: `sanitizedMetadata` is never the authoritative
+  /// business-routing source). `paymentAttemptId` is NULL for an
+  /// unsupported-but-verified event persisted directly as EXCEPTION with no
+  /// PaymentAttempt target — and is DELIBERATELY NOT a foreign key to
+  /// `PaymentAttempt` at all (Checkpoint F reliability pass, migration
+  /// `20260926120000_payments_webhook_inbox_claimed_attempt`, correcting
+  /// the prior migration's own composite FK): this column is the
+  /// provider-authenticated but merely CLAIMED internal attempt id — a
+  /// signature-valid event referencing an unknown/wrong-scope attempt must
+  /// still be durably recorded as evidence (EXCEPTION), never rejected at
+  /// INSERT time. Correlating it against a real, same-scope
+  /// `PaymentAttempt` is `WebhookEventProcessorRepository`'s job
+  /// (application code), not a DB precondition. Trusted scope for this row
+  /// comes ONLY from `providerCredentialId` (via
+  /// `PaymentWebhookEndpoint`/`ProviderCredential`), never from this field.
+  paymentAttemptId  String? @db.Uuid
+  providerReference String?
+  /// PENDING | REQUIRES_ACTION | AUTHORIZED | CAPTURED | FAILED | CANCELED
+  /// (CHECK), or NULL — refund states are never a valid F target.
+  targetState       String?
+
+  attemptEvents PaymentAttemptEvent[]
+
+  @@unique([providerCredentialId, providerEventId])
+  @@index([tenantId, companyId, receivedAt])
+  @@index([paymentAttemptId])
+  @@map("provider_payment_event")
+}
+
+/// The opaque webhook-routing primitive — `id` itself IS the routing
+/// identifier used in the webhook URL. 1:1 with a ProviderCredential
+/// (`providerCredentialId` UNIQUE). Platform-only access (mirrors
+/// `provider_credential`'s own posture exactly) — never queried through a
+/// normal tenant-scoped repository. The pre-scope resolver that actually
+/// uses this table is NOT implemented in Checkpoint B. Immutable after
+/// insert (UPDATE blocked); DELETE blocked by default in 3b.5.
+model PaymentWebhookEndpoint {
+  id String @id @default(dbgenerated("uuidv7()")) @db.Uuid
+
+  /// mirrors the referenced ProviderCredential's own scope EXACTLY (DB
+  /// backstop, see migration SQL). Task 3b.5 payment webhook endpoints are
+  /// FROZEN branch-scoped: the trigger requires that credential's own
+  /// companyId AND branchId to both be NOT NULL (a tenant-wide or
+  /// company-only credential is rejected here, though it may still exist for
+  /// other platform domains) — `companyId`/`branchId` remain nullable at the
+  /// Prisma-type level only because they mirror `provider_credential`'s own
+  /// column nullability; in practice, for this table, every row is
+  /// non-null.
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String?  @db.Uuid
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String?  @db.Uuid
+  branch    Branch?  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  providerCredentialId String             @unique @db.Uuid
+  providerCredential   ProviderCredential @relation(fields: [providerCredentialId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("payment_webhook_endpoint")
 }

@@ -147,6 +147,15 @@ export const PERMISSIONS = {
   // pre-existing `finance` group's `accounts:*` (a separate, broader Finance
   // module placeholder, not this task's Chart-of-Accounts primitive).
   accounting: ['accounting:view', 'accounting:manage', 'accounting:period:manage'],
+  // Task 3b.5 — Payments + PaymentAttempt + Multi Payment. A brand new group
+  // (no pre-existing placeholder existed, unlike `orders:*`) — mirrors task
+  // 3b.1's own precedent of adding a wholly new group when none exists.
+  // Distinct from the pre-existing `payments:refund:approve` (stale
+  // placeholder key in the `customers` group, out of 3b.5 scope — refunds
+  // belong to a later task). Only these 2 keys; no `payments:manage`,
+  // `payments:webhook:process`, `payments:refund`, `payments:void`, or
+  // `payments:settle` key exists anywhere in 3b.5.
+  payments: ['payments:view', 'payments:collect'],
 } as const satisfies Record<string, readonly string[]>;
 
 export type PermissionGroup = keyof typeof PERMISSIONS;
@@ -354,6 +363,29 @@ export const PHASE_3B_3_TENANT_PERMISSIONS = [
 ] as const satisfies readonly PermissionKey[];
 
 export type Phase3b3TenantPermission = (typeof PHASE_3B_3_TENANT_PERMISSIONS)[number];
+
+/**
+ * Task 3b.5 (docs/phase-3/PHASE-3B-PLAN.md §E) — Payments + PaymentAttempt +
+ * Multi Payment, Checkpoint B. The frozen 2-key contract: `payments:view` +
+ * `payments:collect` — no `payments:manage`, no `payments:webhook:process`
+ * (webhook execution is system/provider-authenticated infrastructure, never
+ * a human permission), no `payments:refund`/`payments:void`/
+ * `payments:settle` (those belong to the future tasks that implement them).
+ * Registered in `permission_registry` and assigned to built-in system roles
+ * per the owner-frozen matrix: `owner`/`admin`/`manager`/`cashier`/`sales`
+ * all gain both keys — collecting a routine sale payment is a normal
+ * POS-floor action, mirroring the `orders:view`/`orders:manage` precedent
+ * exactly (not the Owner/Admin-only `accounting:*`/`customers:credit:*`
+ * precedent). Not step-up gated — no accepted rule mandates step-up for
+ * ordinary payment collection (existing step-up keys are all elevated
+ * configuration/limit actions, never a routine transactional one).
+ */
+export const PHASE_3B_5_TENANT_PERMISSIONS = [
+  'payments:view',
+  'payments:collect',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b5TenantPermission = (typeof PHASE_3B_5_TENANT_PERMISSIONS)[number];
 
 /**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant

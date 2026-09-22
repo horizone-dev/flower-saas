@@ -7,6 +7,7 @@ import {
   PHASE_3_8_TENANT_PERMISSIONS,
   PHASE_3B_1_TENANT_PERMISSIONS,
   PHASE_3B_2_TENANT_PERMISSIONS,
+  PHASE_3B_5_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -56,6 +57,14 @@ import {
  * on-the-spot creation are realistic POS-floor needs; credit configuration
  * stays restricted to Owner/Admin). All other roles get nothing. Existing
  * tenants get the identical backfill in the task 3b.2 migration.
+ *
+ * Phase 3b task 3b.5 (docs/phase-3/PHASE-3B-PLAN.md §E, owner-frozen
+ * matrix): `owner`/`admin`/`manager`/`cashier`/`sales` ALL gain both
+ * `payments:view` + `payments:collect` — collecting a routine sale payment
+ * is a normal POS-floor action, mirroring the `orders:*` precedent, not the
+ * Owner/Admin-only `accounting:*`/`customers:credit:*` precedent. No other
+ * role gets either key. Existing tenants get the identical backfill in the
+ * task 3b.5 migration.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
@@ -82,6 +91,8 @@ const CUSTOMERS_OPERATIONAL = PHASE_3B_2_TENANT_PERMISSIONS.filter(
 );
 /** customers:credit:override — Owner-tier only (3b.2). */
 const CUSTOMERS_CREDIT_OVERRIDE = 'customers:credit:override';
+/** payments:view + payments:collect — owner/admin/manager/cashier/sales (3b.5). */
+const PAYMENTS = PHASE_3B_5_TENANT_PERMISSIONS;
 
 export interface SystemRoleTemplate {
   key: string;
@@ -100,12 +111,13 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ACCOUNTING_PERIOD_MANAGE,
       ...CUSTOMERS_ADMIN,
       CUSTOMERS_CREDIT_OVERRIDE,
+      ...PAYMENTS,
     ],
   },
   {
     key: 'admin',
     name: 'Admin',
-    permissions: [...P, ...CATALOG, ...ACCOUNTING, ...CUSTOMERS_ADMIN],
+    permissions: [...P, ...CATALOG, ...ACCOUNTING, ...CUSTOMERS_ADMIN, ...PAYMENTS],
   },
   {
     key: 'manager',
@@ -116,11 +128,20 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       'settings:branch:manage',
       CATALOG_VIEW,
       ...CUSTOMERS_OPERATIONAL,
+      ...PAYMENTS,
     ],
   },
   { key: 'supervisor', name: 'Supervisor', permissions: ['users:view'] },
-  { key: 'cashier', name: 'Cashier', permissions: ['users:view', ...CUSTOMERS_OPERATIONAL] },
-  { key: 'sales', name: 'Sales', permissions: ['users:view', ...CUSTOMERS_OPERATIONAL] },
+  {
+    key: 'cashier',
+    name: 'Cashier',
+    permissions: ['users:view', ...CUSTOMERS_OPERATIONAL, ...PAYMENTS],
+  },
+  {
+    key: 'sales',
+    name: 'Sales',
+    permissions: ['users:view', ...CUSTOMERS_OPERATIONAL, ...PAYMENTS],
+  },
   { key: 'florist', name: 'Florist', permissions: ['users:view'] },
   { key: 'storekeeper', name: 'Storekeeper', permissions: ['users:view'] },
   { key: 'purchase_staff', name: 'Purchase Staff', permissions: ['users:view'] },

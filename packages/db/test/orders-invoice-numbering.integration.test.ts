@@ -1567,15 +1567,18 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     expect(rows).toHaveLength(0);
   });
 
-  it('no Payment/AR/Advance/Inventory table exists', async () => {
+  it('no AR/Advance/Settlement/Cancellation/Refund/CreditNote/Inventory table exists', async () => {
+    // `payment` / `payment_attempt` / `payment_allocation` are task 3b.5
+    // (Phase 3b, approved and implemented) and legitimately exist now —
+    // `payment_method_config` was the ORIGINAL plan's proposed name, never
+    // actually built (the real implementation has no such table); every
+    // other name here remains a later, unimplemented task (3b.6-3b.8 /
+    // Phase 5).
     const { rows } = await pool.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables
         WHERE table_name = ANY($1)`,
       [
         [
-          'payment',
-          'payment_attempt',
-          'payment_allocation',
           'payment_method_config',
           'ar_transaction',
           'advance_transaction',

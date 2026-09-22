@@ -6,6 +6,8 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter.js';
 import { installRequestContext } from './common/context/index.js';
+import { installRawBodyCapture } from './common/http/raw-body.js';
+import { WebhookRecoveryProcessor } from './modules/payments/webhook-recovery.repository.js';
 import { assertEveryRouteDeclaresIntent } from './common/auth/index.js';
 import { assertNoIdempotencyOnCredentialRoutes } from './common/idempotency/index.js';
 import { rootLogger } from './common/logger/logger.js';
@@ -76,6 +78,25 @@ async function bootstrap(): Promise<void> {
     .build();
   SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, openapi));
 
+  // `app.init()` is what actually registers Nest's own default
+  // `application/json` body parser (lazily, not at adapter construction
+  // time) — `installRawBodyCapture` must run AFTER that registration
+  // exists, so it can replace it rather than collide with it. `app.listen`
+  // below calls `init()` again, but it is idempotent once already
+  // initialized.
+  await app.init();
+  installRawBodyCapture(adapter.getInstance());
+
+  // task 3b.5 Checkpoint F reliability pass — the durable RECEIVED-webhook
+  // recovery loop. Started ONLY here (never from `PaymentModule` itself),
+  // so integration tests that bootstrap `AppModule` directly never get a
+  // background poll loop; production, which runs through this file, does.
+  const webhookRecovery = app.get(WebhookRecoveryProcessor);
+  webhookRecovery.start(
+    config.WEBHOOK_RECOVERY_TICK_INTERVAL_MS,
+    config.WEBHOOK_RECOVERY_BATCH_SIZE,
+  );
+
   await app.listen({ port: config.API_PORT, host: config.API_HOST });
   rootLogger.info(
     { port: config.API_PORT, host: config.API_HOST, env: config.NODE_ENV },
@@ -84,8 +105,9 @@ async function bootstrap(): Promise<void> {
 
   const shutdown = (signal: string): void => {
     rootLogger.info({ signal }, 'shutting down');
-    app
-      .close()
+    webhookRecovery
+      .stop()
+      .then(() => app.close())
       .then(() => process.exit(0))
       .catch((err: unknown) => {
         rootLogger.error({ err }, 'error during shutdown');

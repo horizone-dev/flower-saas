@@ -79,6 +79,38 @@ const envSchema = backendEnvSchema.extend({
     .string()
     .min(32)
     .default('dev-only-insecure-secrets-master-key-change-me-000'),
+
+  // Task 3b.5 Checkpoint F/G — `WebhookRecoveryProcessor`'s tick loop
+  // (owner reliability-pass §15: "bounded batch size, bounded polling
+  // interval... use repository configuration conventions"). Not a
+  // user-facing setting — an operational tuning knob, same convention as
+  // `IDEMPOTENCY_*`/`AUTH_*` above.
+  //
+  // Checkpoint G final security/operational pass — `apps/worker`'s
+  // `OutboxDispatcher` (the one directly comparable periodic-poll precedent
+  // in this repo) never exposes its own interval/batch as env vars at all —
+  // they are hardcoded module constants (`tickIntervalMs: 500`,
+  // `tenantBatchSize: 10`, `publishBatchSize: 20`, `seq-allocator.ts`/
+  // `publisher.ts`/`dispatcher.ts`'s own `DEFAULTS`). `env.ts` itself has no
+  // existing `.max(...)` convention anywhere to mirror (inspected the whole
+  // file — every other numeric field is `.int().positive()` only). This is
+  // therefore the first user-configurable poll-loop knob in the repo, and
+  // the first to need an explicit ceiling, not merely a floor:
+  //   - MIN 1000ms — anything smaller risks an accidental tight loop
+  //     hammering the DB with a full cross-tenant SELECT every tick; a full
+  //     order of magnitude above `OutboxDispatcher`'s own hardcoded 500ms
+  //     floor, since THIS query and its per-candidate transactions are
+  //     materially heavier than that dispatcher's own tick.
+  //   - MAX 300_000ms (5 minutes) — a defensive ceiling; far beyond this
+  //     and a misconfigured recovery loop stops being an effective
+  //     liveness guarantee at all (owner §F1/§2's own stated purpose).
+  //   - batch size MIN 1 (already implied by `.positive()`), MAX 500 — an
+  //     order of magnitude above `OutboxDispatcher`'s own largest hardcoded
+  //     batch (50), generous for real operational need while keeping a
+  //     single tick's per-candidate transaction count, and therefore its
+  //     worst-case DB/memory pressure, finite and bounded by construction.
+  WEBHOOK_RECOVERY_TICK_INTERVAL_MS: z.coerce.number().int().min(1000).max(300_000).default(30_000),
+  WEBHOOK_RECOVERY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
 });
 
 export type AppConfig = Readonly<z.infer<typeof envSchema>>;

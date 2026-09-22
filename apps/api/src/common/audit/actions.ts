@@ -198,6 +198,26 @@ export const AUDITABLE_ACTIONS = {
   'order.confirmed': { resourceType: 'order', security: false },
   'invoice.issued': { resourceType: 'invoice', security: false },
 
+  // ── payments (task 3b.5 Checkpoint G) ──────────────────────────────────
+  // Business events, NOT security events — ordinary financial activity
+  // recording, not permission/secret/attribution change. Bounded payloads
+  // only: ids, method, amount/currency, before/after state labels — never a
+  // raw webhook body/header/signature, never PAN/CVV/secret, never
+  // arbitrary sanitizedMetadata. `payment.recorded` is written once per
+  // immutable `Payment` row (C/D per tender; F once per verified CAPTURED
+  // conversion). `payment_attempt.reserved` marks a NEW async (Checkpoint
+  // E) reservation only — C/D's synchronous PENDING creation is not a
+  // durable reservation window (it transitions to CAPTURED in the same
+  // transaction) and is covered by `payment_attempt.state_changed`
+  // instead, alongside every other REAL PaymentAttempt state transition
+  // (never a same-state/no-op result). `provider_payment_event.exception`
+  // records a verified-but-unsafe-to-apply provider event (owner §G8) —
+  // reason-coded, never the raw provider payload.
+  'payment.recorded': { resourceType: 'payment', security: false },
+  'payment_attempt.reserved': { resourceType: 'payment_attempt', security: false },
+  'payment_attempt.state_changed': { resourceType: 'payment_attempt', security: false },
+  'provider_payment_event.exception': { resourceType: 'provider_payment_event', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

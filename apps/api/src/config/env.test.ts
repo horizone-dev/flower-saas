@@ -15,6 +15,76 @@ describe('loadConfig', () => {
     expect(cfg.REDIS_PORT).toBe(6380);
   });
 
+  // ══════════════ Task 3b.5 Checkpoint G final security/operational pass
+  // §2 — explicit, operationally-safe bounds (not merely "positive
+  // integer"): the tick interval has a floor guarding against an
+  // accidental tight loop, and a defensive ceiling; the batch size has a
+  // floor of 1 and a finite ceiling bounding per-tick DB/memory pressure.
+  // See `env.ts`'s own doc comment on these two fields for the exact
+  // reasoning behind 1000/300_000/1/500. ═══════════════════════════════
+  it('webhook recovery tick interval: defaults, valid range, and every rejection boundary', () => {
+    const cfg = loadConfig({});
+    expect(cfg.WEBHOOK_RECOVERY_TICK_INTERVAL_MS).toBe(30_000);
+
+    // a normal, mid-range value is accepted.
+    expect(
+      loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '5000' }).WEBHOOK_RECOVERY_TICK_INTERVAL_MS,
+    ).toBe(5000);
+    // the exact floor/ceiling are inclusive and accepted.
+    expect(
+      loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '1000' }).WEBHOOK_RECOVERY_TICK_INTERVAL_MS,
+    ).toBe(1000);
+    expect(
+      loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '300000' }).WEBHOOK_RECOVERY_TICK_INTERVAL_MS,
+    ).toBe(300_000);
+
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '0' })).toThrow(
+      EnvValidationError,
+    );
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '-1' })).toThrow(
+      EnvValidationError,
+    );
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: 'not-a-number' })).toThrow(
+      EnvValidationError,
+    );
+    // below the 1000ms floor — a value that WOULD create a tight loop.
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '1' })).toThrow(
+      EnvValidationError,
+    );
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '999' })).toThrow(
+      EnvValidationError,
+    );
+    // above the 300_000ms (5 minute) ceiling — an extreme, unreasonable value.
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '300001' })).toThrow(
+      EnvValidationError,
+    );
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_TICK_INTERVAL_MS: '999999999' })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it('webhook recovery batch size: defaults, valid range, and every rejection boundary', () => {
+    const cfg = loadConfig({});
+    expect(cfg.WEBHOOK_RECOVERY_BATCH_SIZE).toBe(20);
+
+    expect(loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: '5' }).WEBHOOK_RECOVERY_BATCH_SIZE).toBe(5);
+    expect(loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: '1' }).WEBHOOK_RECOVERY_BATCH_SIZE).toBe(1);
+    expect(loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: '500' }).WEBHOOK_RECOVERY_BATCH_SIZE).toBe(
+      500,
+    );
+
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: '0' })).toThrow(EnvValidationError);
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: '-5' })).toThrow(EnvValidationError);
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: 'not-a-number' })).toThrow(
+      EnvValidationError,
+    );
+    // above the 500 ceiling — never effectively unbounded.
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: '501' })).toThrow(EnvValidationError);
+    expect(() => loadConfig({ WEBHOOK_RECOVERY_BATCH_SIZE: '1000000' })).toThrow(
+      EnvValidationError,
+    );
+  });
+
   it('has explicit idempotency defaults, coercible from the environment', () => {
     const cfg = loadConfig({});
     expect(cfg.IDEMPOTENCY_TTL_SECONDS).toBe(60 * 60 * 24);

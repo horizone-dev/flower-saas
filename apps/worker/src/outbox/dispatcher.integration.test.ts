@@ -4,13 +4,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { Redis } from 'ioredis';
 import { runDispatcher } from '@flower/db';
-import { DbService, type BackendConfig } from '@flower/backend';
+import { DbService, liveChannel, type BackendConfig } from '@flower/backend';
 import { type Logger } from '@flower/service-runtime';
 import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
 import { allocateTenantSeq, discoverUnstampedTenants } from './seq-allocator.js';
 import { publishNextForTenant, publishReadyAcrossTenants } from './publisher.js';
 import { buildEnvelope, streamKey, ENVELOPE_FIELD, type OutboxRow } from './envelope.js';
 import { OutboxDispatcher } from './dispatcher.js';
+import { relayTick } from '../realtime-relay/relay.js';
 
 /**
  * The outbox dispatcher, end to end, against real PostgreSQL + Redis
@@ -689,5 +690,188 @@ describe('outbox dispatcher (integration — Postgres + Redis)', () => {
     } finally {
       await dispatcher.stop();
     }
+  });
+
+  // ══════════════ Task 3b.5 Checkpoint G proof pass §2 — payment-specific
+  // realtime delivery through the REAL outbox→dispatcher→relay pipeline
+  // (not a SQL-only outbox-table probe). `payment-audit-outbox.integration
+  // .test.ts` (apps/api) already proves the payments module writes a
+  // correctly-scoped `payments.payment_recorded`/`payments.attempt_state_
+  // changed` outbox row from real business logic; `apps/worker` cannot
+  // import `apps/api`'s payments code (separate app, no shared package
+  // boundary for it) so — mirroring this SAME file's own "task 3.10"
+  // company/branch routing tests immediately above, which likewise
+  // synthesize a realistic row rather than running real catalog code —
+  // this drives rows shaped EXACTLY like the real payments outbox writes
+  // through the ACTUAL `allocateTenantSeq`/`publishReadyAcrossTenants`/
+  // `relayTick` production functions (no mocks) and proves the full
+  // subscriber-facing result: the correct trusted companyId/branchId
+  // survive into the live PubSub envelope, and a different branch/company/
+  // tenant's subscriber view never receives another scope's event.
+  // Isolation is enforced two ways, matching the ADR-0017 design (never a
+  // POS terminal id, never a per-branch Redis topic): tenant isolation is
+  // STRUCTURAL (`rt:stream:<tenantId>`/`rt:live:<tenantId>` are physically
+  // separate keys/channels per tenant); company/branch isolation is
+  // ENVELOPE-FIELD based (`company_id`/`branch_id` on each frame), which a
+  // real subscriber/gateway filters on — simulated here by filtering the
+  // received frames exactly the way such a filter would. ═══════════════
+  describe('payments realtime routing (Task 3b.5 Checkpoint G §2)', () => {
+    // Two-phase, mirroring `relay.test.ts`'s own `subscribeOnce` exactly:
+    // the OUTER call is awaited first, which awaits the real Redis
+    // `SUBSCRIBE` registration before returning — only THEN is it safe to
+    // publish, since a message published before a subscriber has actually
+    // registered is simply lost (Redis PubSub never queues for latecomers).
+    // The nested `messages` promise is awaited separately, later.
+    async function subscribeOnce(
+      channel: string,
+      expectCount: number,
+    ): Promise<{ messages: Promise<string[]> }> {
+      const sub = new Redis(stack.redis.url);
+      const collected: string[] = [];
+      let resolveMessages: (v: string[]) => void;
+      const messages = new Promise<string[]>((resolve) => {
+        resolveMessages = resolve;
+      });
+      await sub.subscribe(channel);
+      sub.on('message', (_ch, msg: string) => {
+        collected.push(msg);
+        if (collected.length >= expectCount) resolveMessages(collected);
+      });
+      const timeout = new Promise<string[]>((resolve) =>
+        setTimeout(() => resolve(collected), 5_000),
+      );
+      return {
+        messages: Promise.race([messages, timeout]).finally(async () => {
+          await sub.unsubscribe(channel);
+          await sub.quit();
+        }),
+      };
+    }
+
+    function eventOf(raw: string): {
+      branch_id: string | null;
+      company_id: string | null;
+      type: string;
+      event_id: string;
+    } {
+      return (JSON.parse(raw) as { event: Record<string, unknown> }).event as {
+        branch_id: string | null;
+        company_id: string | null;
+        type: string;
+        event_id: string;
+      };
+    }
+
+    it('payments.payment_recorded and payments.attempt_state_changed: correct companyId/branchId survive outbox→dispatcher→relay into the live envelope, isolated from another branch/company/tenant', async () => {
+      const tenantId = randomUUID();
+      const otherTenantId = randomUUID();
+      const companyId = randomUUID();
+      const companyOther = randomUUID();
+      const branchX = randomUUID();
+      const branchY = randomUUID();
+      const branchOther = randomUUID();
+
+      const paymentId = randomUUID();
+      const attemptId = randomUUID();
+      const rowX = await insertOutboxRow({
+        tenantId,
+        companyId,
+        branchId: branchX,
+        aggregateType: 'payment',
+        aggregateId: paymentId,
+        eventType: 'payments.payment_recorded',
+        payload: {
+          paymentId,
+          invoiceId: randomUUID(),
+          method: 'CASH',
+          amountMinor: '100',
+          currencyCode: 'AED',
+        },
+      });
+      const rowY = await insertOutboxRow({
+        tenantId,
+        companyId,
+        branchId: branchY,
+        aggregateType: 'payment_attempt',
+        aggregateId: attemptId,
+        eventType: 'payments.attempt_state_changed',
+        payload: {
+          paymentAttemptId: attemptId,
+          invoiceId: randomUUID(),
+          fromState: 'PENDING',
+          toState: 'CAPTURED',
+        },
+      });
+      const rowOtherCo = await insertOutboxRow({
+        tenantId,
+        companyId: companyOther,
+        branchId: branchOther,
+        aggregateType: 'payment',
+        eventType: 'payments.payment_recorded',
+        payload: { paymentId: randomUUID(), method: 'CASH' },
+      });
+      const rowOtherTenant = await insertOutboxRow({
+        tenantId: otherTenantId,
+        companyId: randomUUID(),
+        branchId: randomUUID(),
+        aggregateType: 'payment',
+        eventType: 'payments.payment_recorded',
+        payload: { paymentId: randomUUID(), method: 'CASH' },
+      });
+
+      await allocateTenantSeq(db, tenantId, 10);
+      await allocateTenantSeq(db, otherTenantId, 10);
+
+      const tenantSub = await subscribeOnce(liveChannel(tenantId), 3);
+      const otherTenantSub = await subscribeOnce(liveChannel(otherTenantId), 1);
+
+      await publishReadyAcrossTenants(db, redis, { perTenantBatchSize: 10 });
+      const relayed = await relayTick(redis, { consumerName: 'g-proof' });
+      expect(relayed.tenantsSeen).toBe(2);
+      expect(relayed.published).toBe(4);
+
+      const tenantFrames = (await tenantSub.messages).map(eventOf);
+      const otherTenantFrames = (await otherTenantSub.messages).map(eventOf);
+
+      expect(tenantFrames).toHaveLength(3);
+      expect(otherTenantFrames).toHaveLength(1);
+
+      // ── tenant isolation (structural — a different stream/channel key) ──
+      expect(otherTenantFrames[0]!.event_id).toBe(rowOtherTenant.id);
+      expect(tenantFrames.some((f) => f.event_id === rowOtherTenant.id)).toBe(false);
+      const otherTenantRaw = JSON.stringify(otherTenantFrames);
+      expect(otherTenantRaw).not.toContain(rowX.id);
+      expect(otherTenantRaw).not.toContain(rowY.id);
+      expect(otherTenantRaw).not.toContain(rowOtherCo.id);
+
+      // ── payment_recorded frame: correct company/branch, findable by id ──
+      const recordedX = tenantFrames.find((f) => f.event_id === rowX.id);
+      expect(recordedX).toMatchObject({
+        type: 'payments.payment_recorded',
+        company_id: companyId,
+        branch_id: branchX,
+      });
+
+      // ── attempt_state_changed frame: correct company/branch ─────────────
+      const stateChangedY = tenantFrames.find((f) => f.event_id === rowY.id);
+      expect(stateChangedY).toMatchObject({
+        type: 'payments.attempt_state_changed',
+        company_id: companyId,
+        branch_id: branchY,
+      });
+
+      // ── company/branch isolation, envelope-field based (never a POS
+      //    terminal id, never a per-branch Redis topic — ADR-0017): a
+      //    subscriber-side filter for "Branch X only" must exclude both
+      //    Branch Y's event AND the other company's event, even though all
+      //    three share the SAME tenant channel. ───────────────────────────
+      const branchXOnly = tenantFrames.filter((f) => f.branch_id === branchX);
+      expect(branchXOnly).toHaveLength(1);
+      expect(branchXOnly[0]!.event_id).toBe(rowX.id);
+
+      const companyOnly = tenantFrames.filter((f) => f.company_id === companyId);
+      expect(companyOnly.map((f) => f.event_id).sort()).toEqual([rowX.id, rowY.id].sort());
+      expect(companyOnly.some((f) => f.event_id === rowOtherCo.id)).toBe(false);
+    });
   });
 });

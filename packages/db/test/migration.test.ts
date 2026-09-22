@@ -802,14 +802,15 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
       // forbidden through Phase 3a. `account` / `accounting_period` /
       // `journal_entry` / `journal_line` are task 3b.1 (Phase 3b, approved);
       // `order` / `order_line` / `invoice` / `document_number_counter` are
-      // task 3b.3 Checkpoint A (Phase 3b, approved) — `inventory_*` / `payment`
-      // remain Phase 5 / later 3b tasks.
+      // task 3b.3 Checkpoint A (Phase 3b, approved); `payment` /
+      // `payment_attempt` / `payment_allocation` / `payment_attempt_event` /
+      // `provider_payment_event` / `payment_webhook_endpoint` are task 3b.5
+      // Checkpoint B (Phase 3b, approved) — `inventory_*` remains Phase 5.
       for (const forbidden of [
         'inventory_item',
         'branch_inventory_balance',
         'inventory_movement',
         'stock_reservation',
-        'payment',
       ]) {
         expect(present.has(forbidden), `${forbidden} must NOT exist yet`).toBe(false);
       }
@@ -3993,6 +3994,110 @@ describe('packages/db — Phase 1 migration (identity / tenancy / RBAC / RLS)', 
         [['credit:view', 'credit:manage', 'advance:manage', 'giftcards:manage']],
       );
       expect(rows).toEqual([]);
+    });
+  });
+
+  describe('payments permissions role backfill (task 3b.5)', () => {
+    it('owner/admin/manager/cashier/sales ALL get payments:view + payments:collect identically, other roles get none, unrelated pre-existing permissions are preserved, backfill is idempotent', async () => {
+      const T = '0000dddd-0000-7000-8000-00000000dd55';
+      await pool.query(
+        `INSERT INTO tenant (id, slug, name, region, status, "planVersionId", "updatedAt")
+         VALUES ($1,'pay-bf','pay-bf','AE','ACTIVE','00000000-0000-7000-8000-000000000002', now())
+         ON CONFLICT (id) DO NOTHING`,
+        [T],
+      );
+      const roleIds: Record<string, string> = {};
+      for (const [key, isSystem] of [
+        ['owner', true],
+        ['admin', true],
+        ['manager', true],
+        ['cashier', true],
+        ['sales', true],
+        ['supervisor', true],
+        ['custom_role', false],
+      ] as const) {
+        const r = await pool.query(
+          `INSERT INTO role (id,"tenantId",key,name,"isSystem","updatedAt")
+           VALUES (uuidv7(),$1,$2,$2,$3, now()) RETURNING id`,
+          [T, key, isSystem],
+        );
+        roleIds[key] = r.rows[0].id;
+      }
+
+      // simulate a pre-existing permission from an EARLIER phase backfill
+      // (e.g. task 3b.2's customers:view) already present on owner — the
+      // payments backfill must never touch it.
+      await pool.query(`ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;`);
+      await pool.query(
+        `INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+         VALUES (uuidv7(), $1, $2, 'customers:view')`,
+        [T, roleIds['owner']],
+      );
+      await pool.query(`ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`);
+
+      // re-run the migration's exact payments backfill statement
+      // (`20260923130000_payments_permissions/migration.sql`).
+      const backfill = `
+        ALTER TABLE "role"            NO FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" NO FORCE ROW LEVEL SECURITY;
+        INSERT INTO "role_permission" ("id","tenantId","roleId","permissionKey")
+        SELECT uuidv7(), r."tenantId", r."id", k.key
+          FROM "role" r CROSS JOIN (VALUES ('payments:view'), ('payments:collect')) AS k(key)
+         WHERE r."isSystem" = true AND r."key" IN ('owner', 'admin', 'manager', 'cashier', 'sales')
+        ON CONFLICT ("roleId","permissionKey") DO NOTHING;
+        ALTER TABLE "role"            FORCE ROW LEVEL SECURITY;
+        ALTER TABLE "role_permission" FORCE ROW LEVEL SECURITY;`;
+      await pool.query(backfill);
+      await pool.query(backfill); // twice — must not create duplicates
+
+      const perms = async (roleId: string): Promise<string[]> =>
+        (
+          await pool.query<{ permissionKey: string }>(
+            `SELECT "permissionKey" FROM "role_permission" WHERE "roleId" = $1 ORDER BY "permissionKey"`,
+            [roleId],
+          )
+        ).rows.map((r) => r.permissionKey);
+
+      expect(await perms(roleIds['owner']!)).toEqual([
+        'customers:view', // pre-existing permission preserved, not removed
+        'payments:collect',
+        'payments:view',
+      ]);
+      for (const role of ['admin', 'manager', 'cashier', 'sales'] as const) {
+        expect(await perms(roleIds[role]!)).toEqual(['payments:collect', 'payments:view']);
+      }
+      expect(await perms(roleIds['supervisor']!)).toEqual([]); // untouched
+      expect(await perms(roleIds['custom_role']!)).toEqual([]); // untouched
+
+      const force = await pool.query<{ relname: string; f: boolean }>(
+        `SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relname = ANY($1)`,
+        [['role', 'role_permission']],
+      );
+      for (const r of force.rows) expect(r.f, `${r.relname} FORCE restored`).toBe(true);
+
+      await pool.query(`DELETE FROM "role_permission" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "role" WHERE "tenantId" = $1`, [T]);
+      await pool.query(`DELETE FROM "tenant" WHERE id = $1`, [T]);
+    });
+
+    it('no forbidden future key (payments:manage/webhook:process/refund/void/settle) is registered — only the frozen 2-key contract', async () => {
+      const { rows } = await pool.query<{ key: string }>(
+        `SELECT key FROM permission_registry WHERE key = ANY($1)`,
+        [
+          [
+            'payments:manage',
+            'payments:webhook:process',
+            'payments:refund',
+            'payments:void',
+            'payments:settle',
+          ],
+        ],
+      );
+      expect(rows).toEqual([]);
+      const { rows: registered } = await pool.query<{ key: string }>(
+        `SELECT key FROM permission_registry WHERE "groupKey" = 'payments' ORDER BY key`,
+      );
+      expect(registered.map((r) => r.key)).toEqual(['payments:collect', 'payments:view']);
     });
   });
 

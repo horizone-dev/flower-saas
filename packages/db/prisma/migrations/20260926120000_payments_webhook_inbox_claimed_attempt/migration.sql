@@ -1,0 +1,32 @@
+-- Phase 3b task 3b.5 CHECKPOINT F (reliability/inbox-integrity pass) —
+-- narrow corrective follow-up to this checkpoint's OWN prior migration
+-- `20260925120000_payments_webhook_inbox_routing` (still unreleased —
+-- corrected here rather than silently re-edited, per repository policy of
+-- one frozen artifact per migration file; the prior file is left untouched
+-- on disk).
+--
+-- ══════════════ DEFECT — the composite FK was too strict for an external
+-- inbox ═══════════════════════════════════════════════════════════════════
+-- The prior migration added a composite FK requiring
+-- `provider_payment_event.paymentAttemptId` to reference a REAL, existing
+-- `payment_attempt` row. That makes the inbox reject (at INSERT time) a
+-- cryptographically-valid, correctly-authenticated provider event whose
+-- claimed attempt id happens to be unknown/nonexistent/wrong-scope locally
+-- — exactly the situation the inbox exists to durably record for
+-- reconciliation. `paymentAttemptId` is the provider-authenticated,
+-- NORMALIZED, but merely CLAIMED internal attempt id — correlating it
+-- against a real attempt (same tenant/company/branch/credential, correct
+-- Order binding) is the PROCESSOR's job (`WebhookEventProcessorRepository`,
+-- application code, unchanged by this migration), never a DB-level
+-- precondition for accepting the durable evidence itself. Trusted scope
+-- continues to come ONLY from `PaymentWebhookEndpoint` ->
+-- `ProviderCredential` (the columns this row already carries independently
+-- of `paymentAttemptId`) — never from the claimed attempt id.
+--
+-- Removing this FK does NOT weaken `PaymentAttempt`/`Payment`/
+-- `PaymentAllocation`'s own FKs — none of those change. `paymentAttemptId`
+-- remains UUID-typed, indexed, and immutable-after-insert (B's own
+-- transition trigger, extended by the prior F migration, already protects
+-- it — unaffected by this change).
+ALTER TABLE "provider_payment_event"
+  DROP CONSTRAINT "provider_payment_event_attempt_scope_fkey";

@@ -607,4 +607,226 @@ describe('realtime gateway (integration — Redis, 2 real instances)', () => {
     );
     expect(matching).toHaveLength(1);
   });
+
+  // ══════════════ Task 3b.5 Checkpoint G final security pass §1 — payments
+  // realtime delivery goes through this SAME server-side authorization
+  // boundary (`GatewayHub.deliverLive` → `isAuthorized`), not a client-side
+  // filter. `isAuthorized` (auth/topics.ts) is fully generic over `type` —
+  // it never special-cases catalog vs. payments events — so this proves the
+  // EXISTING mechanism already covers `payments.payment_recorded`/
+  // `payments.attempt_state_changed` correctly, with zero new code. A
+  // session authorized ONLY for Company C1 / Branch B1 must receive ONLY
+  // the C1/B1 payment events out of six published events spanning a second
+  // branch, a second company, and a second tenant — and never merely
+  // "receive-then-discard" the others: an unauthorized entry surfaces as a
+  // bare `{type:'heartbeat', cursor}` frame with zero business fields
+  // (proven by the existing "no business field leaks" test above for the
+  // generic mechanism; this test additionally greps the raw wire bytes for
+  // every unauthorized payment id, event type and amount to prove it holds
+  // for payment-shaped payloads specifically). ═══════════════════════════
+  describe('payments-specific realtime authorization (Task 3b.5 Checkpoint G final pass §1)', () => {
+    it('a Company C1 / Branch B1 - only session receives ONLY the C1/B1 payment events out of six published across another branch/company/tenant', async () => {
+      const tenantId = randomUUID();
+      const otherTenantId = randomUUID();
+      const companyC1 = randomUUID();
+      const companyC2 = randomUUID();
+      const branchB1 = randomUUID();
+      const branchB2 = randomUUID();
+      const branchOther = randomUUID();
+
+      const s = session({
+        tenantId,
+        access: { ...session().access!, companyScope: [companyC1], branchScope: [branchB1] },
+      });
+      const token = await login(s);
+      const gw = await bootGateway();
+      const client = await connect(gw.port, token);
+
+      const paymentIdB1 = `leak-check-payment-${randomUUID()}`;
+      const paymentIdB2 = `leak-check-payment-${randomUUID()}`;
+      const paymentIdOtherCo = `leak-check-payment-${randomUUID()}`;
+      const paymentIdOtherTenant = `leak-check-payment-${randomUUID()}`;
+      const attemptIdB1 = `leak-check-attempt-${randomUUID()}`;
+      const attemptIdB2 = `leak-check-attempt-${randomUUID()}`;
+
+      // 1. payments.payment_recorded for C1/B1 — AUTHORIZED
+      const evAuthorizedPayment = envelope({
+        tenant_id: tenantId,
+        company_id: companyC1,
+        branch_id: branchB1,
+        type: 'payments.payment_recorded',
+        resource_type: 'payment',
+        resource_id: paymentIdB1,
+      });
+      // 2. payments.payment_recorded for C1/B2 — wrong branch
+      const evWrongBranch = envelope({
+        tenant_id: tenantId,
+        company_id: companyC1,
+        branch_id: branchB2,
+        type: 'payments.payment_recorded',
+        resource_type: 'payment',
+        resource_id: paymentIdB2,
+      });
+      // 3. payments.payment_recorded for C2/Bx — wrong company
+      const evWrongCompany = envelope({
+        tenant_id: tenantId,
+        company_id: companyC2,
+        branch_id: branchOther,
+        type: 'payments.payment_recorded',
+        resource_type: 'payment',
+        resource_id: paymentIdOtherCo,
+      });
+      // 4. an event for a DIFFERENT tenant entirely
+      const evOtherTenant = envelope({
+        tenant_id: otherTenantId,
+        company_id: randomUUID(),
+        branch_id: randomUUID(),
+        type: 'payments.payment_recorded',
+        resource_type: 'payment',
+        resource_id: paymentIdOtherTenant,
+      });
+      // 5. payments.attempt_state_changed for C1/B1 — AUTHORIZED
+      const evAuthorizedAttempt = envelope({
+        tenant_id: tenantId,
+        company_id: companyC1,
+        branch_id: branchB1,
+        type: 'payments.attempt_state_changed',
+        resource_type: 'payment_attempt',
+        resource_id: attemptIdB1,
+      });
+      // 6. payments.attempt_state_changed for C1/B2 — wrong branch
+      const evWrongBranchAttempt = envelope({
+        tenant_id: tenantId,
+        company_id: companyC1,
+        branch_id: branchB2,
+        type: 'payments.attempt_state_changed',
+        resource_type: 'payment_attempt',
+        resource_id: attemptIdB2,
+      });
+
+      await publishLive(tenantId, evAuthorizedPayment);
+      await publishLive(tenantId, evWrongBranch);
+      await publishLive(tenantId, evWrongCompany);
+      await publishLive(otherTenantId, evOtherTenant); // published on ITS OWN tenant channel — this socket never subscribed to it
+      await publishLive(tenantId, evAuthorizedAttempt);
+      await publishLive(tenantId, evWrongBranchAttempt);
+
+      // both authorized events arrive.
+      const gotPayment = await client.waitFor(
+        (m) => m['type'] === 'event' && eventOf(m)['resource_id'] === paymentIdB1,
+      );
+      expect(eventOf(gotPayment)).toMatchObject({
+        type: 'payments.payment_recorded',
+        company_id: companyC1,
+        branch_id: branchB1,
+      });
+      const gotAttempt = await client.waitFor(
+        (m) => m['type'] === 'event' && eventOf(m)['resource_id'] === attemptIdB1,
+      );
+      expect(eventOf(gotAttempt)).toMatchObject({
+        type: 'payments.attempt_state_changed',
+        company_id: companyC1,
+        branch_id: branchB1,
+      });
+
+      await sleep(300); // give every unauthorized delivery every chance to arrive
+
+      // exactly two 'event' frames ever arrived — the two authorized ones.
+      const eventFrames = client.messages.filter((m) => m['type'] === 'event');
+      expect(eventFrames).toHaveLength(2);
+      const deliveredIds = eventFrames.map((m) => eventOf(m)['resource_id']);
+      expect(deliveredIds.sort()).toEqual([attemptIdB1, paymentIdB1].sort());
+
+      // the raw wire bytes of EVERY message this socket ever received never
+      // contain any unauthorized payment/attempt id — proving the
+      // unauthorized payloads were never even serialized to this socket,
+      // not merely filtered client-side after arrival.
+      const allRawText = JSON.stringify(client.messages);
+      expect(allRawText).not.toContain(paymentIdB2);
+      expect(allRawText).not.toContain(paymentIdOtherCo);
+      expect(allRawText).not.toContain(paymentIdOtherTenant);
+      expect(allRawText).not.toContain(attemptIdB2);
+    });
+
+    // ── Owner/Manager multi-branch behavior — the EXISTING permission
+    // architecture (an explicit list of authorized branches, or 'ALL') is
+    // what governs a wider-scoped session too; nothing payment-specific is
+    // needed. ─────────────────────────────────────────────────────────────
+    it('a multi-branch-authorized session (e.g. an Owner/Manager) receives payment events for EVERY branch in its explicit scope, still never a different company', async () => {
+      const tenantId = randomUUID();
+      const companyC1 = randomUUID();
+      const companyC2 = randomUUID();
+      const branchB1 = randomUUID();
+      const branchB2 = randomUUID();
+
+      const managerSession = session({
+        tenantId,
+        access: {
+          ...session().access!,
+          companyScope: [companyC1],
+          branchScope: [branchB1, branchB2], // explicit multi-branch authorization
+        },
+      });
+      const managerToken = await login(managerSession);
+      const ownerSession = session({ tenantId }); // ALL / ALL
+      const ownerToken = await login(ownerSession);
+
+      const gw = await bootGateway();
+      const managerClient = await connect(gw.port, managerToken);
+      const ownerClient = await connect(gw.port, ownerToken);
+
+      const paymentB1 = randomUUID();
+      const paymentB2 = randomUUID();
+      const paymentOtherCo = randomUUID();
+
+      await publishLive(
+        tenantId,
+        envelope({
+          tenant_id: tenantId,
+          company_id: companyC1,
+          branch_id: branchB1,
+          type: 'payments.payment_recorded',
+          resource_id: paymentB1,
+        }),
+      );
+      await publishLive(
+        tenantId,
+        envelope({
+          tenant_id: tenantId,
+          company_id: companyC1,
+          branch_id: branchB2,
+          type: 'payments.payment_recorded',
+          resource_id: paymentB2,
+        }),
+      );
+      await publishLive(
+        tenantId,
+        envelope({
+          tenant_id: tenantId,
+          company_id: companyC2,
+          branch_id: randomUUID(),
+          type: 'payments.payment_recorded',
+          resource_id: paymentOtherCo,
+        }),
+      );
+
+      // the multi-branch manager receives BOTH of its own company's branch
+      // events...
+      await managerClient.waitFor(
+        (m) => m['type'] === 'event' && eventOf(m)['resource_id'] === paymentB1,
+      );
+      await managerClient.waitFor(
+        (m) => m['type'] === 'event' && eventOf(m)['resource_id'] === paymentB2,
+      );
+      await sleep(300);
+      // ...but never the other company's event.
+      const managerRaw = JSON.stringify(managerClient.messages);
+      expect(managerRaw).not.toContain(paymentOtherCo);
+
+      // the Owner (ALL/ALL) receives all three, including the other company.
+      await ownerClient.waitFor(
+        (m) => m['type'] === 'event' && eventOf(m)['resource_id'] === paymentOtherCo,
+      );
+    });
+  });
 });

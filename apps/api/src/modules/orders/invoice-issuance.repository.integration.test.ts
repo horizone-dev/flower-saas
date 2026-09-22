@@ -680,19 +680,23 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
   it('no PostingEngine/payment/AR/inventory effect from any issuance in this suite', async () => {
     const je = await client.query(`SELECT count(*)::int AS n FROM journal_entry`);
     expect(je.rows[0].n).toBe(0);
+    // `ar_transaction`/`advance_transaction` (task 3b.6) and
+    // `inventory_movement` (Phase 5) are not yet implemented — table
+    // existence itself is still the correct check for those.
     const tables = await client.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables WHERE table_name = ANY($1)`,
-      [
-        [
-          'payment',
-          'payment_attempt',
-          'ar_transaction',
-          'advance_transaction',
-          'inventory_movement',
-        ],
-      ],
+      [['ar_transaction', 'advance_transaction', 'inventory_movement']],
     );
     expect(tables.rows).toHaveLength(0);
+    // `payment`/`payment_attempt` (task 3b.5) DO now exist in this schema —
+    // the invariant this test actually proves is that issuing an invoice
+    // never itself creates a row in either, since Payment/PaymentAttempt
+    // creation lives entirely in the separate payments module and is never
+    // triggered as an issuance side effect.
+    const payment = await client.query(`SELECT count(*)::int AS n FROM payment`);
+    expect(payment.rows[0].n).toBe(0);
+    const attempt = await client.query(`SELECT count(*)::int AS n FROM payment_attempt`);
+    expect(attempt.rows[0].n).toBe(0);
   });
 
   // ── authoritative fingerprint recomputation at issuance (Checkpoint C
