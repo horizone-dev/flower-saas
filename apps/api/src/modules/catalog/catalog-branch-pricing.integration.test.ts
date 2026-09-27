@@ -1447,10 +1447,12 @@ describe('branch price override + availability (task 3.8, integration)', () => {
       expect(latest.branchId).toBeNull();
       expect(latest.aggregateType).toBe('company_variant_price_set');
       expect(latest.resourceVersion).toBe('2');
-      expect(latest.payload['variantId']).toBe(v);
-      expect(latest.payload['changedUomCodes']).toEqual(['piece']);
-      const blob = JSON.stringify(latest.payload);
-      expect(blob).not.toMatch(/amountMinor|"600"|AED|sell/i);
+      // exact shape (not a substring scan of the serialized blob — a
+      // `variantId` UUID can itself contain hex runs like "aed9" that
+      // false-positively match a `/AED/i` currency-code regex) — this proves
+      // the payload's only two keys are `variantId`/`changedUomCodes`, so no
+      // Money/currency/sell field can be present under any key name.
+      expect(latest.payload).toEqual({ variantId: v, changedUomCodes: ['piece'] });
       expect(latest.dispatchedAt).toBeNull();
     });
 
