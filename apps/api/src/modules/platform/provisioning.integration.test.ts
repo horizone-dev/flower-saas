@@ -187,14 +187,15 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
 
       // task 3b.1 — a one-time seed from the same authoritative country
       // reference row read above (Country.defaultTimezone), never re-applied
-      // afterward; and the 15 frozen Chart-of-Accounts rows (14 since 3b.1,
-      // + task 3b.6's additive EQUITY.OPENING_BALANCE), one GL per Company.
+      // afterward; and the 16 frozen Chart-of-Accounts rows (14 since 3b.1,
+      // + task 3b.6's additive EQUITY.OPENING_BALANCE, + task 3b.7's additive
+      // EXPENSE.PAYMENT_PROCESSING_FEE), one GL per Company.
       expect(company.accountingTimezone).toBe('Asia/Dubai');
       const accounts = await q(
         `SELECT key, category, "displayCode", "displayName" FROM account WHERE "tenantId"=$1 ORDER BY key`,
         [tenantId],
       );
-      expect(accounts).toHaveLength(15);
+      expect(accounts).toHaveLength(16);
       expect(accounts.map((a) => a.key)).toContain('ASSET.CASH_ON_HAND');
       expect(accounts.map((a) => a.key)).toContain('EXPENSE.RECEIVABLE_WRITE_OFF');
       const cash = accounts.find((a) => a.key === 'ASSET.CASH_ON_HAND');

@@ -281,6 +281,9 @@ model Tenant {
   customerAccountEntries                CustomerAccountEntry[]
   customerReceivablePaymentApplications CustomerReceivablePaymentApplication[]
   customerOpeningBalanceInits           CustomerOpeningBalanceInit[]
+  settlementBatches                     SettlementBatch[]
+  settlementLines                       SettlementLine[]
+  settlementApplications                SettlementApplication[]
 
   @@map("tenant")
 }
@@ -611,6 +614,9 @@ model Company {
   customerAccountEntries                CustomerAccountEntry[]
   customerReceivablePaymentApplications CustomerReceivablePaymentApplication[]
   customerOpeningBalanceInits           CustomerOpeningBalanceInit[]
+  settlementBatches                     SettlementBatch[]
+  settlementLines                       SettlementLine[]
+  settlementApplications                SettlementApplication[]
 
   /// task 3.7 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`                  ← `company_variant_price_set` tenant-safe FK
@@ -677,6 +683,9 @@ model Branch {
   customerAccountEntries                CustomerAccountEntry[]
   customerReceivablePaymentApplications CustomerReceivablePaymentApplication[]
   customerOpeningBalanceInits           CustomerOpeningBalanceInit[]
+  settlementBatches                     SettlementBatch[]
+  settlementLines                       SettlementLine[]
+  settlementApplications                SettlementApplication[]
 
   /// task 3.8 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`             ← `branch_variant_*` tenant-safe FK
@@ -837,6 +846,7 @@ model JournalEntry {
   createdAt                DateTime         @default(now()) @db.Timestamptz(6)
 
   lines JournalLine[]
+  settlementBatch SettlementBatch?
 
   /// FK target: `journal_line.(tenantId, companyId, journalEntryId)` and the
   /// self-referencing reversal FK below.
@@ -1508,6 +1518,7 @@ model ProviderCredential {
   paymentAttempts PaymentAttempt[]
   webhookEndpoint PaymentWebhookEndpoint?
   providerEvents  ProviderPaymentEvent[]
+  settlementBatches SettlementBatch[]
 
   @@index([tenantId, provider])
   @@map("provider_credential")
@@ -2651,6 +2662,8 @@ model Payment {
   customerAdvances              CustomerAdvance[]
   receivablePaymentApplications CustomerReceivablePaymentApplication[]
   accountEntry                  CustomerAccountEntry?
+  settlementLines                SettlementLine[]
+  settlementApplications         SettlementApplication[]
 
   /// FK targets: `(tenantId, companyId, branchId, id)` proves scope to
   /// `payment_allocation`'s own composite FK; `(tenantId, id)` /
@@ -3282,4 +3295,171 @@ model CustomerOpeningBalanceInit {
   @@unique([tenantId, companyId, branchId, customerCompanyAccountId])
   @@index([tenantId, companyId])
   @@map("customer_opening_balance_init")
+}
+
+// ─────── task 3b.7 Checkpoint B — provider settlement reconciliation ─────────
+// SettlementBatch = one provider payout/settlement report (one bank deposit).
+// SettlementLine = one provider-reported line within it, evidence only — NOT
+// consumption authority. SettlementApplication = the ONLY financial
+// settlement-consumption authority (one row per matched Line, DB-enforced
+// 1:1). DRAFT -> FINALIZED is terminal (no reopen). Deferred completeness +
+// journal-linkage backstops live in the migration SQL (mirrors the
+// `journal_entry` sealed/balanced trigger set exactly).
+
+/// One provider payout/settlement report. `providerFeeMinor`/`netBankMinor`
+/// split `grossSettlementMinor` (gross = net + fee, DB CHECK). `state`
+/// DRAFT | FINALIZED (CHECK) — FINALIZED is terminal in 3b.7 (DB-enforced, no
+/// FINALIZED -> DRAFT). `journalEntryId` is set exactly once, atomically with
+/// FINALIZE; the migration's deferred constraint trigger proves the
+/// referenced JournalEntry belongs EXACTLY to this batch (same
+/// tenant/company, sourceKind='SETTLEMENT_BATCH', sourceId=this batch's id,
+/// postingDate=providerSettlementDate, currencyCode match, sealed) before
+/// allowing the FINALIZED commit to stand.
+model SettlementBatch {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  /// must be branch-scoped (companyId AND branchId both NOT NULL on the
+  /// referenced row) and must exactly match this row's own tenant/company/
+  /// branch — DB trigger, same structural precedent as `payment_attempt`.
+  providerCredentialId String             @db.Uuid
+  providerCredential   ProviderCredential @relation(fields: [providerCredentialId], references: [id], onDelete: Restrict)
+
+  /// the provider's own settlement/payout identifier. UNIQUE with
+  /// providerCredentialId — the same provider can never report the same
+  /// settlement twice under one credential.
+  externalSettlementId String
+
+  /// the civil date the provider states funds were settled — becomes the
+  /// posted journal's `postingDate` verbatim (never re-derived).
+  providerSettlementDate DateTime @db.Date
+
+  grossSettlementMinor BigInt
+  providerFeeMinor     BigInt
+  netBankMinor         BigInt
+
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  /// DRAFT | FINALIZED (CHECK) — terminal once FINALIZED.
+  state String @default("DRAFT")
+
+  /// optimistic concurrency (If-Match pattern, matching every other mutation)
+  version Int @default(1)
+
+  /// set exactly once, atomically with FINALIZE — see model doc comment.
+  journalEntryId String?      @unique @db.Uuid
+  journalEntry   JournalEntry? @relation(fields: [journalEntryId], references: [id], onDelete: Restrict)
+
+  createdByUserId String?   @db.Uuid
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  finalizedAt     DateTime? @db.Timestamptz(6)
+
+  lines        SettlementLine[]
+  applications SettlementApplication[]
+
+  /// FK targets: `(tenantId, companyId, branchId, id)` proves scope to
+  /// `settlement_line`/`settlement_application`'s own composite FKs.
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  @@unique([tenantId, companyId, branchId, id])
+  @@unique([providerCredentialId, externalSettlementId])
+  @@index([tenantId, companyId, branchId])
+  @@map("settlement_batch")
+}
+
+/// One provider-reported line within a SettlementBatch — evidence, NOT
+/// consumption authority (see `SettlementApplication`). `externalLineId` is
+/// UNIQUE only within its own batch (`(batchId, externalLineId)` — NOT
+/// `(providerCredentialId, externalLineId)`; deliberately no
+/// `providerCredentialId` column on this model — a generic provider-neutral
+/// settlement core cannot assume line ids stay unique across every
+/// settlement produced under one credential). One Line matches at most one
+/// Payment — no split-line-across-Payments model. `lineKind` is closed —
+/// 3b.7 persists only `SETTLEMENT`.
+model SettlementLine {
+  id        String          @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String          @db.Uuid
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String          @db.Uuid
+  company   Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String          @db.Uuid
+  branch    Branch          @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  batchId   String          @db.Uuid
+  batch     SettlementBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  /// the provider's own line identifier within its settlement report,
+  /// nullable (not every provider reports one). Postgres UNIQUE treats
+  /// multiple NULLs as distinct, so this needs no partial index.
+  externalLineId String?
+
+  /// provider-supplied matching/transaction reference used by the matching
+  /// service — distinct from `externalLineId` (the provider's OWN line
+  /// identity vs. a cross-reference used to find the matching Payment).
+  providerReference String?
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  /// nullable while unmatched / while the batch is DRAFT. Immutable once the
+  /// parent batch is FINALIZED (DB trigger).
+  matchedPaymentId String?  @db.Uuid
+  matchedPayment   Payment? @relation(fields: [matchedPaymentId], references: [id], onDelete: Restrict)
+
+  /// closed set — 3b.7 persists only 'SETTLEMENT'.
+  lineKind String @default("SETTLEMENT")
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  application SettlementApplication?
+
+  @@unique([tenantId, id])
+  @@unique([batchId, externalLineId])
+  @@index([batchId])
+  @@index([matchedPaymentId])
+  @@map("settlement_line")
+}
+
+/// The ONLY financial settlement-consumption authority — `SettlementLine` is
+/// evidence only. DB-enforced 1:1 with its Line (`lineId` UNIQUE — at most
+/// one Application per Line). An immediate integrity trigger (migration SQL)
+/// verifies Application.batchId = Line.batchId, Application.paymentId =
+/// Line.matchedPaymentId (which must be NOT NULL), Application Money = Line
+/// Money, matching scope, AND that the Payment is settlement-eligible
+/// (provider-backed, matching credential, matching currency) with capacity
+/// remaining (`fn_lock_and_validate_payment_settlement_capacity`).
+/// Append-only — no UPDATE, no DELETE, ever (DB trigger).
+model SettlementApplication {
+  id        String          @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String          @db.Uuid
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String          @db.Uuid
+  company   Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String          @db.Uuid
+  branch    Branch          @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  batchId   String          @db.Uuid
+  batch     SettlementBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  lineId String         @unique @db.Uuid
+  line   SettlementLine @relation(fields: [lineId], references: [id], onDelete: Restrict)
+
+  paymentId String  @db.Uuid
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@index([batchId])
+  @@index([paymentId])
+  @@map("settlement_application")
 }
