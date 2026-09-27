@@ -18,6 +18,34 @@ import { ProviderPaymentEventInboxRepository } from './provider-payment-event-in
 import { WebhookEventProcessorRepository } from './webhook-event-processor.repository.js';
 import { PaymentWebhookRepository } from './payment-webhook.repository.js';
 import { WebhookRecoveryProcessor } from './webhook-recovery.repository.js';
+import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
+import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import { PostingEngineService } from '../accounting/posting-engine.service.js';
+import { CompanyFinancialConfigRepository } from '../accounting/company-financial-config.repository.js';
+import { AccountingPeriodRepository } from '../accounting/accounting-period.repository.js';
+import { AccountRepository } from '../accounting/account.repository.js';
+import { SystemClock } from '../../common/clock/clock.js';
+
+/** task 3b.6 Checkpoint D — the two new producer-side dependencies. */
+function makeReceiptSupport(db: DbService): {
+  attribution: PaymentCustomerAttributionRepository;
+  effects: CustomerReceiptEffectsRepository;
+} {
+  const postingEngine = new PostingEngineService(
+    new CompanyFinancialConfigRepository(
+      db,
+      new AuditWriter(db),
+      new AccountRepository(db, new AuditWriter(db)),
+    ),
+    new AccountingPeriodRepository(db, new AuditWriter(db)),
+    new AuditWriter(db),
+    new SystemClock(),
+  );
+  return {
+    attribution: new PaymentCustomerAttributionRepository(),
+    effects: new CustomerReceiptEffectsRepository(postingEngine, new AuditWriter(db)),
+  };
+}
 import type {
   PaymentProvider,
   PaymentProviderInitiationResult,
@@ -108,6 +136,7 @@ describe('Checkpoint G — audit / business outbox / rollback / realtime-isolati
   let pool: pg.Pool;
   let prisma: PrismaClient;
   let db: DbService;
+  let receiptSupport: ReturnType<typeof makeReceiptSupport>;
   let collection: PaymentCollectionRepository;
   let reservation: PaymentAttemptReservationRepository;
   let providerConfig: ProviderConfigRepository;
@@ -121,14 +150,25 @@ describe('Checkpoint G — audit / business outbox / rollback / realtime-isolati
     pool = new pg.Pool({ connectionString: stack.postgres.url });
     prisma = createPrismaClient({ connectionString: stack.postgres.url });
     db = new DbService({ DATABASE_URL: stack.postgres.url } as unknown as BackendConfig);
-    collection = new PaymentCollectionRepository(new AuditWriter(db), new OutboxWriter(db));
+    receiptSupport = makeReceiptSupport(db);
+    collection = new PaymentCollectionRepository(
+      new AuditWriter(db),
+      new OutboxWriter(db),
+      receiptSupport.attribution,
+      receiptSupport.effects,
+    );
     reservation = new PaymentAttemptReservationRepository(
       new AuditWriter(db),
       new OutboxWriter(db),
     );
     providerConfig = new ProviderConfigRepository(db);
     bootstrap = new WebhookBootstrapRepository(db);
-    processor = new WebhookEventProcessorRepository(new AuditWriter(db), new OutboxWriter(db));
+    processor = new WebhookEventProcessorRepository(
+      new AuditWriter(db),
+      new OutboxWriter(db),
+      receiptSupport.attribution,
+      receiptSupport.effects,
+    );
 
     await pool.query(
       `INSERT INTO plan (id, key, name, "updatedAt")
@@ -897,7 +937,12 @@ describe('Checkpoint G — audit / business outbox / rollback / realtime-isolati
         return super.processVerifiedInboxEventInTx(tx, input);
       }
     }
-    const flaky = new FailsTwiceForOne(new AuditWriter(db), new OutboxWriter(db));
+    const flaky = new FailsTwiceForOne(
+      new AuditWriter(db),
+      new OutboxWriter(db),
+      receiptSupport.attribution,
+      receiptSupport.effects,
+    );
     const recoveryA = new WebhookRecoveryProcessor(db, flaky);
     const recoveryB = new WebhookRecoveryProcessor(db, flaky);
 

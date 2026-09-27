@@ -249,32 +249,38 @@ model Tenant {
   createdAt                  DateTime              @default(now()) @db.Timestamptz(6)
   updatedAt                  DateTime              @updatedAt @db.Timestamptz(6)
 
-  entitlements            TenantEntitlement[]
-  limits                  TenantLimit[]
-  settings                TenantSetting[]
-  users                   User[]
-  roles                   Role[]
-  companies               Company[]
-  branches                Branch[]
-  posTerminals            PosTerminal[]
-  providerCreds           ProviderCredential[]
-  catalogCapabilities     TenantCatalogCapability[]
-  accounts                Account[]
-  accountingPeriods       AccountingPeriod[]
-  journalEntries          JournalEntry[]
-  journalLines            JournalLine[]
-  customers               Customer[]
-  customerAccounts        CustomerCompanyAccount[]
-  orders                  Order[]
-  orderLines              OrderLine[]
-  invoices                Invoice[]
-  documentNumberCounters  DocumentNumberCounter[]
-  payments                Payment[]
-  paymentAttempts         PaymentAttempt[]
-  paymentAllocations      PaymentAllocation[]
-  paymentAttemptEvents    PaymentAttemptEvent[]
-  providerPaymentEvents   ProviderPaymentEvent[]
-  paymentWebhookEndpoints PaymentWebhookEndpoint[]
+  entitlements                          TenantEntitlement[]
+  limits                                TenantLimit[]
+  settings                              TenantSetting[]
+  users                                 User[]
+  roles                                 Role[]
+  companies                             Company[]
+  branches                              Branch[]
+  posTerminals                          PosTerminal[]
+  providerCreds                         ProviderCredential[]
+  catalogCapabilities                   TenantCatalogCapability[]
+  accounts                              Account[]
+  accountingPeriods                     AccountingPeriod[]
+  journalEntries                        JournalEntry[]
+  journalLines                          JournalLine[]
+  customers                             Customer[]
+  customerAccounts                      CustomerCompanyAccount[]
+  orders                                Order[]
+  orderLines                            OrderLine[]
+  invoices                              Invoice[]
+  documentNumberCounters                DocumentNumberCounter[]
+  payments                              Payment[]
+  paymentAttempts                       PaymentAttempt[]
+  paymentAllocations                    PaymentAllocation[]
+  paymentAttemptEvents                  PaymentAttemptEvent[]
+  providerPaymentEvents                 ProviderPaymentEvent[]
+  paymentWebhookEndpoints               PaymentWebhookEndpoint[]
+  customerReceivables                   CustomerReceivable[]
+  customerAdvances                      CustomerAdvance[]
+  customerAdvanceApplications           CustomerAdvanceApplication[]
+  customerAccountEntries                CustomerAccountEntry[]
+  customerReceivablePaymentApplications CustomerReceivablePaymentApplication[]
+  customerOpeningBalanceInits           CustomerOpeningBalanceInit[]
 
   @@map("tenant")
 }
@@ -553,52 +559,58 @@ model DataScopeAssignment {
 // ──────────────────────────────── org (tenant) ────────────────────────────────
 
 model Company {
-  id                      String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId                String                   @db.Uuid
-  tenant                  Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  legalNameEn             String
-  legalNameAr             String?
-  crNumber                String?
+  id                                    String                                 @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                              String                                 @db.Uuid
+  tenant                                Tenant                                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalNameEn                           String
+  legalNameAr                           String?
+  crNumber                              String?
   /// tax registration number / VAT number
-  trn                     String?
-  registeredAddress       String?
+  trn                                   String?
+  registeredAddress                     String?
   /// The legal-entity country — THE fiscal source (currency / VAT / e-invoicing),
   /// never `tenant.region` (architecture correction 4). Nullable in the Phase
   /// 2-core expand migration; task 2.7 provisioning sets it. FK -> country.code.
-  countryCode             String?
+  countryCode                           String?
   /// resolved from the country at provisioning; a branch may override *display*
   /// currency only, never the legal currency. FK -> currency.code.
-  defaultCurrency         String?
+  defaultCurrency                       String?
   /// non-secret fiscal profile (e-invoicing provider ref, invoice-series policy).
-  fiscalConfig            Json?
+  fiscalConfig                          Json?
   /// task 3b.1 — the SOLE financial-posting-authority timezone (IANA, e.g.
   /// "Asia/Dubai"). Nullable at rollout (existing companies require an explicit
   /// Accounting Setup action to configure it — never auto-backfilled); financial
   /// posting fails closed (ACCOUNTING_TIMEZONE_NOT_CONFIGURED) while null. Never
   /// falls back to Branch.timezone / Country.defaultTimezone / POS / client tz.
-  accountingTimezone      String?
+  accountingTimezone                    String?
   /// ACTIVE | INACTIVE
-  status                  String                   @default("ACTIVE")
-  createdAt               DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt               DateTime                 @updatedAt @db.Timestamptz(6)
-  tradeLicenses           TradeLicense[]
-  branches                Branch[]
-  posTerminals            PosTerminal[]
-  providerCreds           ProviderCredential[]
-  accounts                Account[]
-  accountingPeriods       AccountingPeriod[]
-  journalEntries          JournalEntry[]
-  journalLines            JournalLine[]
-  customerAccounts        CustomerCompanyAccount[]
-  orders                  Order[]
-  invoices                Invoice[]
-  documentNumberCounters  DocumentNumberCounter[]
-  payments                Payment[]
-  paymentAttempts         PaymentAttempt[]
-  paymentAllocations      PaymentAllocation[]
-  paymentAttemptEvents    PaymentAttemptEvent[]
-  providerPaymentEvents   ProviderPaymentEvent[]
-  paymentWebhookEndpoints PaymentWebhookEndpoint[]
+  status                                String                                 @default("ACTIVE")
+  createdAt                             DateTime                               @default(now()) @db.Timestamptz(6)
+  updatedAt                             DateTime                               @updatedAt @db.Timestamptz(6)
+  tradeLicenses                         TradeLicense[]
+  branches                              Branch[]
+  posTerminals                          PosTerminal[]
+  providerCreds                         ProviderCredential[]
+  accounts                              Account[]
+  accountingPeriods                     AccountingPeriod[]
+  journalEntries                        JournalEntry[]
+  journalLines                          JournalLine[]
+  customerAccounts                      CustomerCompanyAccount[]
+  orders                                Order[]
+  invoices                              Invoice[]
+  documentNumberCounters                DocumentNumberCounter[]
+  payments                              Payment[]
+  paymentAttempts                       PaymentAttempt[]
+  paymentAllocations                    PaymentAllocation[]
+  paymentAttemptEvents                  PaymentAttemptEvent[]
+  providerPaymentEvents                 ProviderPaymentEvent[]
+  paymentWebhookEndpoints               PaymentWebhookEndpoint[]
+  customerReceivables                   CustomerReceivable[]
+  customerAdvances                      CustomerAdvance[]
+  customerAdvanceApplications           CustomerAdvanceApplication[]
+  customerAccountEntries                CustomerAccountEntry[]
+  customerReceivablePaymentApplications CustomerReceivablePaymentApplication[]
+  customerOpeningBalanceInits           CustomerOpeningBalanceInit[]
 
   /// task 3.7 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`                  ← `company_variant_price_set` tenant-safe FK
@@ -632,33 +644,39 @@ model TradeLicense {
 }
 
 model Branch {
-  id                      String                   @id @default(dbgenerated("uuidv7()")) @db.Uuid
-  tenantId                String                   @db.Uuid
-  tenant                  Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  companyId               String                   @db.Uuid
-  company                 Company                  @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  name                    String
+  id                                    String                                 @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                              String                                 @db.Uuid
+  tenant                                Tenant                                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId                             String                                 @db.Uuid
+  company                               Company                                @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  name                                  String
   /// IANA tz, e.g. "Asia/Dubai"
-  timezone                String                   @default("Asia/Dubai")
+  timezone                              String                                 @default("Asia/Dubai")
   /// FRI_SAT | SAT_SUN | SUN_ONLY … (GCC weekend model)
-  weekendModel            String                   @default("FRI_SAT")
+  weekendModel                          String                                 @default("FRI_SAT")
   /// ACTIVE | INACTIVE
-  status                  String                   @default("ACTIVE")
-  createdAt               DateTime                 @default(now()) @db.Timestamptz(6)
-  updatedAt               DateTime                 @updatedAt @db.Timestamptz(6)
-  settings                BranchSetting[]
-  posTerminals            PosTerminal[]
-  providerCreds           ProviderCredential[]
-  journalLines            JournalLine[]
-  originOrders            Order[]                  @relation("OrderOriginBranch")
-  fulfillingOrders        Order[]                  @relation("OrderFulfillingBranch")
-  invoices                Invoice[]
-  payments                Payment[]
-  paymentAttempts         PaymentAttempt[]
-  paymentAllocations      PaymentAllocation[]
-  paymentAttemptEvents    PaymentAttemptEvent[]
-  providerPaymentEvents   ProviderPaymentEvent[]
-  paymentWebhookEndpoints PaymentWebhookEndpoint[]
+  status                                String                                 @default("ACTIVE")
+  createdAt                             DateTime                               @default(now()) @db.Timestamptz(6)
+  updatedAt                             DateTime                               @updatedAt @db.Timestamptz(6)
+  settings                              BranchSetting[]
+  posTerminals                          PosTerminal[]
+  providerCreds                         ProviderCredential[]
+  journalLines                          JournalLine[]
+  originOrders                          Order[]                                @relation("OrderOriginBranch")
+  fulfillingOrders                      Order[]                                @relation("OrderFulfillingBranch")
+  invoices                              Invoice[]
+  payments                              Payment[]
+  paymentAttempts                       PaymentAttempt[]
+  paymentAllocations                    PaymentAllocation[]
+  paymentAttemptEvents                  PaymentAttemptEvent[]
+  providerPaymentEvents                 ProviderPaymentEvent[]
+  paymentWebhookEndpoints               PaymentWebhookEndpoint[]
+  customerReceivables                   CustomerReceivable[]
+  customerAdvances                      CustomerAdvance[]
+  customerAdvanceApplications           CustomerAdvanceApplication[]
+  customerAccountEntries                CustomerAccountEntry[]
+  customerReceivablePaymentApplications CustomerReceivablePaymentApplication[]
+  customerOpeningBalanceInits           CustomerOpeningBalanceInit[]
 
   /// task 3.8 — FK targets only (no column added / retyped):
   ///   `(tenantId, id)`             ← `branch_variant_*` tenant-safe FK
@@ -916,10 +934,16 @@ model Customer {
 /// `CompanyVariantUomPrice`'s `purchaseAmountMinor`/`purchaseCurrencyCode`/
 /// `purchaseCurrencyExponent` 3-column pattern) so a later Company-currency
 /// change can never cause `creditLimitMinor` to be silently reinterpreted —
-/// all three NULL or all three present (CHECK, migration SQL). No
-/// `currentOutstanding`/`availableCredit`/`advanceBalance` in V1 — those are
-/// 3b.6 additive columns, populated once the append-only AR/Advance subledger
-/// exists to derive them from.
+/// all three NULL or all three present (CHECK, migration SQL). Per ADR-0019
+/// §1, `creditEnabled=true` with the triplet all NULL is a valid "unlimited
+/// credit" configuration (no numeric ceiling beyond `creditEnabled` itself) —
+/// Task 3b.2's own original CHECK forbidding exactly this combination was a
+/// genuine contract conflict, corrected by a Task 3b.6 Checkpoint C hardening
+/// migration (`20260929120000_receivables_unlimited_credit_correction`) that
+/// drops ONLY that one constraint; the money-shape/positive CHECKs are
+/// unchanged. No `currentOutstanding`/`availableCredit`/`advanceBalance` in
+/// V1 — those are 3b.6 additive columns, populated once the append-only
+/// AR/Advance subledger exists to derive them from.
 model CustomerCompanyAccount {
   id         String @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId   String @db.Uuid
@@ -932,14 +956,36 @@ model CustomerCompanyAccount {
   creditLimitCurrencyCode     String?
   creditLimitCurrencyExponent Int?    @db.SmallInt
 
+  /// Task 3b.6 Checkpoint B — persisted PROJECTIONS, never authoritative.
+  /// Derived from the append-only CustomerReceivable/PaymentAllocation/
+  /// CustomerAdvance/CustomerAdvanceApplication subledger; maintained
+  /// transactionally by application code in a later checkpoint (no direct
+  /// public mutation path exists anywhere yet — Checkpoint B ships the
+  /// columns + non-negative backstop only). Default 0 so existing 3b.2 rows
+  /// backfill safely with no behavior change.
+  currentOutstandingMinor BigInt @default(0)
+  advanceBalanceMinor     BigInt @default(0)
+
   /// optimistic concurrency (If-Match pattern, matching every other mutation)
   version   Int      @default(1)
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  customer Customer @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Restrict)
-  company  Company  @relation(fields: [tenantId, companyId], references: [tenantId, id], onDelete: Restrict)
+  customer                      Customer                               @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Restrict)
+  company                       Company                                @relation(fields: [tenantId, companyId], references: [tenantId, id], onDelete: Restrict)
+  paymentAttempts               PaymentAttempt[]
+  customerReceivables           CustomerReceivable[]
+  customerAdvances              CustomerAdvance[]
+  customerAccountEntries        CustomerAccountEntry[]
+  receivablePaymentApplications CustomerReceivablePaymentApplication[]
+  openingBalanceInits           CustomerOpeningBalanceInit[]
 
+  /// Task 3b.6 Checkpoint B — FK target: `(tenantId, companyId, id)` lets
+  /// `payment_attempt.customerCompanyAccountId` / `customer_receivable` /
+  /// `customer_advance` / `customer_account_entry` all prove tenant+company
+  /// scope via a genuine composite FK (never trigger-only). This account
+  /// remains COMPANY-scoped, never branch-scoped (3b.6 architecture-freeze).
+  @@unique([tenantId, companyId, id])
   @@unique([tenantId, companyId, customerId])
   @@map("customer_company_account")
 }
@@ -1367,14 +1413,22 @@ model Invoice {
   /// back-relations. `invoicePaymentStatus` above is untouched by 3b.5
   /// (Task 3b.6's exclusively) — these relations exist only so a Payment can
   /// bind to and be counted against this Invoice.
-  paymentAttempts PaymentAttempt[]
-  allocations     PaymentAllocation[]
+  paymentAttempts    PaymentAttempt[]
+  allocations        PaymentAllocation[]
+  customerReceivable CustomerReceivable?
 
   /// FK targets: composite tenant/company-safe FKs added by hand in the
-  /// migration SQL. UPDATE/DELETE are unconditionally DB-blocked (Checkpoint A
-  /// trigger — an Invoice row only ever exists in its final, issued form).
+  /// migration SQL. UPDATE is DB-blocked EXCEPT for `invoicePaymentStatus`
+  /// (Task 3b.6 Checkpoint B narrowed the Task 3b.3 Checkpoint A trigger —
+  /// every other field remains immutable). DELETE remains unconditionally
+  /// DB-blocked.
   @@unique([tenantId, id])
   @@unique([tenantId, companyId, id])
+  /// Task 3b.6 Checkpoint B (B6) — proves `payment_allocation.branchId` (and
+  /// any future same-branch-scoped consumer) matches THIS Invoice's own
+  /// branchId via a genuine composite FK, closing the 3b.5 gap where only
+  /// Payment<->PaymentAllocation branch consistency was structurally proven.
+  @@unique([tenantId, companyId, branchId, id])
   /// one Invoice per Order (§11/§24)
   @@unique([tenantId, companyId, orderId])
   @@unique([tenantId, companyId, invoiceNumber])
@@ -2588,7 +2642,15 @@ model Payment {
   actingUserId    String?  @db.Uuid
   createdAt       DateTime @default(now()) @db.Timestamptz(6)
 
-  allocation PaymentAllocation?
+  /// Task 3b.6 Checkpoint B (B5) — fan-out: one Payment may now fund several
+  /// PaymentAllocation rows (plus, independently, a CustomerAdvance — see
+  /// the shared payment-consumption capacity backstop in the migration SQL).
+  /// `PaymentAllocation` remains the ONLY authoritative Payment->Invoice
+  /// relationship; this only relaxes the 3b.5 1:1 cardinality.
+  allocations                   PaymentAllocation[]
+  customerAdvances              CustomerAdvance[]
+  receivablePaymentApplications CustomerReceivablePaymentApplication[]
+  accountEntry                  CustomerAccountEntry?
 
   /// FK targets: `(tenantId, companyId, branchId, id)` proves scope to
   /// `payment_allocation`'s own composite FK; `(tenantId, id)` /
@@ -2614,15 +2676,35 @@ model PaymentAttempt {
   branchId  String  @db.Uuid
   branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
-  orderId String @db.Uuid
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  /// Task 3b.6 Checkpoint B — INVOICE_COLLECTION | CUSTOMER_RECEIPT (CHECK),
+  /// default INVOICE_COLLECTION so every existing 3b.5 row backfills
+  /// deterministically with no behavior change. Gates the structural XOR
+  /// below (migration SQL): INVOICE_COLLECTION requires orderId/
+  /// targetInvoiceId/the two order-snapshot fields NOT NULL and
+  /// customerCompanyAccountId NULL; CUSTOMER_RECEIPT requires the exact
+  /// opposite. `Payment` itself is UNCHANGED in shape — this evolves only
+  /// the mechanical/provider-lifecycle record's targeting.
+  receiptPurpose String @default("INVOICE_COLLECTION")
 
-  /// the Invoice this attempt targets. Structural backstop (composite FK, see
-  /// migration SQL): `targetInvoiceId` must be the Invoice whose OWN
-  /// `orderId` equals this attempt's `orderId` — never an arbitrary
-  /// same-tenant Order/Invoice pairing.
-  targetInvoiceId String  @db.Uuid
-  targetInvoice   Invoice @relation(fields: [targetInvoiceId], references: [id], onDelete: Restrict)
+  /// nullable — NULL for a CUSTOMER_RECEIPT attempt (see receiptPurpose XOR).
+  orderId String? @db.Uuid
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// the Invoice this attempt targets — nullable for CUSTOMER_RECEIPT.
+  /// Structural backstop (composite FK, see migration SQL): when present,
+  /// `targetInvoiceId` must be the Invoice whose OWN `orderId` equals this
+  /// attempt's `orderId` — never an arbitrary same-tenant Order/Invoice
+  /// pairing. A NULL orderId/targetInvoiceId trivially satisfies that
+  /// composite FK (Postgres MATCH SIMPLE).
+  targetInvoiceId String?  @db.Uuid
+  targetInvoice   Invoice? @relation(fields: [targetInvoiceId], references: [id], onDelete: Restrict)
+
+  /// Task 3b.6 Checkpoint B — the customer-level target for a CUSTOMER_RECEIPT
+  /// attempt (an invoice-less receipt). NULL for INVOICE_COLLECTION. Never
+  /// branch-scoped identity of its own — CustomerCompanyAccount remains
+  /// company-scoped (3b.6 architecture-freeze).
+  customerCompanyAccountId String?                 @db.Uuid
+  customerCompanyAccount   CustomerCompanyAccount? @relation(fields: [customerCompanyAccountId], references: [id], onDelete: Restrict)
 
   paymentGroupId String? @db.Uuid
 
@@ -2652,9 +2734,10 @@ model PaymentAttempt {
   state String @default("PENDING")
 
   /// the capture-staleness gate (application logic, later checkpoint) —
-  /// stored here as an immutable snapshot at creation time only.
-  orderCommercialSnapshotFingerprintAtCreation String
-  orderVersionAtCreation                       Int
+  /// stored here as an immutable snapshot at creation time only. Nullable —
+  /// NULL for CUSTOMER_RECEIPT (see receiptPurpose XOR).
+  orderCommercialSnapshotFingerprintAtCreation String?
+  orderVersionAtCreation                       Int?
 
   /// narrow set-once lifecycle (DB-enforced, see migration SQL): NULL ->
   /// non-NULL once; same value again is harmless; non-NULL -> a DIFFERENT
@@ -2690,6 +2773,8 @@ model PaymentAttempt {
   @@index([tenantId, companyId])
   @@index([providerCredentialId])
   @@index([paymentGroupId])
+  /// Task 3b.6 Checkpoint B (B3) — the CUSTOMER_RECEIPT-attempt lookup shape.
+  @@index([customerCompanyAccountId])
   /// the reservation-computation query shape (owner contract round 4 §1):
   /// `targetInvoiceId` + `state IN (PENDING, REQUIRES_ACTION, AUTHORIZED)` —
   /// realized as a partial index in the migration SQL (Prisma DSL cannot
@@ -2705,9 +2790,13 @@ model PaymentAttempt {
 }
 
 /// The ONLY authoritative Payment->Invoice relationship. Append-only —
-/// UPDATE and DELETE are both DB-blocked. Exactly one row per Payment in
-/// 3b.5 (`paymentId` UNIQUE); `amountMinor` must equal the Payment's own
-/// `amountMinor` exactly (DB backstop, see migration SQL).
+/// UPDATE and DELETE are both DB-blocked. Task 3b.6 Checkpoint B (B5)
+/// relaxed the 3b.5 1:1-per-Payment cardinality to a fan-out (`paymentId` is
+/// no longer UNIQUE) — a Multi Payment's single Payment may now fund several
+/// Invoices. `amountMinor` no longer needs to equal the Payment's own
+/// `amountMinor` exactly; instead the SUM of a Payment's allocations plus any
+/// CustomerAdvance it funds can never exceed it (DB-enforced, concurrency-safe
+/// — see the migration SQL's payment-consumption capacity backstop).
 model PaymentAllocation {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
@@ -2717,7 +2806,7 @@ model PaymentAllocation {
   branchId  String  @db.Uuid
   branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
-  paymentId String  @unique @db.Uuid
+  paymentId String  @db.Uuid
   payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
 
   invoiceId String  @db.Uuid
@@ -2729,8 +2818,11 @@ model PaymentAllocation {
 
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
+  accountEntry CustomerAccountEntry?
+
   @@unique([tenantId, id])
   @@index([tenantId, companyId])
+  @@index([paymentId])
   @@index([invoiceId])
   @@map("payment_allocation")
 }
@@ -2865,4 +2957,329 @@ model PaymentWebhookEndpoint {
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
   @@map("payment_webhook_endpoint")
+}
+
+// ───────────────── receivables / credit / advances (task 3b.6) ────────────────
+// docs/decisions/ADR-0019.md. Checkpoint B ships schema/RLS/FK/CHECK/trigger
+// structure ONLY — no service/repository/controller/PostingEngine/audit/
+// outbox/realtime. All four tables below are append-only (no UPDATE, no
+// DELETE, DB-blocked). Frozen model from the Checkpoint A pure-domain modules
+// (`apps/api/src/modules/receivables/*`) — this section realizes those exact
+// invariants as real constraints/triggers, never inventing a new shape.
+
+/// The append-only AR anchor. `sourceType`='INVOICE': the anchor for a
+/// customer-linked Invoice — principal is NEVER independently authored here
+/// (always the Invoice's own `totalAmountMinor`, checked by trigger);
+/// `creditAuthorized` records whether this specific exposure was
+/// intentionally granted (ON_CREDIT) or not (PAY_NOW). `sourceType`='OPENING':
+/// a receivable with no Invoice at all — principal IS authored here, and is
+/// always branch-scoped (3b.6 architecture-freeze: no ambiguous/null branch).
+/// Mirrors `customer-receivable-source.ts`'s frozen pure-domain shape exactly.
+model CustomerReceivable {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  customerCompanyAccountId String                 @db.Uuid
+  customerCompanyAccount   CustomerCompanyAccount @relation(fields: [customerCompanyAccountId], references: [id], onDelete: Restrict)
+
+  /// INVOICE | OPENING (CHECK) — closed set.
+  sourceType String
+
+  /// INVOICE only — NOT NULL + UNIQUE (exactly one receivable per Invoice).
+  /// NULL for OPENING.
+  invoiceId String?  @unique @db.Uuid
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  /// INVOICE only — NULL for OPENING (not semantically applicable there).
+  creditAuthorized Boolean?
+
+  /// OPENING only — the authored principal. NULL for INVOICE (principal is
+  /// always read from `Invoice.totalAmountMinor`, never duplicated here).
+  /// `currencyCode`/`currencyExponent` are likewise OPENING-only (INVOICE
+  /// currency is always the Invoice's own).
+  openingAmountMinor BigInt?
+  currencyCode       String?
+  currencyExponent   Int?    @db.SmallInt
+
+  /// Task 3b.6 Checkpoint F — OPENING only. The opening balance's own
+  /// immutable business EFFECTIVE DATE, distinct from `createdAt` (the mere
+  /// insertion instant). NEVER fed into `PostingEngineService` (its
+  /// `postingDate` is derived exclusively from `Clock.now()` — a frozen,
+  /// unmodified invariant); the opening-receivable journal always posts at
+  /// TODAY's open accounting period, same as every other checkpoint's
+  /// journal. `openingNote` is optional, bounded (VARCHAR(255), CHECK), and
+  /// is a first-class business-record field — never hidden only in audit
+  /// metadata.
+  openingEffectiveDate DateTime? @db.Date
+  openingNote          String?   @db.VarChar(255)
+
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  createdByUserId String?  @db.Uuid
+
+  advanceApplications CustomerAdvanceApplication[]
+  paymentApplications CustomerReceivablePaymentApplication[]
+  accountEntry        CustomerAccountEntry?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  /// Task 3b.6 Checkpoint E final hardening — FK target for
+  /// `customer_advance_application`'s branch-inclusive composite FK (hand-added
+  /// in the migration SQL — Prisma DSL cannot express that a SHARED
+  /// `branchId` column across two composite FKs transitively forces
+  /// `CustomerAdvance.branchId = CustomerReceivable.branchId`). Additive only.
+  /// Task 3b.6 Checkpoint F reuses this SAME index as the FK target for
+  /// `customer_opening_balance_init`'s own branch-inclusive composite FK.
+  @@unique([tenantId, companyId, branchId, id])
+  @@index([tenantId, companyId])
+  @@index([customerCompanyAccountId])
+  @@map("customer_receivable")
+}
+
+/// The append-only customer liability. `sourceType`='PAYMENT': funded by an
+/// over-collected Payment — participates in the shared payment-consumption
+/// capacity backstop (migration SQL) alongside `PaymentAllocation`.
+/// `sourceType`='OPENING': a migrated/manual opening advance balance, always
+/// branch-scoped.
+model CustomerAdvance {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  customerCompanyAccountId String                 @db.Uuid
+  customerCompanyAccount   CustomerCompanyAccount @relation(fields: [customerCompanyAccountId], references: [id], onDelete: Restrict)
+
+  /// PAYMENT | OPENING (CHECK) — closed set.
+  sourceType String
+
+  /// PAYMENT only — the over-collected Payment this Advance was converted
+  /// from. NULL for OPENING.
+  sourcePaymentId String?  @db.Uuid
+  sourcePayment   Payment? @relation(fields: [sourcePaymentId], references: [id], onDelete: Restrict)
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  /// Task 3b.6 Checkpoint F — OPENING only. See the matching doc comment on
+  /// `CustomerReceivable.openingEffectiveDate`/`openingNote` — identical
+  /// semantics and identical PostingEngine-is-unmodified rationale.
+  openingEffectiveDate DateTime? @db.Date
+  openingNote          String?   @db.VarChar(255)
+
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  createdByUserId String?  @db.Uuid
+
+  applications CustomerAdvanceApplication[]
+  accountEntry CustomerAccountEntry?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  /// Task 3b.6 Checkpoint E final hardening — see the matching comment on
+  /// `CustomerReceivable`'s own identical index. Additive only. Task 3b.6
+  /// Checkpoint F reuses this SAME index as the FK target for
+  /// `customer_opening_balance_init`'s own branch-inclusive composite FK.
+  @@unique([tenantId, companyId, branchId, id])
+  @@index([tenantId, companyId])
+  @@index([customerCompanyAccountId])
+  @@index([sourcePaymentId])
+  @@map("customer_advance")
+}
+
+/// The append-only application of a CustomerAdvance's principal against
+/// exactly one CustomerReceivable (INVOICE- or OPENING-sourced) — never a raw
+/// Invoice reference, so there is only ever one canonical coverage target
+/// per receivable, never an ambiguous dual-targeting path.
+///
+/// Task 3b.6 Checkpoint E final hardening — "no cross-branch advance
+/// pooling in 3b.6" (E5) is now a STRUCTURAL invariant, not just an
+/// application-layer check: two hand-added composite FKs (migration SQL;
+/// Prisma DSL cannot express this) both key off this table's OWN single
+/// `branchId` column — `(tenantId, companyId, branchId, customerAdvanceId)
+/// -> CustomerAdvance(tenantId, companyId, branchId, id)` and
+/// `(tenantId, companyId, branchId, customerReceivableId) ->
+/// CustomerReceivable(tenantId, companyId, branchId, id)` — which
+/// transitively forces `CustomerAdvance.branchId =
+/// CustomerReceivable.branchId` for every row. The insert trigger (migration
+/// SQL) independently re-checks the same equality first, for a friendly
+/// error message — both layers agree.
+model CustomerAdvanceApplication {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  customerAdvanceId String          @db.Uuid
+  customerAdvance   CustomerAdvance @relation(fields: [customerAdvanceId], references: [id], onDelete: Restrict)
+
+  customerReceivableId String             @db.Uuid
+  customerReceivable   CustomerReceivable @relation(fields: [customerReceivableId], references: [id], onDelete: Restrict)
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  createdByUserId String?  @db.Uuid
+
+  accountEntry CustomerAccountEntry?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  @@index([tenantId, companyId])
+  @@index([customerAdvanceId])
+  @@index([customerReceivableId])
+  @@map("customer_advance_application")
+}
+
+/// Task 3b.6 Checkpoint D (pre-D architecture-review correction) — the
+/// append-only application of a canonical `Payment` DIRECTLY against exactly
+/// one `CustomerReceivable`(sourceType='OPENING') — never an Invoice-sourced
+/// receivable (that path is `PaymentAllocation`'s alone, unchanged) and never
+/// routed through a `CustomerAdvance` (that would misclassify a direct AR
+/// collection as a customer liability before clearing AR). Participates in
+/// the SAME shared payment-consumption capacity backstop as
+/// `PaymentAllocation`/`CustomerAdvance`, and in the SAME opening-receivable
+/// coverage backstop as `CustomerAdvanceApplication` (migration SQL).
+model CustomerReceivablePaymentApplication {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  customerCompanyAccountId String                 @db.Uuid
+  customerCompanyAccount   CustomerCompanyAccount @relation(fields: [customerCompanyAccountId], references: [id], onDelete: Restrict)
+
+  paymentId String  @db.Uuid
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  /// must be a CustomerReceivable whose OWN sourceType is OPENING — DB-enforced
+  /// (trigger, migration SQL); an INVOICE-sourced target is unconditionally
+  /// rejected at insert time.
+  customerReceivableId String             @db.Uuid
+  customerReceivable   CustomerReceivable @relation(fields: [customerReceivableId], references: [id], onDelete: Restrict)
+
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int    @db.SmallInt
+
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  createdByUserId String?  @db.Uuid
+
+  accountEntry CustomerAccountEntry?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  @@index([tenantId, companyId])
+  @@index([paymentId])
+  @@index([customerReceivableId])
+  @@index([customerCompanyAccountId])
+  @@map("customer_receivable_payment_application")
+}
+
+/// The append-only chronology. Frozen 7-kind vocabulary (`entryKind`, CHECK) —
+/// mirrors `customer-account-entry.ts`'s `CUSTOMER_ACCOUNT_ENTRY_KINDS`
+/// exactly. Exactly one reference column is populated per row (same-row CHECK
+/// XOR); cross-table `sourceType` consistency (e.g. an INVOICE entry must
+/// reference a CustomerReceivable whose OWN sourceType is INVOICE) is
+/// enforced by trigger — a Postgres CHECK cannot query another table. Never
+/// an independent financial authority: the referenced row is always the
+/// source of truth, and each authoritative source fact may create at most one
+/// chronology entry (the five reference columns are each UNIQUE-when-present).
+model CustomerAccountEntry {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  customerCompanyAccountId String                 @db.Uuid
+  customerCompanyAccount   CustomerCompanyAccount @relation(fields: [customerCompanyAccountId], references: [id], onDelete: Restrict)
+
+  /// INVOICE | PAYMENT | PAYMENT_ALLOCATION | OPENING_RECEIVABLE_PAYMENT_APPLIED
+  /// | ADVANCE | ADVANCE_APPLIED | OPENING_RECEIVABLE | OPENING_ADVANCE (CHECK).
+  /// Task 3b.6 Checkpoint D added OPENING_RECEIVABLE_PAYMENT_APPLIED
+  /// (additive — never overloads PAYMENT_ALLOCATION's own exact meaning).
+  entryKind String
+
+  customerReceivableId                   String?                               @unique @db.Uuid
+  customerReceivable                     CustomerReceivable?                   @relation(fields: [customerReceivableId], references: [id], onDelete: Restrict)
+  paymentId                              String?                               @unique @db.Uuid
+  payment                                Payment?                              @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  paymentAllocationId                    String?                               @unique @db.Uuid
+  paymentAllocation                      PaymentAllocation?                    @relation(fields: [paymentAllocationId], references: [id], onDelete: Restrict)
+  customerAdvanceId                      String?                               @unique @db.Uuid
+  customerAdvance                        CustomerAdvance?                      @relation(fields: [customerAdvanceId], references: [id], onDelete: Restrict)
+  customerAdvanceApplicationId           String?                               @unique @db.Uuid
+  customerAdvanceApplication             CustomerAdvanceApplication?           @relation(fields: [customerAdvanceApplicationId], references: [id], onDelete: Restrict)
+  /// Task 3b.6 Checkpoint D — the sole reference for OPENING_RECEIVABLE_PAYMENT_APPLIED.
+  customerReceivablePaymentApplicationId String?                               @unique @db.Uuid
+  customerReceivablePaymentApplication   CustomerReceivablePaymentApplication? @relation(fields: [customerReceivablePaymentApplicationId], references: [id], onDelete: Restrict)
+
+  occurredAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, companyId])
+  @@index([customerCompanyAccountId, occurredAt])
+  @@map("customer_account_entry")
+}
+
+/// Task 3b.6 Checkpoint F (redesigned by Final Hardening §9/§10) — the
+/// opening-balance uniqueness backstop. A pure initialization/uniqueness-
+/// provenance ticket, deliberately carrying NO reference to any source row
+/// — `CustomerReceivable`/`CustomerAdvance` remain the SOLE financial
+/// authority (§10 "do not create a second financial authority"). Its own
+/// `@@unique([tenantId, companyId, branchId, customerCompanyAccountId])` is
+/// the STRUCTURAL invariant that at most one opening balance — RECEIVABLE
+/// or ADVANCE, never both — can ever exist per CustomerCompanyAccount+Branch
+/// (this is now an explicit OWNER-FROZEN rule, not merely an inferred
+/// fallback).
+///
+/// Enforcement direction: a `BEFORE INSERT` trigger on EACH of
+/// `customer_receivable`/`customer_advance` (migration SQL) attempts to
+/// claim this table's unique slot via `INSERT ... ON CONFLICT DO NOTHING`
+/// whenever `sourceType='OPENING'` — fired for EVERY insert into either
+/// source table, from the repository, raw SQL, or any future code, with no
+/// possible bypass. Never independently mutated after creation (no
+/// UPDATE/DELETE path — enforced by the SAME append-only trigger pattern as
+/// every other table in this schema).
+model CustomerOpeningBalanceInit {
+  id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId  String  @db.Uuid
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyId String  @db.Uuid
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branchId  String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  customerCompanyAccountId String                 @db.Uuid
+  customerCompanyAccount   CustomerCompanyAccount @relation(fields: [customerCompanyAccountId], references: [id], onDelete: Restrict)
+
+  /// RECEIVABLE | ADVANCE (CHECK) — closed set. Records WHICH type claimed
+  /// this account+branch's one slot — never itself the financial authority.
+  openingType String
+
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  createdByUserId String?  @db.Uuid
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, branchId, customerCompanyAccountId])
+  @@index([tenantId, companyId])
+  @@map("customer_opening_balance_init")
 }

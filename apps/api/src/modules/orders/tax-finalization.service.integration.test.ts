@@ -13,6 +13,11 @@ import type { PrismaClient, ScopedTx } from '@flower/db';
 import pg from 'pg';
 import { InvoiceIssuanceRepository } from './invoice-issuance.repository.js';
 import { TaxFinalizationService } from './tax-finalization.service.js';
+import { CustomerInvoiceArRepository } from '../receivables/customer-invoice-ar.repository.js';
+import { PostingEngineService } from '../accounting/posting-engine.service.js';
+import { CompanyFinancialConfigRepository } from '../accounting/company-financial-config.repository.js';
+import { AccountingPeriodRepository } from '../accounting/accounting-period.repository.js';
+import { AccountRepository } from '../accounting/account.repository.js';
 import {
   computeCommercialSnapshotFingerprintV1,
   computeCommercialSnapshotFingerprintV2,
@@ -65,9 +70,30 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
     await client.connect();
 
     const dummyDb = {} as unknown as DbService;
+    // Task 3b.6 Checkpoint C — see the identical note in
+    // `invoice-issuance.repository.integration.test.ts`: none of these
+    // dependencies ever call `this.scoped(...)`, so `dummyDb` is never
+    // actually invoked. This file's own scenarios never link a customer to
+    // an Order, so the accounting-setup fixtures those tests additionally
+    // needed are not required here.
+    const postingEngine = new PostingEngineService(
+      new CompanyFinancialConfigRepository(
+        dummyDb,
+        new AuditWriter(dummyDb),
+        new AccountRepository(dummyDb, new AuditWriter(dummyDb)),
+      ),
+      new AccountingPeriodRepository(dummyDb, new AuditWriter(dummyDb)),
+      new AuditWriter(dummyDb),
+      fakeClockAt('2026-06-15T10:00:00Z'),
+    );
+    const customerInvoiceAr = new CustomerInvoiceArRepository(
+      postingEngine,
+      new AuditWriter(dummyDb),
+    );
     issuance = new InvoiceIssuanceRepository(
       new AuditWriter(dummyDb),
       fakeClockAt('2026-06-15T10:00:00Z'),
+      customerInvoiceAr,
     );
     finalization = new TaxFinalizationService(issuance);
 
@@ -298,6 +324,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
         orderId: order.orderId,
         expectedVersion: order.version,
         commercialSnapshotFingerprint: order.fingerprint,
+        paymentIntent: 'PAY_NOW',
       }),
     );
   }
@@ -643,6 +670,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
         orderId: o.orderId,
         expectedVersion: o.version,
         commercialSnapshotFingerprint: o.fingerprint,
+        paymentIntent: 'PAY_NOW',
       }),
     );
     expect(result.invoiceNumber).toMatch(/^INV-\d{6}$/);
@@ -845,6 +873,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
             lines: [
               {
                 orderLineId: lineRow.id,
@@ -884,6 +913,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
             lines: [
               {
                 orderLineId: lineRow.id,
@@ -924,6 +954,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
             lines: [
               {
                 orderLineId: lineRow.id,
@@ -1059,6 +1090,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version + 5, // stale — forces rejection AFTER tax computation
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
           }),
         ),
       ).rejects.toMatchObject({ code: 'ORDER_VERSION_CONFLICT' });
@@ -1125,6 +1157,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
           });
           // deliberately abort AFTER a fully successful write sequence —
           // never let the caller's own transaction commit.
@@ -1530,6 +1563,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
         orderId: o.orderId,
         expectedVersion: o.version,
         commercialSnapshotFingerprint: o.fingerprint,
+        paymentIntent: 'PAY_NOW' as const,
         lines: validLinesFor(lineIds),
         totals: validTotals(),
       };
@@ -1617,6 +1651,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
             lines: [
               {
                 orderLineId: lineId,
@@ -1697,6 +1732,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
           }),
         ),
       ).rejects.toMatchObject({ code: 'ORDER_NOT_FOUND' });
@@ -1717,6 +1753,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
           }),
         ),
       ).rejects.toMatchObject({ code: 'ORDER_NOT_FOUND' });
@@ -1742,6 +1779,7 @@ describe('TaxFinalizationService.finalizeAndIssueInvoice (task 3b.4 Checkpoint D
             orderId: o.orderId,
             expectedVersion: o.version,
             commercialSnapshotFingerprint: o.fingerprint,
+            paymentIntent: 'PAY_NOW',
           }),
         ),
       ).rejects.toMatchObject({ code: 'ORDER_NOT_FOUND' });

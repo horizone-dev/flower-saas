@@ -156,6 +156,24 @@ export const PERMISSIONS = {
   // `payments:webhook:process`, `payments:refund`, `payments:void`, or
   // `payments:settle` key exists anywhere in 3b.5.
   payments: ['payments:view', 'payments:collect'],
+  // Task 3b.6 — Receivables / Credit / Advances (docs/decisions/ADR-0019.md).
+  // A brand new group, mirroring `payments`'s own precedent. `receivables:view`
+  // + `receivables:collect` are routine POS-floor actions (mirrors
+  // `payments:view`/`payments:collect`); `receivables:advance:apply` is
+  // narrower (owner/admin/manager — mirrors `accounting:manage`'s tier, not
+  // `customers:credit:*`'s Owner-heavier one); `receivables:opening_balance:manage`
+  // is Owner/Admin-tier ONLY and step-up gated (STEP_UP_PERMISSIONS below) —
+  // it is the one action in this group that fabricates a financial balance
+  // from nothing, mirroring `customers:credit:manage`'s money-exposure
+  // precedent, not `payments:collect`'s routine-transaction one. Existing
+  // `customers:credit:manage` / `customers:credit:override` (3b.2) are
+  // untouched — their frozen role assignment is not widened here.
+  receivables: [
+    'receivables:view',
+    'receivables:collect',
+    'receivables:advance:apply',
+    'receivables:opening_balance:manage',
+  ],
 } as const satisfies Record<string, readonly string[]>;
 
 export type PermissionGroup = keyof typeof PERMISSIONS;
@@ -388,6 +406,32 @@ export const PHASE_3B_5_TENANT_PERMISSIONS = [
 export type Phase3b5TenantPermission = (typeof PHASE_3B_5_TENANT_PERMISSIONS)[number];
 
 /**
+ * Task 3b.6 (docs/decisions/ADR-0019.md) — Receivables / Credit / Advances,
+ * Checkpoint B. The frozen 4-key contract. Registered in `permission_registry`
+ * and assigned to built-in system roles per the owner-frozen matrix:
+ * `owner`/`admin`/`manager`/`cashier`/`sales` gain `receivables:view` +
+ * `receivables:collect` (mirrors `payments:view`/`payments:collect`'s
+ * cashier/sales inclusion exactly — routine POS-floor actions);
+ * `owner`/`admin`/`manager` gain `receivables:advance:apply`
+ * (cashier/sales do NOT — applying a customer's Advance is not a routine
+ * sale-floor action); `owner`/`admin` ALONE gain
+ * `receivables:opening_balance:manage` (step-up gated — see
+ * STEP_UP_PERMISSIONS below — it fabricates a financial balance from
+ * nothing, the same money-exposure tier as `customers:credit:manage`).
+ * Existing tenants get the identical backfill in the task 3b.6 permissions
+ * migration. Checkpoint B registers these keys only — no controller/route
+ * exists yet to enforce them.
+ */
+export const PHASE_3B_6_TENANT_PERMISSIONS = [
+  'receivables:view',
+  'receivables:collect',
+  'receivables:advance:apply',
+  'receivables:opening_balance:manage',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b6TenantPermission = (typeof PHASE_3B_6_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the
@@ -441,6 +485,19 @@ export const STEP_UP_PERMISSIONS: ReadonlySet<string> = new Set<string>([
   // customers:* route uses this key, so no `@NoStepUp()` opt-out is needed
   // anywhere for it.
   'customers:credit:manage',
+  // Task 3b.6 Checkpoint C — the one-sale credit-limit override is a
+  // deliberate bypass of a money-exposure control (SECURITY.md: step-up
+  // gates money/permission/secret/attribution-change actions). Registered
+  // permission-only in 3b.2 with this behavior explicitly deferred to
+  // Checkpoint C ("its actual override behavior is Task 3b.6"); this is that
+  // behavior landing. No `@NoStepUp()` opt-out exists anywhere for this key.
+  'customers:credit:override',
+  // Task 3b.6 — creating an opening receivable/advance fabricates a financial
+  // balance from nothing (no Invoice/Payment behind it) — the same
+  // money-exposure tier as `customers:credit:manage` above. No other
+  // `receivables:*` key uses this — `:view`/`:collect`/`:advance:apply` are
+  // routine transactional actions, matching `payments:collect`'s precedent.
+  'receivables:opening_balance:manage',
   ...PLATFORM_PERMISSIONS.filter(
     (k) =>
       k === 'platform:tenants:manage' ||

@@ -424,11 +424,13 @@ describe('PaymentController (task 3b.5 Checkpoint C+D, integration)', () => {
       [json.paymentGroupId],
     );
     expect(groupRows[0]!.n).toBe(1);
+    // task 3b.6 Checkpoint D (D17/D21) — 50+100+25 = 175 fully covers this
+    // 175 Invoice, so invoicePaymentStatus now derives to PAID.
     const invRows = await sql<{ status: string }>(
       `SELECT "invoicePaymentStatus" AS status FROM invoice WHERE id = $1`,
       [invoiceId],
     );
-    expect(invRows[0]!.status).toBe('UNPAID');
+    expect(invRows[0]!.status).toBe('PAID');
   });
 
   // ═══════════════════════════ IDEMPOTENCY — WHOLE OPERATION (D9) ════════

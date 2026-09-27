@@ -218,6 +218,66 @@ export const AUDITABLE_ACTIONS = {
   'payment_attempt.state_changed': { resourceType: 'payment_attempt', security: false },
   'provider_payment_event.exception': { resourceType: 'provider_payment_event', security: false },
 
+  // ── receivables: customer-linked Invoice AR (task 3b.6 Checkpoint C) ────
+  // Business events, NOT security events. Classification is by SEMANTICS and
+  // repo precedent, not migration convenience (Checkpoint C hardening pass
+  // §4 re-derived this from scratch): every `security: true` action actually
+  // registered in this file falls into exactly one of four buckets —
+  // tenant lifecycle (`tenant.*`), RBAC/permission (`role.*`/`user.*`),
+  // secrets (`provider_credential.*`), or session/attribution
+  // (`session.*`/`IMPERSONATION:*`) — plus the one explicit
+  // `catalog.template_applied` exception. NO business/financial-domain event
+  // is `security: true` anywhere in this registry, including ones that are
+  // themselves step-up-gated overrides of a policy limit:
+  // `customer.credit_config_updated` (task 3b.2) — configuring/enabling
+  // credit exposure, step-up gated via `customers:credit:manage` — is
+  // `security: false`, and `accounting.journal_posted`/`period_closed` are
+  // `security: false` despite also being financial-integrity-affecting and
+  // (for periods) step-up gated. `credit_limit.override_used` is in the
+  // IDENTICAL domain and resource (`customer_company_account`) as
+  // `customer.credit_config_updated` — a step-up-gated financial-policy
+  // action on the same row — so by direct, semantic precedent (not
+  // migration-avoidance) it is classified identically: `security: false`.
+  // Bounded payloads only: ids, amount/currency, creditAuthorized/
+  // authorizationMode booleans/labels, and (override only) a short, length-
+  // bounded textual reason — never Customer PII, never a raw DTO dump.
+  'receivable.created': { resourceType: 'customer_receivable', security: false },
+  'credit_limit.override_used': { resourceType: 'customer_company_account', security: false },
+
+  // ── receivables: canonical customer receipt / FIFO application (task
+  // 3b.6 Checkpoint D) ─────────────────────────────────────────────────────
+  // Same bucket/precedent as `receivable.created` immediately above — a
+  // business/financial-domain event, never `security: true` (no
+  // tenant-lifecycle, RBAC, secrets-vault, or session/impersonation
+  // membership). Bounded payload only: ids, amount/currency — never PII.
+  'receivable.opening_payment_applied': {
+    resourceType: 'customer_receivable_payment_application',
+    security: false,
+  },
+
+  // ── receivables: explicit CustomerAdvance funding/application (task
+  // 3b.6 Checkpoint E) ─────────────────────────────────────────────────────
+  // Same bucket/precedent as `receivable.created`/`receivable.opening_payment_applied`
+  // immediately above — a business/financial-domain event, never
+  // `security: true`. Bounded payload only: ids, amount/currency — never PII.
+  'receivable.advance_created': { resourceType: 'customer_advance', security: false },
+  'receivable.advance_applied': {
+    resourceType: 'customer_advance_application',
+    security: false,
+  },
+
+  // ── receivables: Customer Opening Balances (task 3b.6 Checkpoint F) ─────
+  // Same bucket/precedent as every other `receivable.*` action above — a
+  // business/financial-domain event, never `security: true`, despite being
+  // step-up gated (`receivables:opening_balance:manage`) — matches
+  // `credit_limit.override_used`'s own identical precedent (a step-up-gated
+  // financial-policy action classified `security: false` by direct semantic
+  // precedent, not migration-avoidance). Bounded payload only: ids, amount/
+  // currency, effectiveDate, note PRESENCE (never the note text itself as
+  // PII-adjacent free text) — never Customer PII.
+  'receivable.opening_receivable_created': { resourceType: 'customer_receivable', security: false },
+  'receivable.opening_advance_created': { resourceType: 'customer_advance', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

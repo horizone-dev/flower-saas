@@ -773,19 +773,34 @@ describe('packages/db — Task 3b.5 Checkpoint B payments schema', () => {
       expect(rows).toHaveLength(1);
     });
 
-    it('a duplicate allocation for the same Payment is rejected', async () => {
+    // Task 3b.6 Checkpoint B (B5/B7) superseded the 3b.5-frozen 1:1
+    // `paymentId` UNIQUE constraint with a fan-out + concurrency-safe
+    // capacity backstop (`packages/db/prisma/migrations/20260927140000_receivables_allocation_fanout_and_capacity`)
+    // — confirmed by direct inspection, not assumed. A second allocation
+    // against the SAME Payment/Invoice pair is no longer rejected merely for
+    // being a "duplicate": it is rejected only if it would exceed either the
+    // Payment's own capacity or the Invoice's own coverage (whichever binds
+    // first) — both already fully consumed by the first, full-amount
+    // allocation in this exact scenario.
+    it('a second allocation that would exceed Payment/Invoice capacity is rejected (3b.6 fan-out + capacity backstop)', async () => {
       const p = await capturedPayment();
       await insertAllocation({ paymentId: p.paymentId, invoiceId: p.invoiceId });
       await expect(
         insertAllocation({ paymentId: p.paymentId, invoiceId: p.invoiceId }),
-      ).rejects.toThrow(/duplicate key|unique constraint/i);
+      ).rejects.toThrow(
+        /coverage would exceed totalAmountMinor|consumption would exceed amountMinor/i,
+      );
     });
 
-    it('amount mismatch against the Payment is rejected', async () => {
+    // Task 3b.6 Checkpoint B (B5) removed the 3b.5-frozen "allocation amount
+    // must equal the Payment's full amount exactly" rule — a partial
+    // allocation is now an explicitly supported fan-out shape (confirmed by
+    // direct inspection of the same migration referenced above).
+    it('a partial allocation amount (less than the full Payment amount) now succeeds (3b.6 fan-out)', async () => {
       const p = await capturedPayment({ amountMinor: 1000 });
       await expect(
         insertAllocation({ paymentId: p.paymentId, invoiceId: p.invoiceId, amountMinor: 500 }),
-      ).rejects.toThrow(/does not match its Payment/i);
+      ).resolves.toBeTruthy();
     });
 
     it('currency/exponent mismatch against the Payment is rejected', async () => {

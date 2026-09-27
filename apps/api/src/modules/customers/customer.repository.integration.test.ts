@@ -412,21 +412,30 @@ describe('CustomerRepository (task 3b.2, integration)', () => {
     expect(typeof updated.creditLimitMinor).toBe('bigint');
   });
 
-  it('enable + null limit is rejected (CUSTOMER_CREDIT_CONFIG_INVALID)', async () => {
+  // Task 3b.6 Checkpoint C hardening — ADR-0019 §1 is the authoritative
+  // decision for this task family: "`credit_limit` (money, nullable = no
+  // numeric ceiling beyond `credit_enabled`)". This test previously asserted
+  // the OPPOSITE (rejection) under a narrower Task 3b.2 DB CHECK
+  // (`customer_company_account_credit_enabled_requires_limit_chk`) that
+  // predated ADR-0019 and has since been dropped by a forward corrective
+  // migration (`20260929120000_receivables_unlimited_credit_correction`).
+  it('enable + null limit succeeds — unlimited credit (ADR-0019 §1)', async () => {
     const { customer } = await asTenant((tx) =>
       repo.createForCompany(tx, { tenantId, companyId: companyAId, displayName: 'Enable Null' }),
     );
-    await expect(
-      asTenant((tx) =>
-        repo.configureCredit(tx, {
-          tenantId,
-          companyId: companyAId,
-          customerId: customer.id,
-          expectedVersion: 1,
-          creditEnabled: true,
-        }),
-      ),
-    ).rejects.toMatchObject({ code: 'CUSTOMER_CREDIT_CONFIG_INVALID' });
+    const updated = await asTenant((tx) =>
+      repo.configureCredit(tx, {
+        tenantId,
+        companyId: companyAId,
+        customerId: customer.id,
+        expectedVersion: 1,
+        creditEnabled: true,
+      }),
+    );
+    expect(updated.creditEnabled).toBe(true);
+    expect(updated.creditLimitMinor).toBeNull();
+    expect(updated.creditLimitCurrencyCode).toBeNull();
+    expect(updated.creditLimitCurrencyExponent).toBeNull();
   });
 
   it('enable + zero limit is rejected', async () => {

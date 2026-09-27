@@ -85,16 +85,16 @@ describe('AccountRepository.ensureDefaultAccounts (task 3b.1, integration)', () 
     return runScoped(prisma, { tenantId }, fn);
   }
 
-  it('inserts all 14 reference accounts on the first call', async () => {
+  it('inserts all 15 reference accounts on the first call', async () => {
     const { insertedCount } = await asTenant((tx) =>
       repo.ensureDefaultAccounts(tx, { tenantId, companyId }),
     );
-    expect(insertedCount).toBe(14);
+    expect(insertedCount).toBe(15);
 
     const rows = await asTenant((tx) =>
       tx.account.findMany({ where: { tenantId, companyId }, orderBy: { key: 'asc' } }),
     );
-    expect(rows).toHaveLength(14);
+    expect(rows).toHaveLength(15);
     expect(new Set(rows.map((r) => r.key))).toEqual(
       new Set(ACCOUNTING_REFERENCE_ACCOUNTS.map((a) => a.key)),
     );
@@ -107,7 +107,7 @@ describe('AccountRepository.ensureDefaultAccounts (task 3b.1, integration)', () 
     expect(insertedCount).toBe(0);
 
     const rows = await asTenant((tx) => tx.account.findMany({ where: { tenantId, companyId } }));
-    expect(rows).toHaveLength(14);
+    expect(rows).toHaveLength(15);
   });
 
   it("never overwrites an existing account's displayCode/displayName customization", async () => {
@@ -142,12 +142,12 @@ describe('AccountRepository.ensureDefaultAccounts (task 3b.1, integration)', () 
     const { insertedCount } = await asTenant((tx) =>
       repo.ensureDefaultAccounts(tx, { tenantId, companyId: customCompanyId }),
     );
-    expect(insertedCount).toBe(13); // the 13 missing keys — not the pre-existing one
+    expect(insertedCount).toBe(14); // the 14 missing keys — not the pre-existing one
 
     const rows = await asTenant((tx) =>
       tx.account.findMany({ where: { tenantId, companyId: customCompanyId } }),
     );
-    expect(rows).toHaveLength(14);
+    expect(rows).toHaveLength(15);
     const cash = rows.find((r) => r.key === 'ASSET.CASH_ON_HAND');
     expect(cash?.displayCode).toBe('CUSTOM-1000');
     expect(cash?.displayName).toBe('Till Cash (customized)');

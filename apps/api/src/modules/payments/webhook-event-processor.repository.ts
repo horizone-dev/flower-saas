@@ -9,6 +9,9 @@ import { assertPaymentAttemptOrderBinding } from './order-binding.js';
 import { canTransitionPaymentAttempt, type PaymentAttemptState } from './payment-attempt-state.js';
 import type { WebhookVerifiedTargetState } from './payment-provider.port.js';
 import type { PaymentEventType, ProviderEventExceptionReason } from './payment-events.js';
+import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
+import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import type { TenderMethod } from './tender.js';
 
 export interface ProcessVerifiedInboxEventInput {
   tenantId: string;
@@ -73,6 +76,8 @@ export class WebhookEventProcessorRepository {
   constructor(
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly attribution: PaymentCustomerAttributionRepository,
+    private readonly effects: CustomerReceiptEffectsRepository,
   ) {}
 
   async processVerifiedInboxEventInTx(
@@ -455,13 +460,15 @@ export class WebhookEventProcessorRepository {
       RETURNING "id"`;
     const paymentId = paymentRows[0]!.id;
 
-    await tx.$queryRaw`
+    const allocationRows = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO "payment_allocation"
         ("tenantId", "companyId", "branchId", "paymentId", "invoiceId",
          "amountMinor", "currencyCode", "currencyExponent")
       VALUES (${p.ctx.tenantId}::uuid, ${p.ctx.companyId}::uuid, ${p.ctx.branchId}::uuid,
               ${paymentId}::uuid, ${p.invoiceId}::uuid,
-              ${attempt.amountMinor}, ${attempt.currencyCode}, ${attempt.currencyExponent})`;
+              ${attempt.amountMinor}, ${attempt.currencyCode}, ${attempt.currencyExponent})
+      RETURNING "id"`;
+    const allocationId = allocationRows[0]!.id;
 
     // ── owner §G3/§G6 — exactly one audit + one outbox row per immutable
     //    Payment created here. `createdByUserId`/`actingUserId` are NULL
@@ -504,6 +511,50 @@ export class WebhookEventProcessorRepository {
         currencyExponent: attempt.currencyExponent,
       },
     });
+
+    // ── task 3b.6 Checkpoint D (D17/D20 — provider webhook CAPTURED
+    //    integration). Identical customer-account effects to the local
+    //    synchronous path, via the SAME centralized primitive — never
+    //    duplicated. Walk-in Invoice: zero customer-account effects, zero D
+    //    GL, but its payment status still derives (D21) unconditionally. ────
+    const receivableRows = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "customer_receivable" WHERE "invoiceId" = ${p.invoiceId}::uuid`;
+    const customerReceivableId = receivableRows[0]?.id ?? null;
+    if (customerReceivableId) {
+      const attributed = await this.attribution.resolveInTx(tx, {
+        tenantId: p.ctx.tenantId,
+        companyId: p.ctx.companyId,
+        paymentId,
+      });
+      if (attributed.customerCompanyAccountId) {
+        await this.effects.recordPaymentReceivedInTx(tx, {
+          tenantId: p.ctx.tenantId,
+          companyId: p.ctx.companyId,
+          branchId: p.ctx.branchId,
+          customerCompanyAccountId: attributed.customerCompanyAccountId,
+          paymentId,
+          // DB CHECK already guarantees `method` is a valid TenderMethod at
+          // insert time — this raw-SQL read's `string` type is narrowed here
+          // exactly like every other typed raw-query result in this file.
+          method: attempt.method as TenderMethod,
+          amountMinor: attempt.amountMinor,
+          actorUserId: null,
+        });
+        await this.effects.applyInvoiceAllocationEffectsInTx(tx, {
+          tenantId: p.ctx.tenantId,
+          companyId: p.ctx.companyId,
+          branchId: p.ctx.branchId,
+          customerCompanyAccountId: attributed.customerCompanyAccountId,
+          paymentAllocationId: allocationId,
+          customerReceivableId,
+          invoiceId: p.invoiceId,
+          amountMinor: attempt.amountMinor,
+          actorUserId: null,
+        });
+      }
+    } else {
+      await this.effects.recomputeInvoicePaymentStatusInTx(tx, p.invoiceId);
+    }
 
     return this.finalize(tx, p.ctx, 'PROCESSED');
   }

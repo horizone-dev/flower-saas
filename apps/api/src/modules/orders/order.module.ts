@@ -3,6 +3,7 @@ import { SystemClock } from '../../common/clock/clock.js';
 import { CatalogModule } from '../catalog/catalog.module.js';
 import { CustomerModule } from '../customers/customer.module.js';
 import { LocalizationModule } from '../localization/localization.module.js';
+import { ReceivablesModule } from '../receivables/receivables.module.js';
 import { OrderRepository } from './order.repository.js';
 import { OrderService } from './order.service.js';
 import { OrderCreateFingerprintProvider } from './order-create-fingerprint.provider.js';
@@ -43,9 +44,17 @@ import { TaxFinalizationService } from './tax-finalization.service.js';
  * `InvoiceIssuanceRepository.issueFinalInvoice` in the SAME transaction.
  * Deliberately NOT wired to any controller — no public confirm/finalize
  * route exists anywhere in this module.
+ *
+ * Task 3b.6 Checkpoint C adds `ReceivablesModule` — `InvoiceIssuanceRepository`
+ * now calls `CustomerInvoiceArRepository` (customer-linked Invoice AR +
+ * credit-limit hard gate + `invoice_ar` journal) for every customer-linked
+ * issuance. `ReceivablesModule` itself imports `AccountingModule`
+ * (`PostingEngineService`), so this module still never imports it directly —
+ * the prior "NO `AccountingModule` import" note above now describes a
+ * TRANSITIVE dependency's own scope, not this module's.
  */
 @Module({
-  imports: [CatalogModule, CustomerModule, LocalizationModule],
+  imports: [CatalogModule, CustomerModule, LocalizationModule, ReceivablesModule],
   controllers: [OrderController, InvoiceController],
   providers: [
     OrderRepository,

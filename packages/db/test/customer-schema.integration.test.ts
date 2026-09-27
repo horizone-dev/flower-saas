@@ -263,7 +263,17 @@ describe('packages/db — Task 3b.2 customer core schema', () => {
     ).resolves.toBeTruthy();
   });
 
-  it('creditEnabled=true requires a configured credit-limit Money snapshot (new CHECK) — accepts a valid complete limit, rejects all-NULL', async () => {
+  // Task 3b.6 Checkpoint C hardening — ADR-0019 §1 ("`credit_limit` (money,
+  // nullable = no numeric ceiling beyond `credit_enabled`)") is the
+  // authoritative contract for this task family. The original Task 3b.2
+  // `customer_company_account_credit_enabled_requires_limit_chk` CHECK this
+  // test used to prove (forbidding `creditEnabled=true` with an all-NULL
+  // limit) directly conflicted with it, and has been DROPPED by a forward
+  // corrective migration (`20260929120000_receivables_unlimited_credit_correction`,
+  // confirmed by direct inspection — the historical 3b.2 migration file
+  // itself is untouched on disk). `creditEnabled=true` with an all-NULL
+  // triplet is now the valid, deliberate "unlimited credit" configuration.
+  it('creditEnabled=true accepts EITHER a complete Money limit OR an all-NULL triplet (unlimited credit, ADR-0019 §1)', async () => {
     const enabledComplete = crypto.randomUUID();
     await insertCustomer({ id: enabledComplete });
     await expect(
@@ -278,14 +288,19 @@ describe('packages/db — Task 3b.2 customer core schema', () => {
 
     const enabledNoLimit = crypto.randomUUID();
     await insertCustomer({ id: enabledNoLimit });
-    await expect(
-      pool.query(
-        `INSERT INTO customer_company_account
-           (id, "tenantId", "companyId", "customerId", "creditEnabled", "updatedAt")
-         VALUES (gen_random_uuid(), $1, $2, $3, true, now())`,
-        [TENANT, COMPANY, enabledNoLimit],
-      ),
-    ).rejects.toThrow(/credit_enabled_requires_limit_chk|violates check constraint/i);
+    const unlimited = await pool.query(
+      `INSERT INTO customer_company_account
+         (id, "tenantId", "companyId", "customerId", "creditEnabled", "updatedAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, true, now())
+       RETURNING "creditEnabled", "creditLimitMinor", "creditLimitCurrencyCode", "creditLimitCurrencyExponent"`,
+      [TENANT, COMPANY, enabledNoLimit],
+    );
+    expect(unlimited.rows[0]).toEqual({
+      creditEnabled: true,
+      creditLimitMinor: null,
+      creditLimitCurrencyCode: null,
+      creditLimitCurrencyExponent: null,
+    });
   });
 
   it('creditEnabled=true with partial Money is rejected (by the pre-existing money-shape CHECK)', async () => {

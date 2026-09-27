@@ -15,6 +15,26 @@ export interface PostingFingerprintInput {
   lines: PostingFingerprintLine[];
   branchId: string | null;
   posTerminalId: string | null;
+  /**
+   * Task 3b.6 Checkpoint F Absolute Final Freeze Gate (§1/§3) — the caller's
+   * own EXPLICITLY supplied `accountingDate` (`PostJournalInput.accountingDate`),
+   * `null` when omitted. `null` here means "not supplied" and is DELIBERATELY
+   * excluded from the canonical object entirely (see `computePostingFingerprint`
+   * below) — `canonicalize()` only drops `undefined`-valued keys, never `null`,
+   * so passing the literal `null` straight through would add a NEW key to
+   * every pre-F caller's canonical shape and change every legacy stored
+   * `postingFingerprint`, breaking idempotent replay for any journal posted
+   * before this field existed. Converting `null` -> `undefined` before
+   * building the canonical object makes the omitted-date canonical shape
+   * BYTE-IDENTICAL to the pre-F canonical shape (which never had this key),
+   * so every legacy fingerprint remains valid with no DB rewrite. An
+   * EXPLICITLY supplied date DOES participate (the key is present), so the
+   * same source posted with a different explicit date is a genuine content
+   * conflict, and an omitted-date fingerprint never collides with any
+   * explicit-date fingerprint for the same source (different canonical
+   * shapes).
+   */
+  accountingDate: string | null;
 }
 
 /**
@@ -46,6 +66,11 @@ export function computePostingFingerprint(input: PostingFingerprintInput): strin
       lines: sortedLines,
       branchId: input.branchId,
       posTerminalId: input.posTerminalId,
+      // `null` (omitted) -> `undefined` so `canonicalize()` drops the key
+      // entirely, keeping the omitted-date canonical shape byte-identical
+      // to every pre-F fingerprint (see the field doc on `accountingDate`
+      // above for why this is required for legacy compatibility).
+      accountingDate: input.accountingDate ?? undefined,
     }),
   );
   return createHash('sha256').update(canonical).digest('hex');

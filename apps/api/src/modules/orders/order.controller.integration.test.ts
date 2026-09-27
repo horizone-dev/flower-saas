@@ -1966,6 +1966,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
       orderId: string;
       expectedVersion: number;
       commercialSnapshotFingerprint: string;
+      paymentIntent: 'PAY_NOW' | 'ON_CREDIT';
       lines: {
         orderLineId: string;
         priceTaxMode: string;
@@ -1994,6 +1995,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
         orderId,
         expectedVersion: gBody.order.version,
         commercialSnapshotFingerprint: gBody.order.commercialSnapshotFingerprint,
+        paymentIntent: 'PAY_NOW',
         lines: [
           {
             orderLineId: gBody.lines[0]!.id,
@@ -2108,6 +2110,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
           orderId,
           expectedVersion: version,
           commercialSnapshotFingerprint: fingerprint,
+          paymentIntent: 'PAY_NOW',
         }),
       );
     }
@@ -2660,6 +2663,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
           orderId: body.order.id,
           expectedVersion: body.order.version,
           commercialSnapshotFingerprint: body.order.commercialSnapshotFingerprint,
+          paymentIntent: 'PAY_NOW',
           lines: [
             {
               orderLineId: body.lines[0]!.id,

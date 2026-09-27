@@ -26,6 +26,36 @@ import type {
   PaymentProviderInitiationResult,
   VerifiedProviderWebhookEvent,
 } from './payment-provider.port.js';
+import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
+import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import { PostingEngineService } from '../accounting/posting-engine.service.js';
+import { CompanyFinancialConfigRepository } from '../accounting/company-financial-config.repository.js';
+import { AccountingPeriodRepository } from '../accounting/accounting-period.repository.js';
+import { AccountRepository } from '../accounting/account.repository.js';
+import { SystemClock } from '../../common/clock/clock.js';
+
+/** task 3b.6 Checkpoint D — the two new `PaymentCollectionRepository`
+ *  dependencies; every call site below targets a walk-in Invoice, so these
+ *  are never functionally exercised here, only required to compile. */
+function makeReceiptSupport(db: DbService): {
+  attribution: PaymentCustomerAttributionRepository;
+  effects: CustomerReceiptEffectsRepository;
+} {
+  const postingEngine = new PostingEngineService(
+    new CompanyFinancialConfigRepository(
+      db,
+      new AuditWriter(db),
+      new AccountRepository(db, new AuditWriter(db)),
+    ),
+    new AccountingPeriodRepository(db, new AuditWriter(db)),
+    new AuditWriter(db),
+    new SystemClock(),
+  );
+  return {
+    attribution: new PaymentCustomerAttributionRepository(),
+    effects: new CustomerReceiptEffectsRepository(postingEngine, new AuditWriter(db)),
+  };
+}
 
 /**
  * Task 3b.5 Checkpoint E (integration) — proves the async PaymentAttempt /
@@ -1509,7 +1539,13 @@ describe('Checkpoint E — async PaymentAttempt / provider port (integration)', 
         }),
       );
       const { PaymentCollectionRepository } = await import('./payment-collection.repository.js');
-      const collection = new PaymentCollectionRepository(new AuditWriter(db), new OutboxWriter(db));
+      const receiptSupport = makeReceiptSupport(db);
+      const collection = new PaymentCollectionRepository(
+        new AuditWriter(db),
+        new OutboxWriter(db),
+        receiptSupport.attribution,
+        receiptSupport.effects,
+      );
       const capture = (amountMinor: bigint) =>
         runScoped(prisma, { tenantId: TENANT }, (tx) =>
           collection.captureSingleTenderInTx(tx, {
@@ -1559,9 +1595,12 @@ describe('Checkpoint E — async PaymentAttempt / provider port (integration)', 
           }),
         );
         const { PaymentCollectionRepository } = await import('./payment-collection.repository.js');
+        const receiptSupport = makeReceiptSupport(db);
         const collection = new PaymentCollectionRepository(
           new AuditWriter(db),
           new OutboxWriter(db),
+          receiptSupport.attribution,
+          receiptSupport.effects,
         );
         const capture = (amountMinor: bigint) =>
           runScoped(prisma, { tenantId: TENANT }, (tx) =>
@@ -1612,7 +1651,13 @@ describe('Checkpoint E — async PaymentAttempt / provider port (integration)', 
         }),
       );
       const { PaymentCollectionRepository } = await import('./payment-collection.repository.js');
-      const collection = new PaymentCollectionRepository(new AuditWriter(db), new OutboxWriter(db));
+      const receiptSupport = makeReceiptSupport(db);
+      const collection = new PaymentCollectionRepository(
+        new AuditWriter(db),
+        new OutboxWriter(db),
+        receiptSupport.attribution,
+        receiptSupport.effects,
+      );
       const result = await runScoped(prisma, { tenantId: TENANT }, (tx) =>
         collection.captureSingleTenderInTx(tx, {
           tenantId: TENANT,

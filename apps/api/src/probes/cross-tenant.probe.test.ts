@@ -19,6 +19,7 @@ import {
   PHASE_3B_1_TENANT_PERMISSIONS,
   PHASE_3B_2_TENANT_PERMISSIONS,
   PHASE_3B_3_TENANT_PERMISSIONS,
+  PHASE_3B_6_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -81,6 +82,7 @@ describe('cross-tenant isolation probe suite', () => {
   let ownerBAccountingTok: string; // tenant B, task 3b.1 accounting:* permissions
   let ownerBCustomerTok: string; // tenant B, task 3b.2 customers:* permissions
   let ownerBOrderTok: string; // tenant B, task 3b.3 orders:* permissions
+  let ownerBReceivablesTok: string; // tenant B, task 3b.6 receivables:* permissions
   let branchUserATok: string; // tenant A, scoped to branch A1 only
 
   beforeAll(async () => {
@@ -256,6 +258,15 @@ describe('cross-tenant isolation probe suite', () => {
       userId: B.ownerId,
       accountType: 'OWNER',
       permissions: [...PHASE_3B_3_TENANT_PERMISSIONS],
+    });
+    // task 3b.6 (Checkpoints C-G) — the full receivables/credit/advances
+    // permission tier, mirroring `system-roles.ts`'s own Owner grant.
+    ownerBReceivablesTok = await mint('probe-owner-b-receivables', {
+      realm: 'tenant',
+      tenantId: B.tenantId,
+      userId: B.ownerId,
+      accountType: 'OWNER',
+      permissions: [...PHASE_3B_6_TENANT_PERMISSIONS],
     });
 
     // seed a couple of A-owned resources to probe for
@@ -1500,6 +1511,121 @@ describe('cross-tenant isolation probe suite', () => {
           ownerBOrderTok,
         ),
       },
+      // task 3b.6 (Checkpoints C-G) — tenant B (full receivables:* owner
+      // permission set) can never reach tenant A's customer-account
+      // resources through this branch-nested route family, even against a
+      // REAL existing A-owned customer/CCA (A.customerId, seeded above) —
+      // never a coincidental 404 from an empty/nonexistent resource.
+      {
+        name: "POST a customer receipt against A's customer as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/receipts`,
+          ownerBReceivablesTok,
+          { amountMinor: '100', method: 'CASH' },
+          { 'idempotency-key': 'probe-3b6-receipt-0001' },
+        ),
+      },
+      {
+        name: "POST Payment->Advance conversion against A's customer as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/advances/from-payment`,
+          ownerBReceivablesTok,
+          { paymentId: '00000000-0000-7000-8000-000000000000', amountMinor: '100' },
+          { 'idempotency-key': 'probe-3b6-conv-0001' },
+        ),
+      },
+      {
+        name: "POST an Advance application against A's customer as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/advances/00000000-0000-7000-8000-000000000000/applications`,
+          ownerBReceivablesTok,
+          { customerReceivableId: '00000000-0000-7000-8000-000000000000', amountMinor: '100' },
+          { 'idempotency-key': 'probe-3b6-apply-0001' },
+        ),
+      },
+      {
+        name: "POST an Opening Balance against A's customer as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/opening-balance`,
+          ownerBReceivablesTok,
+          { type: 'RECEIVABLE', amountMinor: '100', effectiveDate: '2026-01-10' },
+          { 'idempotency-key': 'probe-3b6-opening-0001' },
+        ),
+      },
+      {
+        name: "POST customer-create-with-opening-balance under A's branch as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers`,
+          ownerBCustomerTok,
+          { displayName: 'probe cross-tenant customer' },
+          { 'idempotency-key': 'probe-3b6-create-0001' },
+        ),
+      },
+      {
+        name: "GET A's customer account summary as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/account/summary`,
+          ownerBReceivablesTok,
+        ),
+      },
+      {
+        name: "GET A's customer open receivables as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/account/receivables`,
+          ownerBReceivablesTok,
+        ),
+      },
+      {
+        name: "GET A's customer advances as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/account/advances`,
+          ownerBReceivablesTok,
+        ),
+      },
+      {
+        name: "GET A's unapplied receipts as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/account/unapplied-receipts`,
+          ownerBReceivablesTok,
+        ),
+      },
+      {
+        name: "GET A's customer statement as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/account/statement`,
+          ownerBReceivablesTok,
+        ),
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -1737,6 +1863,13 @@ describe('cross-tenant isolation probe suite', () => {
       // task 3b.3 Checkpoint C — probed above (tenant B cannot read tenant
       // A's issued Invoice, same branch-nested scope rules).
       '/v1/companies/:companyId/branches/:branchId/invoices',
+      // task 3b.6 (Checkpoints C-G) — probed above (tenant B, holding the
+      // full receivables:* owner permission tier, cannot create a receipt/
+      // Advance-conversion/Advance-application/Opening-Balance/customer-
+      // with-opening for tenant A, nor read A's account summary/
+      // receivables/advances/unapplied-receipts/statement — all against a
+      // REAL existing A-owned customer, never a coincidental 404).
+      '/v1/companies/:companyId/branches/:branchId/customers',
     ];
     const unprobed = nonPublic.filter((r) => {
       const key = `${r.httpMethod} ${r.path}`;

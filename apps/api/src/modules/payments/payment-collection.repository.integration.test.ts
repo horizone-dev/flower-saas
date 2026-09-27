@@ -2,7 +2,12 @@ import crypto from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestStack, migrateTestDb, inParallel, type TestStack } from '@flower/testing';
 // eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
-import { createPrismaClient, runScoped, type PrismaClient } from '@flower/db';
+import {
+  createPrismaClient,
+  runScoped,
+  ACCOUNTING_REFERENCE_ACCOUNTS,
+  type PrismaClient,
+} from '@flower/db';
 import { DbService, type BackendConfig } from '@flower/backend';
 import pg from 'pg';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
@@ -10,6 +15,36 @@ import { OutboxWriter } from '../../common/audit/outbox.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { PaymentCollectionRepository } from './payment-collection.repository.js';
 import type { TenderMethod } from './tender.js';
+import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
+import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import { PostingEngineService } from '../accounting/posting-engine.service.js';
+import { CompanyFinancialConfigRepository } from '../accounting/company-financial-config.repository.js';
+import { AccountingPeriodRepository } from '../accounting/accounting-period.repository.js';
+import { AccountRepository } from '../accounting/account.repository.js';
+import { SystemClock } from '../../common/clock/clock.js';
+
+/** task 3b.6 Checkpoint D — the two new producer-side dependencies, wired
+ *  exactly like `customer-invoice-ar.integration.test.ts`'s own
+ *  `PostingEngineService` construction. */
+function makeReceiptSupport(db: DbService): {
+  attribution: PaymentCustomerAttributionRepository;
+  effects: CustomerReceiptEffectsRepository;
+} {
+  const postingEngine = new PostingEngineService(
+    new CompanyFinancialConfigRepository(
+      db,
+      new AuditWriter(db),
+      new AccountRepository(db, new AuditWriter(db)),
+    ),
+    new AccountingPeriodRepository(db, new AuditWriter(db)),
+    new AuditWriter(db),
+    new SystemClock(),
+  );
+  return {
+    attribution: new PaymentCustomerAttributionRepository(),
+    effects: new CustomerReceiptEffectsRepository(postingEngine, new AuditWriter(db)),
+  };
+}
 
 /**
  * Task 3b.5 Checkpoint C+D — `PaymentCollectionRepository` proven directly
@@ -26,9 +61,15 @@ import type { TenderMethod } from './tender.js';
  * shape-preserving delegate to the latter, and every original Checkpoint C
  * test below is unchanged and still exercises it directly.
  *
- * Neither checkpoint adds GL/Invoice.invoicePaymentStatus — nothing here
- * asserts on those because nothing here writes them. Checkpoint G added
- * audit/outbox co-commit on top of this same primitive — proven in
+ * Neither Checkpoint C nor D (3b.5) adds a customer-account GL journal here —
+ * that remains Task 3b.6 Checkpoint D's own centralized
+ * `CustomerReceiptEffectsRepository`, wired into this primitive's own
+ * PaymentAllocation call sites; a WALK-IN Invoice (every fixture in this
+ * file) never triggers it, so nothing here asserts on a GL journal. Task
+ * 3b.6 Checkpoint D DOES now derive `invoice.invoicePaymentStatus` on every
+ * PaymentAllocation, walk-in included — a small number of tests below assert
+ * on that value accordingly. Checkpoint G added audit/outbox co-commit on
+ * top of this same primitive — proven in
  * `payment-collection.repository.integration.test.ts`'s own dedicated
  * audit/outbox describe block below, not scattered through every
  * pre-existing C/D test.
@@ -45,6 +86,8 @@ const CATEGORY = 'c9000000-9999-7999-8999-999999999999';
 const PRODUCT = 'ca000000-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
 const VARIANT = 'cb000000-bbbb-7bbb-8bbb-bbbbbbbbbbbb';
 const PROVIDER_CRED_BRANCH = 'cc000000-cccc-7ccc-8ccc-cccccccccccc';
+const CUSTOMER = 'cd000000-dddd-7ddd-8ddd-dddddddddddd';
+const CCA = 'ce000000-eeee-7eee-8eee-eeeeeeeeeeee';
 
 describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', () => {
   let stack: TestStack;
@@ -63,7 +106,13 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
     // own `.emit()` (a standalone platform transaction) — `.record()`/
     // `.enqueue()`, the only methods `PaymentCollectionRepository` calls,
     // take an already-open `tx` directly and never touch `this.db`.
-    collection = new PaymentCollectionRepository(new AuditWriter(db), new OutboxWriter(db));
+    const receiptSupport = makeReceiptSupport(db);
+    collection = new PaymentCollectionRepository(
+      new AuditWriter(db),
+      new OutboxWriter(db),
+      receiptSupport.attribution,
+      receiptSupport.effects,
+    );
 
     await pool.query(
       `INSERT INTO plan (id, key, name, "updatedAt")
@@ -130,6 +179,37 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
          (id, "tenantId", "companyId", "branchId", provider, mode, "secretCiphertext", "secretNonce", "dekWrapped", "updatedAt")
        VALUES ($1, $2, $3, $4, 'tap', 'TEST', '\\x00', '\\x00', '\\x00', now())`,
       [PROVIDER_CRED_BRANCH, TENANT, COMPANY, BRANCH],
+    );
+    // task 3b.6 Checkpoint D hardening — accounting + customer fixtures,
+    // needed ONLY by the new customer-linked Multi Payment describe block.
+    for (const a of ACCOUNTING_REFERENCE_ACCOUNTS) {
+      await pool.query(
+        `INSERT INTO account (id,"tenantId","companyId",key,category,"displayCode","displayName","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,now())`,
+        [
+          crypto.randomUUID(),
+          TENANT,
+          COMPANY,
+          a.key,
+          a.category,
+          a.defaultDisplayCode,
+          a.defaultDisplayName,
+        ],
+      );
+    }
+    await pool.query(
+      `INSERT INTO accounting_period (id,"tenantId","companyId","startDate","endDate",status,"updatedAt")
+       VALUES ($1,$2,$3,'2026-01-01','2026-12-31','OPEN',now())`,
+      [crypto.randomUUID(), TENANT, COMPANY],
+    );
+    await pool.query(
+      `INSERT INTO customer (id, "tenantId", "displayName", "updatedAt") VALUES ($1, $2, 'Test Customer', now())`,
+      [CUSTOMER, TENANT],
+    );
+    await pool.query(
+      `INSERT INTO customer_company_account (id, "tenantId", "companyId", "customerId", "updatedAt")
+       VALUES ($1, $2, $3, $4, now())`,
+      [CCA, TENANT, COMPANY, CUSTOMER],
     );
   }, 180_000);
 
@@ -216,6 +296,36 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
   async function freshInvoice(totalAmountMinor = 500n): Promise<string> {
     const orderId = await insertOrder();
     return insertInvoice(orderId, totalAmountMinor);
+  }
+
+  /** task 3b.6 Checkpoint D hardening — a customer-linked Invoice + its
+   *  Checkpoint-C-style `CustomerReceivable(INVOICE)` row. */
+  async function freshCustomerInvoice(totalAmountMinor = 500n): Promise<{
+    invoiceId: string;
+    receivableId: string;
+  }> {
+    const orderId = uid();
+    await pool.query(
+      `INSERT INTO "order"
+         (id, "tenantId", "companyId", "originBranchId", "fulfillingBranchId", "customerId", kind, status,
+          "currencyCode", "currencyExponent", "commercialSnapshotFingerprint",
+          "commercialSnapshotFingerprintVersion", "taxPriceMode", "taxRoundingScope",
+          "taxRoundingMode", "updatedAt")
+       VALUES ($1,$2,$3,$4,$4,$5,'WALK_IN','DRAFT','AED',2,$6,2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
+      [orderId, TENANT, COMPANY, BRANCH, CUSTOMER, `fp-${orderId}`],
+    );
+    const invoiceId = await insertInvoice(orderId, totalAmountMinor);
+    const receivableId = uid();
+    await pool.query(
+      `INSERT INTO customer_receivable (id, "tenantId", "companyId", "branchId", "customerCompanyAccountId", "sourceType", "invoiceId", "creditAuthorized")
+       VALUES ($1,$2,$3,$4,$5,'INVOICE',$6,true)`,
+      [receivableId, TENANT, COMPANY, BRANCH, CCA, invoiceId],
+    );
+    await pool.query(
+      `UPDATE customer_company_account SET "currentOutstandingMinor" = "currentOutstandingMinor" + $2 WHERE id = $1`,
+      [CCA, totalAmountMinor],
+    );
+    return { invoiceId, receivableId };
   }
 
   async function seedAttempt(input: {
@@ -360,12 +470,14 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
       [invoiceId],
     );
     expect(paymentCount[0]!.n).toBe(2);
-    // invoicePaymentStatus remains untouched — 3b.6's exclusively
+    // task 3b.6 Checkpoint D (D17/D21) — invoicePaymentStatus now derives on
+    // every PaymentAllocation, walk-in included; 200+300 = 500 fully covers
+    // this 500 Invoice, so it advances all the way to PAID.
     const { rows: invRows } = await pool.query(
       `SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`,
       [invoiceId],
     );
-    expect(invRows[0]!.invoicePaymentStatus).toBe('UNPAID');
+    expect(invRows[0]!.invoicePaymentStatus).toBe('PAID');
   });
 
   // ═══════════════════════════ OVERPAYMENT HARD GATES (C16) ══════════════
@@ -582,14 +694,19 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
     await expect(
       pool.query(`UPDATE payment SET "amountMinor" = 1 WHERE id = $1`, [result.paymentId]),
     ).rejects.toThrow(/is immutable/i);
-    // Allocation 1:1 invariant (duplicate rejected)
+    // Pre-existing staleness discovered during Checkpoint D regression
+    // (not a Checkpoint D behavior change): Checkpoint B (B5) deliberately
+    // RELAXED the 1:1-per-Payment `paymentId` uniqueness to a fan-out — a
+    // second PaymentAllocation against the SAME already-fully-covered
+    // Invoice is now correctly rejected by the coverage backstop instead,
+    // never a phantom "duplicate key" constraint that no longer exists.
     await expect(
       pool.query(
         `INSERT INTO payment_allocation (id, "tenantId","companyId","branchId","paymentId","invoiceId","amountMinor","currencyCode","currencyExponent")
          VALUES (uuidv7(), $1,$2,$3,$4,$5,300,'AED',2)`,
         [TENANT, COMPANY, BRANCH, result.paymentId, invoiceId],
       ),
-    ).rejects.toThrow(/duplicate key|unique constraint/i);
+    ).rejects.toThrow(/coverage would exceed totalAmountMinor/i);
     // attempt transition graph (CAPTURED cannot regress)
     await expect(
       pool.query(`UPDATE payment_attempt SET state = 'PENDING' WHERE id = $1`, [
@@ -617,6 +734,69 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
 
   // ═══════════════════ CHECKPOINT D — MULTI PAYMENT ══════════════════════
 
+  it('Checkpoint D hardening (task 13-B) — customer-linked Multi Payment: N canonical Payments, N PAYMENT entries, N receipt journals, N PaymentAllocation entries, N allocation journals, ONE correct final projection/status', async () => {
+    const { invoiceId, receivableId } = await freshCustomerInvoice(300n);
+    const multi = await captureMulti({
+      invoiceId,
+      amountMinor: 300n,
+      tenders: [
+        { method: 'CASH', amountMinor: 50n },
+        { method: 'BANK_TRANSFER', amountMinor: 100n },
+        { method: 'OTHER_MANUAL', amountMinor: 150n },
+      ],
+    });
+    expect(multi.payments).toHaveLength(3);
+
+    const { rows: paymentRows } = await pool.query<{ id: string; method: string }>(
+      `SELECT p.id, p.method FROM payment p WHERE p."paymentGroupId" = $1 ORDER BY p."amountMinor" ASC`,
+      [multi.paymentGroupId],
+    );
+    expect(paymentRows).toHaveLength(3); // N canonical Payments
+
+    const { rows: entryRows } = await pool.query<{ entryKind: string; n: string }>(
+      `SELECT "entryKind", count(*)::int AS n FROM customer_account_entry
+        WHERE "paymentId" = ANY($1::uuid[]) OR "paymentAllocationId" IN (
+          SELECT id FROM payment_allocation WHERE "paymentId" = ANY($1::uuid[])
+        )
+        GROUP BY "entryKind"`,
+      [paymentRows.map((p) => p.id)],
+    );
+    const byKind = Object.fromEntries(entryRows.map((r) => [r.entryKind, Number(r.n)]));
+    expect(byKind['PAYMENT']).toBe(3); // N PAYMENT entries
+    expect(byKind['PAYMENT_ALLOCATION']).toBe(3); // N PaymentAllocation entries
+
+    for (const p of paymentRows) {
+      const { rows: receiptJournalRows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::int AS n FROM journal_entry WHERE "sourceKind" = 'customer_receipt_payment' AND "sourceId" = $1`,
+        [p.id],
+      );
+      expect(receiptJournalRows[0]!.n).toBe(1); // N receipt journals — exactly one each
+      const { rows: allocRows } = await pool.query<{ id: string }>(
+        `SELECT id FROM payment_allocation WHERE "paymentId" = $1`,
+        [p.id],
+      );
+      const { rows: allocJournalRows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::int AS n FROM journal_entry WHERE "sourceKind" = 'payment_allocation' AND "sourceId" = $1`,
+        [allocRows[0]!.id],
+      );
+      expect(allocJournalRows[0]!.n).toBe(1); // N allocation journals — exactly one each
+    }
+
+    // ONE mathematically correct final projection/status: 50+100+150=300 fully
+    // covers this 300 Invoice.
+    const { rows: ccaRows } = await pool.query<{ currentOutstandingMinor: string }>(
+      `SELECT "currentOutstandingMinor" FROM customer_company_account WHERE id = $1`,
+      [CCA],
+    );
+    expect(ccaRows[0]!.currentOutstandingMinor).toBe('0');
+    const { rows: invRows } = await pool.query<{ invoicePaymentStatus: string }>(
+      `SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`,
+      [invoiceId],
+    );
+    expect(invRows[0]!.invoicePaymentStatus).toBe('PAID');
+    void receivableId;
+  });
+
   it('(D11) partial Multi Payment: 200 of 500 across 3 tenders, then a later ordinary single payment of 300 via the same primitive', async () => {
     const invoiceId = await freshInvoice(500n);
     const multi = await captureMulti({
@@ -635,11 +815,13 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
       [invoiceId],
     );
     expect(sumRows[0]!.total).toBe('200');
+    // task 3b.6 Checkpoint D (D17/D21) — 200 of 500 is a genuine partial
+    // coverage, so invoicePaymentStatus now derives to PARTIAL.
     const { rows: invRows } = await pool.query(
       `SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`,
       [invoiceId],
     );
-    expect(invRows[0]!.invoicePaymentStatus).toBe('UNPAID');
+    expect(invRows[0]!.invoicePaymentStatus).toBe('PARTIAL');
 
     const single = await capture({ invoiceId, amountMinor: 300n });
     expect(single.remainingAvailableToCollectMinor).toBe(0n);
@@ -1043,14 +1225,18 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
       );
       expect(providerRows[0]).toEqual({ providerKey: null, providerCredentialId: null });
     }
-    // Allocation 1:1 — a second allocation for any one of the payments is rejected
+    // Pre-existing staleness discovered during Checkpoint D regression (not
+    // a Checkpoint D behavior change): Checkpoint B (B5) relaxed the 1:1
+    // `paymentId` uniqueness to a fan-out — a second allocation against an
+    // already-fully-covered Invoice is correctly rejected by the coverage
+    // backstop instead.
     await expect(
       pool.query(
         `INSERT INTO payment_allocation (id,"tenantId","companyId","branchId","paymentId","invoiceId","amountMinor","currencyCode","currencyExponent")
          VALUES (uuidv7(),$1,$2,$3,$4,$5,50,'AED',2)`,
         [TENANT, COMPANY, BRANCH, result.payments[0]!.paymentId, invoiceId],
       ),
-    ).rejects.toThrow(/duplicate key|unique constraint/i);
+    ).rejects.toThrow(/coverage would exceed totalAmountMinor/i);
   });
 
   it('(D21) two components with the SAME tender method (CASH + CASH) are not rejected — no accepted rule forbids it', async () => {

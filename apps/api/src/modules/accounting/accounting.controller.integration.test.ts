@@ -494,13 +494,13 @@ describe('AccountingController (task 3b.1 Checkpoint D, integration)', () => {
       accountingTimezone: 'Asia/Dubai',
     });
     expect(r1.statusCode, r1.payload).toBe(201);
-    expect((r1.json() as { accountsCreated: number }).accountsCreated).toBe(13); // 14 - 1 pre-existing
+    expect((r1.json() as { accountsCreated: number }).accountsCreated).toBe(14); // 15 - 1 pre-existing
 
     const afterFirst = await sql<{ key: string; displayCode: string }>(
       `SELECT key, "displayCode" FROM account WHERE "companyId"=$1 ORDER BY key`,
       [preexistingCompany],
     );
-    expect(afterFirst).toHaveLength(14);
+    expect(afterFirst).toHaveLength(15);
     expect(afterFirst.find((a) => a.key === 'ASSET.CASH_ON_HAND')?.displayCode).toBe('9999');
 
     // second call — retry-safe, no duplicates, customization still preserved
@@ -514,7 +514,7 @@ describe('AccountingController (task 3b.1 Checkpoint D, integration)', () => {
       `SELECT key, "displayCode" FROM account WHERE "companyId"=$1 ORDER BY key`,
       [preexistingCompany],
     );
-    expect(afterSecond).toHaveLength(14);
+    expect(afterSecond).toHaveLength(15);
     expect(afterSecond.find((a) => a.key === 'ASSET.CASH_ON_HAND')?.displayCode).toBe('9999');
 
     const tz = (
