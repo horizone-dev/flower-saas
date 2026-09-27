@@ -997,7 +997,11 @@ describe('CustomerController / CustomerTenantController (task 3b.2 Checkpoint C,
       expect(errCode(r)).toBe('VALIDATION_FAILED');
     });
 
-    it('enabled + no stored limit fails (CUSTOMER_CREDIT_CONFIG_INVALID)', async () => {
+    // Task 3b.6 Checkpoint C hardening — ADR-0019 §1 ("`credit_limit` (money,
+    // nullable = no numeric ceiling beyond `credit_enabled`)") supersedes the
+    // narrower Task 3b.2 DB CHECK this test previously exercised. See
+    // `customer.repository.integration.test.ts`'s identical correction.
+    it('enabled + no stored limit succeeds — unlimited credit (ADR-0019 §1)', async () => {
       const c = await mkCustomer(companyA);
       const tok = await mint('cc4', tenantA, ['customers:manage', 'customers:credit:manage'], {
         stepUp: true,
@@ -1009,8 +1013,10 @@ describe('CustomerController / CustomerTenantController (task 3b.2 Checkpoint C,
         { creditEnabled: true },
         { 'if-match': '1' },
       );
-      expect(r.statusCode).toBe(422);
-      expect(errCode(r)).toBe('CUSTOMER_CREDIT_CONFIG_INVALID');
+      expect(r.statusCode, r.payload).toBe(200);
+      const body = r.json() as { creditEnabled: boolean; creditLimitMinor: string | null };
+      expect(body.creditEnabled).toBe(true);
+      expect(body.creditLimitMinor).toBeNull();
     });
 
     it('disabled + omitted retains a previously stored limit', async () => {

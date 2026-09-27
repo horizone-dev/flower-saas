@@ -8,6 +8,7 @@ import {
   PHASE_3B_1_TENANT_PERMISSIONS,
   PHASE_3B_2_TENANT_PERMISSIONS,
   PHASE_3B_5_TENANT_PERMISSIONS,
+  PHASE_3B_6_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -65,6 +66,16 @@ import {
  * Owner/Admin-only `accounting:*`/`customers:credit:*` precedent. No other
  * role gets either key. Existing tenants get the identical backfill in the
  * task 3b.5 migration.
+ *
+ * Task 3b.6 (docs/decisions/ADR-0019.md, owner-frozen matrix): `owner`/
+ * `admin`/`manager`/`cashier`/`sales` ALL gain `receivables:view` +
+ * `receivables:collect`; `owner`/`admin`/`manager` additionally gain
+ * `receivables:advance:apply` (cashier/sales do not — applying a customer's
+ * Advance is not a routine sale-floor action); `owner`/`admin` ALONE also
+ * gain `receivables:opening_balance:manage` (mirrors
+ * `customers:credit:override`'s Owner/Admin-narrower precedent — fabricating
+ * a financial balance from nothing is not a Manager-tier action). Existing
+ * tenants get the identical backfill in the task 3b.6 permissions migration.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
@@ -93,6 +104,16 @@ const CUSTOMERS_OPERATIONAL = PHASE_3B_2_TENANT_PERMISSIONS.filter(
 const CUSTOMERS_CREDIT_OVERRIDE = 'customers:credit:override';
 /** payments:view + payments:collect — owner/admin/manager/cashier/sales (3b.5). */
 const PAYMENTS = PHASE_3B_5_TENANT_PERMISSIONS;
+/** receivables:view + receivables:collect + receivables:advance:apply — owner/admin/manager (3b.6). */
+const RECEIVABLES_MANAGER_TIER = PHASE_3B_6_TENANT_PERMISSIONS.filter(
+  (k) => k !== 'receivables:opening_balance:manage',
+);
+/** receivables:view + receivables:collect only — cashier/sales (3b.6). */
+const RECEIVABLES_OPERATIONAL = PHASE_3B_6_TENANT_PERMISSIONS.filter(
+  (k) => k === 'receivables:view' || k === 'receivables:collect',
+);
+/** receivables:opening_balance:manage — Owner/Admin-tier only (3b.6). */
+const RECEIVABLES_OPENING_BALANCE_MANAGE = 'receivables:opening_balance:manage';
 
 export interface SystemRoleTemplate {
   key: string;
@@ -112,12 +133,22 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ...CUSTOMERS_ADMIN,
       CUSTOMERS_CREDIT_OVERRIDE,
       ...PAYMENTS,
+      ...RECEIVABLES_MANAGER_TIER,
+      RECEIVABLES_OPENING_BALANCE_MANAGE,
     ],
   },
   {
     key: 'admin',
     name: 'Admin',
-    permissions: [...P, ...CATALOG, ...ACCOUNTING, ...CUSTOMERS_ADMIN, ...PAYMENTS],
+    permissions: [
+      ...P,
+      ...CATALOG,
+      ...ACCOUNTING,
+      ...CUSTOMERS_ADMIN,
+      ...PAYMENTS,
+      ...RECEIVABLES_MANAGER_TIER,
+      RECEIVABLES_OPENING_BALANCE_MANAGE,
+    ],
   },
   {
     key: 'manager',
@@ -129,18 +160,19 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       CATALOG_VIEW,
       ...CUSTOMERS_OPERATIONAL,
       ...PAYMENTS,
+      ...RECEIVABLES_MANAGER_TIER,
     ],
   },
   { key: 'supervisor', name: 'Supervisor', permissions: ['users:view'] },
   {
     key: 'cashier',
     name: 'Cashier',
-    permissions: ['users:view', ...CUSTOMERS_OPERATIONAL, ...PAYMENTS],
+    permissions: ['users:view', ...CUSTOMERS_OPERATIONAL, ...PAYMENTS, ...RECEIVABLES_OPERATIONAL],
   },
   {
     key: 'sales',
     name: 'Sales',
-    permissions: ['users:view', ...CUSTOMERS_OPERATIONAL, ...PAYMENTS],
+    permissions: ['users:view', ...CUSTOMERS_OPERATIONAL, ...PAYMENTS, ...RECEIVABLES_OPERATIONAL],
   },
   { key: 'florist', name: 'Florist', permissions: ['users:view'] },
   { key: 'storekeeper', name: 'Storekeeper', permissions: ['users:view'] },

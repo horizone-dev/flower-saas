@@ -15,6 +15,8 @@ import { computeAvailableToCollect } from './available-to-collect.js';
 import { assertPaymentAttemptOrderBinding } from './order-binding.js';
 import { isProviderBackedTender, type TenderMethod } from './tender.js';
 import type { PaymentEventType } from './payment-events.js';
+import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
+import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
 
 export interface SynchronousTenderInput {
   /** CASH | BANK_TRANSFER | OTHER_MANUAL | CARD_TERMINAL — ONLINE_GATEWAY
@@ -129,6 +131,8 @@ export class PaymentCollectionRepository {
   constructor(
     private readonly audit: AuditWriter,
     private readonly outbox: OutboxWriter,
+    private readonly attribution: PaymentCustomerAttributionRepository,
+    private readonly effects: CustomerReceiptEffectsRepository,
   ) {}
 
   async captureSynchronousTendersInTx(
@@ -261,6 +265,16 @@ export class PaymentCollectionRepository {
       paymentGroupId = groupRows[0]!.id;
     }
 
+    // ── task 3b.6 Checkpoint D (D17) — a customer-linked Invoice ALWAYS has
+    //    exactly one CustomerReceivable(INVOICE) row (Checkpoint C, at
+    //    issuance time); a walk-in Invoice never does (B8's own trigger
+    //    forbids it). This single lookup, outside the tender loop, decides
+    //    whether ANY 3b.6 customer-account effect ever runs for this
+    //    Multi Payment — a walk-in Invoice gets ZERO of them, unconditionally. ─
+    const receivableRows = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "customer_receivable" WHERE "invoiceId" = ${invoice.id}::uuid`;
+    const customerReceivableId = receivableRows[0]?.id ?? null;
+
     // ── D19: the SAME binding snapshot is asserted for every component —
     //    never re-read per tender. Pure RangeError mapped to a DomainError
     //    at this service boundary, exactly like Checkpoint C. ─────────────
@@ -391,6 +405,44 @@ export class PaymentCollectionRepository {
           currencyExponent: invoice.currencyExponent,
         },
       });
+
+      // ── task 3b.6 Checkpoint D (D17) — the ONE centralized customer-account
+      //    effects path, reused unchanged from the new customer-receipt
+      //    primitive. Walk-in (`customerReceivableId === null`) runs NONE of
+      //    this — no CustomerAccountEntry, no projection, no D GL — but its
+      //    Invoice payment status still derives (D21), unconditionally. ──────
+      if (customerReceivableId) {
+        const attributed = await this.attribution.resolveInTx(tx, {
+          tenantId: input.tenantId,
+          companyId: input.companyId,
+          paymentId,
+        });
+        if (attributed.customerCompanyAccountId) {
+          await this.effects.recordPaymentReceivedInTx(tx, {
+            tenantId: input.tenantId,
+            companyId: input.companyId,
+            branchId: input.branchId,
+            customerCompanyAccountId: attributed.customerCompanyAccountId,
+            paymentId,
+            method: tender.method,
+            amountMinor: tender.amountMinor,
+            actorUserId: input.createdByUserId,
+          });
+          await this.effects.applyInvoiceAllocationEffectsInTx(tx, {
+            tenantId: input.tenantId,
+            companyId: input.companyId,
+            branchId: input.branchId,
+            customerCompanyAccountId: attributed.customerCompanyAccountId,
+            paymentAllocationId: allocationId,
+            customerReceivableId,
+            invoiceId: invoice.id,
+            amountMinor: tender.amountMinor,
+            actorUserId: input.createdByUserId,
+          });
+        }
+      } else {
+        await this.effects.recomputeInvoicePaymentStatusInTx(tx, invoice.id);
+      }
 
       payments.push({
         paymentId,

@@ -40,6 +40,37 @@ export interface CustomerCompanyAccountRow {
 }
 
 /**
+ * Task 3b.6 Checkpoint C hardening — `customer_company_account` gained two
+ * additive `BigInt` projection columns (`currentOutstandingMinor`/
+ * `advanceBalanceMinor`, Checkpoint B) that this module's own
+ * `CustomerCompanyAccountRow` deliberately does NOT expose (they are 3b.6's
+ * internal projection, never part of 3b.2's credit-config contract). Every
+ * Prisma call against this model MUST use this explicit `select` — a bare
+ * `.findFirst()`/`.update()`/`.create()` with no `select` returns the FULL
+ * row at runtime (TypeScript's `as CustomerCompanyAccountRow` cast does not
+ * strip the extra properties), and `customer.controller.ts`'s
+ * `serializeCompanyAccount` spreads the whole row into its HTTP response —
+ * a raw `BigInt` there crashes Fastify's JSON serializer. Confirmed as a
+ * genuine regression surfaced by Checkpoint C's own regression pass; fixed
+ * here rather than in the controller, so every current AND future call site
+ * in this file is protected structurally, not just the one that happened to
+ * be exercised by a test.
+ */
+const COMPANY_ACCOUNT_SELECT = {
+  id: true,
+  tenantId: true,
+  companyId: true,
+  customerId: true,
+  creditEnabled: true,
+  creditLimitMinor: true,
+  creditLimitCurrencyCode: true,
+  creditLimitCurrencyExponent: true,
+  version: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+/**
  * Task 3b.2 — Customer + CustomerCompanyAccount domain repository.
  *
  * COMPANY PII ISOLATION (the core safety property, docs/phase-3/PHASE-3B-PLAN.md
@@ -236,10 +267,11 @@ export class CustomerRepository extends ScopedRepository {
         companyId: input.companyId,
         customerId: input.customerId,
       },
+      select: COMPANY_ACCOUNT_SELECT,
     });
     if (!row)
       throw new DomainError('CUSTOMER_COMPANY_ACCOUNT_NOT_FOUND', 'association not found', 404);
-    return row as CustomerCompanyAccountRow;
+    return row;
   }
 
   async configureCreditScoped(input: {
@@ -345,11 +377,12 @@ export class CustomerRepository extends ScopedRepository {
         customerId: customer.id,
         creditEnabled: false,
       },
+      select: COMPANY_ACCOUNT_SELECT,
     });
 
     return {
       customer: customer as CustomerRow,
-      companyAccount: companyAccount as CustomerCompanyAccountRow,
+      companyAccount,
     };
   }
 
@@ -556,31 +589,37 @@ export class CustomerRepository extends ScopedRepository {
     if (inserted[0]) {
       const row = await tx.customerCompanyAccount.findUniqueOrThrow({
         where: { id: inserted[0].id },
+        select: COMPANY_ACCOUNT_SELECT,
       });
-      return { companyAccount: row as CustomerCompanyAccountRow, created: true };
+      return { companyAccount: row, created: true };
     }
 
     const existing = await tx.customerCompanyAccount.findFirst({
       where: { tenantId: input.tenantId, companyId: input.companyId, customerId: input.customerId },
+      select: COMPANY_ACCOUNT_SELECT,
     });
     if (!existing)
       throw new DomainError('CUSTOMER_COMPANY_ACCOUNT_NOT_FOUND', 'association not found', 404);
-    return { companyAccount: existing as CustomerCompanyAccountRow, created: false };
+    return { companyAccount: existing, created: false };
   }
 
   /**
-   * Credit configuration domain rules (task 3b.2 §10-12): the currency lock
-   * uses `CompanyFinancialConfigRepository.lockCurrencyOnly` — deliberately
-   * NOT `lockForPosting`, which would spuriously require `accountingTimezone`/
+   * Credit configuration domain rules (task 3b.2 §10-12, corrected by task
+   * 3b.6 Checkpoint C hardening per ADR-0019 §1): the currency lock uses
+   * `CompanyFinancialConfigRepository.lockCurrencyOnly` — deliberately NOT
+   * `lockForPosting`, which would spuriously require `accountingTimezone`/
    * posting-readiness that credit configuration has no business depending on.
    * Exponent is resolved SERVER-SIDE from `@flower/money`'s authoritative
    * table — the method signature has no parameter through which a caller
-   * could supply one. `creditEnabled=true` requires a complete, positive,
-   * current-currency Money snapshot; `creditEnabled=false` may retain a
-   * previously-valid stored limit. Re-enabling with a stored limit whose
-   * currency no longer matches the CURRENT `Company.defaultCurrency` fails
-   * closed (`CUSTOMER_CREDIT_CURRENCY_MISMATCH`) — the minor value is never
-   * reinterpreted.
+   * could supply one. `creditEnabled=true` with NO configured limit is valid
+   * — ADR-0019 §1: "`credit_limit` (money, nullable = no numeric ceiling
+   * beyond `credit_enabled`)" — i.e. unlimited credit; when a limit IS
+   * configured it must be a complete, positive, current-currency Money
+   * snapshot. `creditEnabled=false` may retain a previously-valid stored
+   * limit. Re-enabling with a stored (non-null) limit whose currency no
+   * longer matches the CURRENT `Company.defaultCurrency` fails closed
+   * (`CUSTOMER_CREDIT_CURRENCY_MISMATCH`) — the minor value is never
+   * reinterpreted; a null limit has no currency to reinterpret.
    */
   async configureCredit(
     tx: ScopedTx,
@@ -657,11 +696,23 @@ export class CustomerRepository extends ScopedRepository {
       nextExponent = currencyExponent(defaultCurrency);
     }
 
-    if (input.creditEnabled) {
-      if (nextMinor === null || nextMinor <= 0n) {
+    // Task 3b.6 Checkpoint C hardening — ADR-0019 §1 is the authoritative,
+    // owner-approved decision for the CURRENT task family: "`credit_limit`
+    // (money, nullable = no numeric ceiling beyond `credit_enabled`)".
+    // `creditEnabled=true` with NO configured limit (`nextMinor === null`) is
+    // therefore a valid, deliberate "unlimited credit" configuration, not an
+    // error — the DB-level `customer_company_account_credit_enabled_requires_limit_chk`
+    // (Task 3b.2 owner review round 3) that used to forbid this exact
+    // combination has been dropped by a forward corrective migration
+    // (`20260929120000_receivables_unlimited_credit_correction`) for the same
+    // reason. When a limit IS configured, its currency must still be
+    // revalidated against the CURRENT company currency — never reinterpret a
+    // stale minor; a null limit has no currency to validate at all.
+    if (input.creditEnabled && nextMinor !== null) {
+      if (nextMinor <= 0n) {
         throw new DomainError(
           'CUSTOMER_CREDIT_CONFIG_INVALID',
-          'creditEnabled=true requires a configured positive credit limit',
+          'a configured credit limit must be a positive value',
           422,
         );
       }
@@ -690,8 +741,9 @@ export class CustomerRepository extends ScopedRepository {
           creditLimitCurrencyExponent: nextExponent,
           version: { increment: 1 },
         },
+        select: COMPANY_ACCOUNT_SELECT,
       });
-      return updated as CustomerCompanyAccountRow;
+      return updated;
     } catch (err) {
       if (isPgError(err, PG_CHECK_VIOLATION)) {
         throw new DomainError(

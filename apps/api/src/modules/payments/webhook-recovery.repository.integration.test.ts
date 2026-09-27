@@ -13,6 +13,13 @@ import {
   type ProcessVerifiedInboxEventOutcome,
 } from './webhook-event-processor.repository.js';
 import { WebhookRecoveryProcessor } from './webhook-recovery.repository.js';
+import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
+import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import { PostingEngineService } from '../accounting/posting-engine.service.js';
+import { CompanyFinancialConfigRepository } from '../accounting/company-financial-config.repository.js';
+import { AccountingPeriodRepository } from '../accounting/accounting-period.repository.js';
+import { AccountRepository } from '../accounting/account.repository.js';
+import { SystemClock } from '../../common/clock/clock.js';
 
 /**
  * Task 3b.5 Checkpoint G operational proof pass §1 — the recovery
@@ -125,7 +132,28 @@ describe('WebhookRecoveryProcessor lifecycle (Task 3b.5 Checkpoint G proof pass 
     constructor(
       private readonly behavior: (inboxId: string) => Promise<ProcessVerifiedInboxEventOutcome>,
     ) {
-      super(new AuditWriter(db), new OutboxWriter(db));
+      // task 3b.6 Checkpoint D — this class fully overrides
+      // `processVerifiedInboxEventInTx` and never calls `super.`, so these
+      // two new dependencies are never actually exercised, only required to
+      // compile.
+      super(
+        new AuditWriter(db),
+        new OutboxWriter(db),
+        new PaymentCustomerAttributionRepository(),
+        new CustomerReceiptEffectsRepository(
+          new PostingEngineService(
+            new CompanyFinancialConfigRepository(
+              db,
+              new AuditWriter(db),
+              new AccountRepository(db, new AuditWriter(db)),
+            ),
+            new AccountingPeriodRepository(db, new AuditWriter(db)),
+            new AuditWriter(db),
+            new SystemClock(),
+          ),
+          new AuditWriter(db),
+        ),
+      );
     }
     override async processVerifiedInboxEventInTx(
       tx: ScopedTx,

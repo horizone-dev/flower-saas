@@ -1,6 +1,9 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redis';
 import { MinioContainer, type StartedMinioContainer } from '@testcontainers/minio';
+import { GenericContainer } from 'testcontainers';
 
 /**
  * A running integration stack: Postgres 17 + Redis 7 + MinIO. Started once per
@@ -37,13 +40,38 @@ export interface StartTestStackOptions {
 const IMAGES = {
   postgres: 'postgres:17',
   redis: 'redis:7',
-  // MinIO stopped publishing images to Docker Hub in October 2025 (source-only
-  // distribution going forward) — `minio/minio` pulls now fail with "pull
-  // access denied". `quay.io/minio/minio` is MinIO's own official second
-  // registry and still serves every tag published before that cutoff,
-  // including this exact one — same image content, no version change.
-  minio: 'quay.io/minio/minio:RELEASE.2025-04-08T15-41-24Z',
 } as const;
+
+// Both `docker.io/minio/minio` and `quay.io/minio/minio` now return 401
+// Unauthorized for anonymous pulls — repository-wide, every tag including
+// `latest` (MinIO Community Edition moved to a source-only distribution
+// model; neither registry mirror is a viable dependency any more). Instead
+// of a prebuilt image, this release is built from pinned upstream source —
+// see docker/minio/Dockerfile for the exact commit + build.
+const MINIO_RELEASE = 'RELEASE.2025-04-08T15-41-24Z';
+const MINIO_IMAGE_TAG = `flower-testing-minio:${MINIO_RELEASE}`;
+const MINIO_DOCKER_CONTEXT = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'docker',
+  'minio',
+);
+
+let minioImageBuild: Promise<string> | undefined;
+
+/**
+ * Builds (once per process) the pinned-source MinIO image and returns its
+ * local tag. Docker's own build-layer cache makes every call after the first
+ * on a given machine near-instant — no network/registry access beyond the
+ * (public, unrelated) Go module proxy and Debian package mirror the
+ * Dockerfile itself uses.
+ */
+function ensureMinioImage(): Promise<string> {
+  minioImageBuild ??= GenericContainer.fromDockerfile(MINIO_DOCKER_CONTEXT)
+    .build(MINIO_IMAGE_TAG, { deleteOnExit: false })
+    .then(() => MINIO_IMAGE_TAG);
+  return minioImageBuild;
+}
 
 export async function startTestStack(options: StartTestStackOptions = {}): Promise<TestStack> {
   const want = new Set(options.services ?? (['postgres', 'redis', 'minio'] as const));
@@ -57,7 +85,9 @@ export async function startTestStack(options: StartTestStackOptions = {}): Promi
           .start()
       : Promise.resolve(undefined),
     want.has('redis') ? new RedisContainer(IMAGES.redis).start() : Promise.resolve(undefined),
-    want.has('minio') ? new MinioContainer(IMAGES.minio).start() : Promise.resolve(undefined),
+    want.has('minio')
+      ? ensureMinioImage().then((image) => new MinioContainer(image).start())
+      : Promise.resolve(undefined),
   ]);
 
   const stopped: Array<() => Promise<unknown>> = [];

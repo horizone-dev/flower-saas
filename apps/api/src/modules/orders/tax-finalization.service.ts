@@ -19,6 +19,8 @@ import {
 } from './invoice-issuance.repository.js';
 import { allocateDocumentDiscount } from './document-discount-allocation.js';
 import { exactLineTax, roundExact, reconcileDocumentTax } from './tax-arithmetic.js';
+import type { AuthorizedCreditOverride } from '../receivables/credit-override-authorization.service.js';
+import type { PaymentIntent } from '../receivables/payment-intent.js';
 
 export interface FinalizeAndIssueInvoiceInput {
   tenantId: string;
@@ -30,6 +32,12 @@ export interface FinalizeAndIssueInvoiceInput {
    *  `commercialSnapshotFingerprint` — verified unchanged by
    *  `InvoiceIssuanceRepository.issueFinalInvoice`, never re-derived here. */
   commercialSnapshotFingerprint: string;
+  /** Task 3b.6 Checkpoint C — passed through verbatim to `issueFinalInvoice`;
+   *  see its own doc comment for the frozen contract (no default, no
+   *  inference). */
+  paymentIntent: PaymentIntent;
+  creditOverride?: AuthorizedCreditOverride;
+  actorUserId?: string | null;
 }
 
 /**
@@ -211,6 +219,9 @@ export class TaxFinalizationService {
       commercialSnapshotFingerprint: input.commercialSnapshotFingerprint,
       lines: finalizedLines,
       totals,
+      paymentIntent: input.paymentIntent,
+      ...(input.creditOverride !== undefined ? { creditOverride: input.creditOverride } : {}),
+      actorUserId: input.actorUserId ?? null,
     });
   }
 }

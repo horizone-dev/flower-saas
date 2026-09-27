@@ -14,6 +14,9 @@ import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { SystemClock } from '../../common/clock/clock.js';
 import { derivePostingDate } from '../accounting/posting-date.js';
 import { computeCommercialSnapshotFingerprintByVersion } from './commercial-snapshot.js';
+import { CustomerInvoiceArRepository } from '../receivables/customer-invoice-ar.repository.js';
+import type { AuthorizedCreditOverride } from '../receivables/credit-override-authorization.service.js';
+import type { PaymentIntent } from '../receivables/payment-intent.js';
 
 export interface FinalizedLineTax {
   orderLineId: string;
@@ -41,6 +44,28 @@ export interface IssueFinalInvoiceInput {
   commercialSnapshotFingerprint: string;
   lines: FinalizedLineTax[];
   totals: FinalizedTotals;
+  /**
+   * Task 3b.6 Checkpoint C — required for every issuance, no default, no
+   * inference from payment presence/absence (CREDIT is not, and never
+   * becomes, a tender). Gates ONLY whether the credit-limit hard gate runs at
+   * issuance for a customer-linked Order — it never gates AR creation itself
+   * (both intents create AR for a customer-linked Invoice; see
+   * `receivables/payment-intent.ts`). For a walk-in Order (no `customerId`)
+   * this value is structurally inert — no 3b.6 AR/GL path is ever entered —
+   * but is still required, so a caller can never omit an explicit choice.
+   */
+  paymentIntent: PaymentIntent;
+  /**
+   * Task 3b.6 Checkpoint C — an OPTIONAL, structurally-opaque, pre-authorized
+   * one-sale credit-limit override. Only ever meaningful when
+   * `paymentIntent = 'ON_CREDIT'` AND the credit-limit gate would otherwise
+   * deny the sale. Producible ONLY by
+   * `CreditOverrideAuthorizationService.authorize` (permission + step-up +
+   * reason already verified there) — never a raw boolean, never constructible
+   * by this primitive's caller directly.
+   */
+  creditOverride?: AuthorizedCreditOverride;
+  actorUserId?: string | null;
 }
 
 export interface IssueFinalInvoiceResult {
@@ -48,6 +73,10 @@ export interface IssueFinalInvoiceResult {
   orderNumber: string;
   invoiceId: string;
   invoiceNumber: string;
+  /** null for a walk-in (no-customer) Invoice — no 3b.6 AR was ever created. */
+  customerReceivableId: string | null;
+  /** null for a walk-in Invoice, or for PAY_NOW (the credit gate never ran). */
+  creditAuthorizationMode: 'NORMAL' | 'OVERRIDE' | null;
 }
 
 /**
@@ -71,6 +100,16 @@ export interface IssueFinalInvoiceResult {
  * `order` row is updated BEFORE the `invoice` row is inserted — the DB
  * trigger set (migration SQL) allows exactly this sequence and rejects any
  * other, so this method's statement order is not incidental.
+ *
+ * Task 3b.6 Checkpoint C — for a customer-linked Order, the credit-limit hard
+ * gate runs (via `CustomerInvoiceArRepository.lockAndAuthorizeCredit`) BEFORE
+ * document-number allocation / the Order's DRAFT->CONFIRMED transition, so a
+ * denied credit sale burns no gapless number and mutates nothing; the
+ * CustomerReceivable/CustomerAccountEntry/projection/journal/audit are then
+ * written AFTER the Invoice row exists (they reference `invoiceId`), still
+ * inside this SAME transaction — a rollback anywhere undoes all of it
+ * atomically. A walk-in Order (`customerId === null`) never enters any of
+ * this — zero 3b.6 rows, zero 3b.6 journal (3b.9 owns walk-in accounting).
  */
 @Injectable()
 export class InvoiceIssuanceRepository {
@@ -78,6 +117,7 @@ export class InvoiceIssuanceRepository {
     private readonly audit: AuditWriter,
     // injected as a class token so a test can swap in a fake via `overrideProvider`.
     private readonly clock: SystemClock,
+    private readonly customerInvoiceAr: CustomerInvoiceArRepository,
   ) {}
 
   async issueFinalInvoice(
@@ -391,6 +431,24 @@ export class InvoiceIssuanceRepository {
       );
     }
 
+    // ── 4a. customer-linked credit-limit hard gate (Task 3b.6 Checkpoint C) —
+    //       runs on the now-STRUCTURALLY-VALIDATED `input.totals.totalAmountMinor`
+    //       (never the raw, unverified caller value) and BEFORE document-number
+    //       allocation / the Order's DRAFT->CONFIRMED transition, so a denied
+    //       credit sale burns no gapless number. Walk-in (`customerId === null`)
+    //       skips this entirely — `creditResult` stays `null`, and every
+    //       downstream 3b.6 branch below is gated on that same null check. ──
+    const creditResult = order.customerId
+      ? await this.customerInvoiceAr.lockAndAuthorizeCredit(tx, {
+          tenantId: input.tenantId,
+          companyId: input.companyId,
+          customerId: order.customerId,
+          paymentIntent: input.paymentIntent,
+          proposedAmountMinor: input.totals.totalAmountMinor,
+          ...(input.creditOverride !== undefined ? { creditOverride: input.creditOverride } : {}),
+        })
+      : null;
+
     // ── 5. no Invoice may already exist for this order (defense-in-depth —
     //      the unique index on invoice.orderId is the ultimate guarantee) ──
     const existingInvoice = await tx.$queryRaw<{ id: string }[]>`
@@ -500,7 +558,40 @@ export class InvoiceIssuanceRepository {
       after: { orderId: order.id, invoiceNumber },
     });
 
-    return { orderId: order.id, orderNumber, invoiceId: invoice.id, invoiceNumber };
+    // ── 12. customer-linked AR: CustomerReceivable + CustomerAccountEntry +
+    //       outstanding projection + invoice_ar journal + audit (Task 3b.6
+    //       Checkpoint C) — `creditResult` is null for a walk-in Order, so
+    //       this entire block (and its GL journal) never runs for one. ──────
+    let customerReceivableId: string | null = null;
+    let creditAuthorizationMode: 'NORMAL' | 'OVERRIDE' | null = null;
+    if (creditResult) {
+      const receivable = await this.customerInvoiceAr.createReceivableForInvoice(tx, {
+        tenantId: input.tenantId,
+        companyId: input.companyId,
+        branchId: order.originBranchId,
+        customerCompanyAccountId: creditResult.account.id,
+        invoiceId: invoice.id,
+        totalAmountMinor: input.totals.totalAmountMinor,
+        taxTotalAmountMinor: input.totals.taxTotalAmountMinor,
+        currencyCode: order.currencyCode,
+        currencyExponent: order.currencyExponent,
+        creditAuthorized: creditResult.creditAuthorized,
+        authorizationMode: creditResult.authorizationMode,
+        ...(input.creditOverride !== undefined ? { creditOverride: input.creditOverride } : {}),
+        actorUserId: input.actorUserId ?? null,
+      });
+      customerReceivableId = receivable.customerReceivableId;
+      creditAuthorizationMode = creditResult.authorizationMode;
+    }
+
+    return {
+      orderId: order.id,
+      orderNumber,
+      invoiceId: invoice.id,
+      invoiceNumber,
+      customerReceivableId,
+      creditAuthorizationMode,
+    };
   }
 
   /**

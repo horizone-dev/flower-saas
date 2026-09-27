@@ -65,7 +65,13 @@ describe('@flower/testing — harness self-test', () => {
       database: 'flower_test',
       max: 4,
     });
-  }, 180_000);
+  }, 1_800_000); // was 180_000 — the first `startTestStack()` on a machine now
+  // also builds the pinned-source MinIO image (packages/testing/docker/minio):
+  // pulling `golang:1.23.6-bookworm`, cloning MinIO, `go mod download`
+  // (~430 modules), then compiling. On a normal-bandwidth machine this is a
+  // few minutes; 30 minutes is a generous ceiling for a slow first build on
+  // a fresh machine. Every later call reuses Docker's build-layer cache and
+  // is fast again (seconds).
 
   afterAll(async () => {
     await pool?.end();

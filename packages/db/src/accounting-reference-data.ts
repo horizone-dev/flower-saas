@@ -69,6 +69,22 @@ export const ACCOUNTING_REFERENCE_ACCOUNTS: readonly AccountReferenceRow[] = [
     defaultDisplayCode: '3000',
     defaultDisplayName: 'Retained Earnings',
   },
+  // Task 3b.6 Checkpoint B — the opening/migration balance-sheet clearing
+  // account (docs/decisions/ADR-0019.md). NOT Revenue, NOT Retained Earnings,
+  // NOT Cash, NOT AR, NOT Customer Advances — every opening-balance journal
+  // (Dr AR / Cr EQUITY.OPENING_BALANCE for an opening receivable; Dr
+  // EQUITY.OPENING_BALANCE / Cr Customer Advances for an opening advance) has
+  // its other leg here. No journal is posted in Checkpoint B — this seeds the
+  // account only. Code '3100' continues the EQUITY category's own numbering
+  // (only prior EQUITY entry is '3000'), following the same one-gap-per-
+  // category convention already used by every other category above
+  // (1000/1100/1200/1300, 2000/2050/2100/2200, 4000/4100, 4900/4910).
+  {
+    key: 'EQUITY.OPENING_BALANCE',
+    category: 'EQUITY',
+    defaultDisplayCode: '3100',
+    defaultDisplayName: 'Opening Balance Equity',
+  },
   {
     key: 'REVENUE.SALES',
     category: 'REVENUE',

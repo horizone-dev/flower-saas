@@ -6,7 +6,7 @@ import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
 // — not production module code. Mirrors `posting-engine.integration.test.ts`'s
 // exact no-HTTP, no-Redis, direct-construction pattern.
 // eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
-import { createPrismaClient, runScoped } from '@flower/db';
+import { createPrismaClient, runScoped, ACCOUNTING_REFERENCE_ACCOUNTS } from '@flower/db';
 // eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
 import type { PrismaClient, ScopedTx } from '@flower/db';
 import pg from 'pg';
@@ -15,6 +15,11 @@ import { computeCommercialSnapshotFingerprintV2 } from './commercial-snapshot.js
 import type { SystemClock } from '../../common/clock/clock.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import type { DbService } from '../../common/data/index.js';
+import { CustomerInvoiceArRepository } from '../receivables/customer-invoice-ar.repository.js';
+import { PostingEngineService } from '../accounting/posting-engine.service.js';
+import { CompanyFinancialConfigRepository } from '../accounting/company-financial-config.repository.js';
+import { AccountRepository } from '../accounting/account.repository.js';
+import { AccountingPeriodRepository } from '../accounting/accounting-period.repository.js';
 
 // Task 3b.4 Checkpoint C — every Order this fixture writes directly via raw
 // SQL is a V2-shaped Order (the current create-path default); a fixed,
@@ -57,9 +62,29 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
     await client.connect();
 
     const dummyDb = {} as unknown as DbService;
+    // Task 3b.6 Checkpoint C — `InvoiceIssuanceRepository` now calls
+    // `CustomerInvoiceArRepository` for a customer-linked Order. Every
+    // dependency below only ever touches the CALLER-supplied `tx` (never
+    // `this.scoped(...)`), exactly like `AuditWriter`/`InvoiceIssuanceRepository`
+    // already did in this same file — `dummyDb` is never actually invoked.
+    const postingEngine = new PostingEngineService(
+      new CompanyFinancialConfigRepository(
+        dummyDb,
+        new AuditWriter(dummyDb),
+        new AccountRepository(dummyDb, new AuditWriter(dummyDb)),
+      ),
+      new AccountingPeriodRepository(dummyDb, new AuditWriter(dummyDb)),
+      new AuditWriter(dummyDb),
+      fakeClockAt('2026-06-15T10:00:00Z'),
+    );
+    const customerInvoiceAr = new CustomerInvoiceArRepository(
+      postingEngine,
+      new AuditWriter(dummyDb),
+    );
     issuance = new InvoiceIssuanceRepository(
       new AuditWriter(dummyDb),
       fakeClockAt('2026-06-15T10:00:00Z'),
+      customerInvoiceAr,
     );
 
     const planId = randomUUID();
@@ -126,6 +151,37 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
     await client.query(
       `INSERT INTO customer (id,"tenantId","displayName","updatedAt") VALUES ($1,$2,'Jane Doe',now())`,
       [customerId, tenantId],
+    );
+    // Task 3b.6 Checkpoint C — this file's one pre-existing customer-linked
+    // scenario (`withCust`, below) now runs through the customer-linked AR
+    // path, which requires a real `customer_company_account` association
+    // (C4 fail-closed) plus a real accounting setup for the `invoice_ar`
+    // journal (`ASSET.ACCOUNTS_RECEIVABLE`/`REVENUE.SALES` accounts + an open
+    // `accounting_period` covering the fixed test clock date).
+    await client.query(
+      `INSERT INTO customer_company_account (id,"tenantId","companyId","customerId","updatedAt")
+       VALUES ($1,$2,$3,$4,now())`,
+      [randomUUID(), tenantId, companyId, customerId],
+    );
+    for (const a of ACCOUNTING_REFERENCE_ACCOUNTS) {
+      await client.query(
+        `INSERT INTO account (id,"tenantId","companyId",key,category,"displayCode","displayName","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,now())`,
+        [
+          randomUUID(),
+          tenantId,
+          companyId,
+          a.key,
+          a.category,
+          a.defaultDisplayCode,
+          a.defaultDisplayName,
+        ],
+      );
+    }
+    await client.query(
+      `INSERT INTO accounting_period (id,"tenantId","companyId","startDate","endDate",status,"updatedAt")
+       VALUES ($1,$2,$3,'2026-01-01','2026-12-31','OPEN',now())`,
+      [randomUUID(), tenantId, companyId],
     );
   }, 180_000);
 
@@ -231,6 +287,13 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
       lineTaxAmountMinor: bigint;
       taxTotalAmountMinor: bigint;
       totalAmountMinor: bigint;
+      // Task 3b.6 Checkpoint C — this test-only helper default of `'PAY_NOW'`
+      // is NOT the production contract's default (`IssueFinalInvoiceInput`
+      // itself has no default — every real caller must choose explicitly);
+      // it exists purely so this file's ~20 pre-existing walk-in (no-customer)
+      // scenarios need no change, since PAY_NOW is semantically inert for a
+      // walk-in Order (no 3b.6 code path is ever entered for one either way).
+      paymentIntent: 'PAY_NOW' | 'ON_CREDIT';
     }> = {},
   ) {
     return {
@@ -240,6 +303,7 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
       orderId,
       expectedVersion: overrides.expectedVersion ?? 1,
       commercialSnapshotFingerprint: fingerprint,
+      paymentIntent: overrides.paymentIntent ?? 'PAY_NOW',
       lines: [
         {
           orderLineId: lineId,
@@ -529,7 +593,11 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
   });
 
   // ── DB-level immutability ─────────────────────────────────────────────────
-  it('Invoice UPDATE and DELETE are unconditionally blocked at the DB', async () => {
+  // Task 3b.6 Checkpoint B narrowed the Task 3b.3 immutability trigger so
+  // ONLY `invoicePaymentStatus` may change (every other field, and DELETE,
+  // remain unconditionally blocked) — confirmed by direct inspection of
+  // `packages/db/prisma/migrations/20260928120000_receivables_projections_and_invoice_status`.
+  it('Invoice: only invoicePaymentStatus may UPDATE; every other field + DELETE remain unconditionally blocked', async () => {
     const { orderId, lineId, fingerprint } = await mkOrder();
     const result = await asTenant((tx) =>
       issuance.issueFinalInvoice(tx, finalizedInput(orderId, lineId, fingerprint)),
@@ -538,6 +606,15 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
       client.query(`UPDATE invoice SET "invoicePaymentStatus"='PAID' WHERE id=$1`, [
         result.invoiceId,
       ]),
+    ).resolves.toBeTruthy();
+    await expect(
+      client.query(`UPDATE invoice SET "totalAmountMinor"=99999 WHERE id=$1`, [result.invoiceId]),
+    ).rejects.toThrow(/immutable/i);
+    await expect(
+      client.query(
+        `UPDATE invoice SET "invoicePaymentStatus"='PARTIAL', "totalAmountMinor"=99999 WHERE id=$1`,
+        [result.invoiceId],
+      ),
     ).rejects.toThrow(/immutable/i);
     await expect(
       client.query(`DELETE FROM invoice WHERE id=$1`, [result.invoiceId]),
@@ -677,11 +754,26 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
     });
   });
 
-  it('no PostingEngine/payment/AR/inventory effect from any issuance in this suite', async () => {
-    const je = await client.query(`SELECT count(*)::int AS n FROM journal_entry`);
-    expect(je.rows[0].n).toBe(0);
-    // `ar_transaction`/`advance_transaction` (task 3b.6) and
-    // `inventory_movement` (Phase 5) are not yet implemented — table
+  // Task 3b.6 Checkpoint C — this suite's ONE customer-linked issuance
+  // (`withCust`, above) now legitimately posts exactly one `invoice_ar`
+  // journal; every OTHER issuance in this suite is walk-in and must still
+  // produce ZERO GL effect (C15). The guard against unrelated GL/inventory
+  // scope creep (payment/settlement/inventory) remains unconditional.
+  it('walk-in issuances create no GL effect; the one customer-linked issuance creates exactly its own invoice_ar journal, nothing else', async () => {
+    const je = await client.query<{ sourceKind: string; sourceId: string }>(
+      `SELECT "sourceKind", "sourceId" FROM journal_entry`,
+    );
+    for (const row of je.rows) {
+      expect(row.sourceKind, `unexpected journal_entry sourceKind`).toBe('invoice_ar');
+    }
+    const customerLinkedInvoices = await client.query<{ id: string }>(
+      `SELECT i.id FROM invoice i JOIN "order" o ON o.id = i."orderId" WHERE o."customerId" IS NOT NULL`,
+    );
+    expect(je.rows.map((r) => r.sourceId).sort()).toEqual(
+      customerLinkedInvoices.rows.map((r) => r.id).sort(),
+    );
+    // `ar_transaction`/`advance_transaction` (unused legacy placeholder names)
+    // and `inventory_movement` (Phase 5) are not yet implemented — table
     // existence itself is still the correct check for those.
     const tables = await client.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables WHERE table_name = ANY($1)`,
@@ -843,6 +935,7 @@ describe('InvoiceIssuanceRepository.issueFinalInvoice (task 3b.3 Checkpoint C, i
         orderId,
         expectedVersion: 1,
         commercialSnapshotFingerprint: fingerprint,
+        paymentIntent: 'PAY_NOW' as const,
         lines: [
           {
             orderLineId: line1Id,

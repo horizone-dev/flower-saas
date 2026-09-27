@@ -1,0 +1,46 @@
+-- Phase 3b task 3b.6 CHECKPOINT C HARDENING — B/C integration correction, NOT
+-- a Checkpoint B defect. Genuine contract conflict discovered during
+-- Checkpoint C's own credit-limit contract reconciliation pass:
+--
+--   * ADR-0019 §1 (docs/decisions/ADR-0019.md, the authoritative decision
+--     record for this ENTIRE task family, one of the 23 APPROVED decisions)
+--     states explicitly: "`credit_limit` (money, nullable = no numeric
+--     ceiling beyond `credit_enabled`)" — i.e. `creditEnabled=true` with NO
+--     configured limit is a valid, deliberate "unlimited credit"
+--     configuration.
+--   * Task 3b.2's OWN migration (`20260918120000_customer_core`,
+--     `customer_company_account_credit_enabled_requires_limit_chk`,
+--     "owner review round 3") instead REQUIRES `creditLimitMinor IS NOT NULL`
+--     whenever `creditEnabled = true` — unconditionally forbidding the exact
+--     state ADR-0019 §1 requires to be representable.
+--
+-- ADR-0019 is the later, more specific, and more authoritative source for
+-- the credit-limit contract this entire 3b.6 task family (Checkpoints A-H)
+-- is built against — every pure Checkpoint-A module
+-- (`receivables/credit-exposure.ts`) was already written against ADR-0019's
+-- nullable-means-unlimited semantics. The 3b.2 CHECK is therefore the
+-- defect: it was written before, and without visibility into, this specific
+-- ADR-0019 requirement. This migration is a genuine, deliberate CORRECTION
+-- to the DB's enforcement of an already-approved contract — not a reopening
+-- of Checkpoint B's own additive receivables schema (which is untouched by
+-- this file) and not an edit to the frozen 3b.2 migration file itself
+-- (which remains on disk, unedited, exactly as originally written).
+--
+-- ══════════════ THE FIX ══════════════════════════════════════════════════
+-- Simply DROPPING `customer_company_account_credit_enabled_requires_limit_chk`
+-- is sufficient and complete. The two OTHER 3b.2 CHECKs on this table are
+-- untouched and already express exactly the required final semantics once
+-- this one constraint is gone:
+--   * `customer_company_account_credit_limit_money_shape_chk` — still
+--     requires all three Money-triplet columns to be NULL together or
+--     present together (a partial triplet remains rejected).
+--   * `customer_company_account_credit_limit_positive_chk` — a present
+--     `creditLimitMinor` must still be > 0 (never zero/negative).
+-- Resulting truth table (identical to the task's required final semantics):
+--   creditEnabled=false                              -> unconstrained (unchanged)
+--   creditEnabled=true, creditLimitMinor NOT NULL     -> bounded credit (unchanged)
+--   creditEnabled=true, triplet all NULL              -> unlimited credit (NEWLY allowed)
+--   any partial triplet, either creditEnabled value   -> rejected (unchanged, by the
+--                                                         money-shape CHECK above)
+ALTER TABLE "customer_company_account"
+  DROP CONSTRAINT "customer_company_account_credit_enabled_requires_limit_chk";

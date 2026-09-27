@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ReceivablesModule } from '../receivables/receivables.module.js';
 import { PaymentCollectionRepository } from './payment-collection.repository.js';
 import { PaymentRepository } from './payment.repository.js';
 import { PaymentService } from './payment.service.js';
@@ -20,9 +21,18 @@ import { WebhookRecoveryProcessor } from './webhook-recovery.repository.js';
 /**
  * `payments` module — task 3b.5 Checkpoints C/D (synchronous capture) plus
  * Checkpoint E (generic provider port / registry / async PaymentAttempt
- * reservation). No `AccountingModule`/`CatalogModule`/`CustomerModule`
- * import — this module never calls `PostingEngineService`, never resolves a
- * price/tax, never touches a customer.
+ * reservation). Never resolves a price/tax and never touches
+ * `CatalogModule`/`CustomerModule` directly.
+ *
+ * Task 3b.6 Checkpoint D (D17) — now imports `ReceivablesModule` so
+ * `PaymentCollectionRepository`/`WebhookEventProcessorRepository` can call
+ * `PaymentCustomerAttributionRepository` (D4) and
+ * `CustomerReceiptEffectsRepository` (D18) for a customer-attributable
+ * Invoice collection's customer-account effects — the ONE centralized
+ * implementation, never duplicated per producer. A walk-in Invoice
+ * collection still never calls `PostingEngineService` at all (D17/D21) —
+ * this module's own producers gate that call behind the attribution
+ * resolver's own non-null result.
  *
  * `PaymentProviderRegistry` is registered with ZERO concrete adapters
  * (owner §E3) — production has nothing registered until the owner confirms
@@ -50,6 +60,7 @@ import { WebhookRecoveryProcessor } from './webhook-recovery.repository.js';
  * running underneath it.
  */
 @Module({
+  imports: [ReceivablesModule],
   controllers: [PaymentController, PaymentAttemptController, PaymentWebhookController],
   providers: [
     PaymentCollectionRepository,

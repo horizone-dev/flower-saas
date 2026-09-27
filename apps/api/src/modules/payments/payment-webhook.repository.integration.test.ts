@@ -2,7 +2,12 @@ import crypto from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestStack, migrateTestDb, inParallel, type TestStack } from '@flower/testing';
 // eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
-import { createPrismaClient, runScoped, type PrismaClient } from '@flower/db';
+import {
+  createPrismaClient,
+  runScoped,
+  ACCOUNTING_REFERENCE_ACCOUNTS,
+  type PrismaClient,
+} from '@flower/db';
 import { DbService, type BackendConfig } from '@flower/backend';
 import pg from 'pg';
 import { WebhookBootstrapRepository } from './webhook-bootstrap.repository.js';
@@ -20,6 +25,34 @@ import type {
   VerifiedProviderWebhookEvent,
   PaymentProviderInitiationResult,
 } from './payment-provider.port.js';
+import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
+import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import { PostingEngineService } from '../accounting/posting-engine.service.js';
+import { CompanyFinancialConfigRepository } from '../accounting/company-financial-config.repository.js';
+import { AccountingPeriodRepository } from '../accounting/accounting-period.repository.js';
+import { AccountRepository } from '../accounting/account.repository.js';
+import { SystemClock } from '../../common/clock/clock.js';
+
+/** task 3b.6 Checkpoint D — the two new producer-side dependencies. */
+function makeReceiptSupport(db: DbService): {
+  attribution: PaymentCustomerAttributionRepository;
+  effects: CustomerReceiptEffectsRepository;
+} {
+  const postingEngine = new PostingEngineService(
+    new CompanyFinancialConfigRepository(
+      db,
+      new AuditWriter(db),
+      new AccountRepository(db, new AuditWriter(db)),
+    ),
+    new AccountingPeriodRepository(db, new AuditWriter(db)),
+    new AuditWriter(db),
+    new SystemClock(),
+  );
+  return {
+    attribution: new PaymentCustomerAttributionRepository(),
+    effects: new CustomerReceiptEffectsRepository(postingEngine, new AuditWriter(db)),
+  };
+}
 
 /**
  * Task 3b.5 Checkpoint F (integration) — proves the verified-webhook /
@@ -30,9 +63,14 @@ import type {
  * wiring (raw body, `@Public()`, route shape) is proven separately in
  * `payment-webhook.controller.integration.test.ts`.
  *
- * NO refund/settlement/AR/Advance/PostingEngine/Invoice.invoicePaymentStatus
- * code is exercised or asserted on anywhere in this file — none of it
- * exists in the code under test.
+ * NO refund/settlement/AR/Advance code is exercised anywhere in this file —
+ * none of it exists in the code under test. Task 3b.6 Checkpoint D
+ * hardening pass added a dedicated "customer-linked webhook CAPTURED"
+ * describe block (near the end of this file) proving D17's integration of
+ * THIS EXACT processor into the customer-account/GL/invoicePaymentStatus
+ * effects — every OTHER test in this file still uses walk-in fixtures only,
+ * proving D's own walk-in exclusion (zero customer-account/GL effects)
+ * remains true for the whole pre-existing 3b.5 Checkpoint F surface.
  */
 const TENANT = 'f1000000-1111-7111-8111-111111111111';
 const COMPANY = 'f3000000-3333-7333-8333-333333333333';
@@ -40,6 +78,8 @@ const BRANCH = 'f6000000-6666-7666-8666-666666666666';
 const CATEGORY = 'f9000000-9999-7999-8999-999999999999';
 const PRODUCT = 'fa000000-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
 const VARIANT = 'fb000000-bbbb-7bbb-8bbb-bbbbbbbbbbbb';
+const CUSTOMER = 'fc000000-cccc-7ccc-8ccc-cccccccccccc';
+const CCA = 'fd000000-dddd-7ddd-8ddd-dddddddddddd';
 
 function fakeWebhookAdapter(
   behavior: { kind: 'verifies'; event: VerifiedProviderWebhookEvent } | { kind: 'rejects' },
@@ -77,6 +117,7 @@ describe('Checkpoint F — verified provider webhook / durable inbox / async cap
   let pool: pg.Pool;
   let prisma: PrismaClient;
   let db: DbService;
+  let receiptSupport: ReturnType<typeof makeReceiptSupport>;
   let reservation: PaymentAttemptReservationRepository;
   let collection: PaymentCollectionRepository;
   let bootstrap: WebhookBootstrapRepository;
@@ -90,12 +131,23 @@ describe('Checkpoint F — verified provider webhook / durable inbox / async cap
     prisma = createPrismaClient({ connectionString: stack.postgres.url });
     db = new DbService({ DATABASE_URL: stack.postgres.url } as unknown as BackendConfig);
     bootstrap = new WebhookBootstrapRepository(db);
-    collection = new PaymentCollectionRepository(new AuditWriter(db), new OutboxWriter(db));
+    receiptSupport = makeReceiptSupport(db);
+    collection = new PaymentCollectionRepository(
+      new AuditWriter(db),
+      new OutboxWriter(db),
+      receiptSupport.attribution,
+      receiptSupport.effects,
+    );
     reservation = new PaymentAttemptReservationRepository(
       new AuditWriter(db),
       new OutboxWriter(db),
     );
-    processor = new WebhookEventProcessorRepository(new AuditWriter(db), new OutboxWriter(db));
+    processor = new WebhookEventProcessorRepository(
+      new AuditWriter(db),
+      new OutboxWriter(db),
+      receiptSupport.attribution,
+      receiptSupport.effects,
+    );
 
     await pool.query(
       `INSERT INTO plan (id, key, name, "updatedAt")
@@ -139,6 +191,31 @@ describe('Checkpoint F — verified provider webhook / durable inbox / async cap
       `INSERT INTO variant (id, "tenantId", "productId", "nameEn", "updatedAt")
        VALUES ($1, $2, $3, 'Rose Variant', now())`,
       [VARIANT, TENANT, PRODUCT],
+    );
+    // task 3b.6 Checkpoint D hardening — accounting + customer fixtures,
+    // needed ONLY by the new customer-linked webhook describe block below;
+    // every pre-existing test in this file uses walk-in fixtures and never
+    // touches these rows.
+    for (const a of ACCOUNTING_REFERENCE_ACCOUNTS) {
+      await pool.query(
+        `INSERT INTO account (id,"tenantId","companyId",key,category,"displayCode","displayName","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,now())`,
+        [uid(), TENANT, COMPANY, a.key, a.category, a.defaultDisplayCode, a.defaultDisplayName],
+      );
+    }
+    await pool.query(
+      `INSERT INTO accounting_period (id,"tenantId","companyId","startDate","endDate",status,"updatedAt")
+       VALUES ($1,$2,$3,'2026-01-01','2026-12-31','OPEN',now())`,
+      [uid(), TENANT, COMPANY],
+    );
+    await pool.query(
+      `INSERT INTO customer (id, "tenantId", "displayName", "updatedAt") VALUES ($1, $2, 'Test Customer', now())`,
+      [CUSTOMER, TENANT],
+    );
+    await pool.query(
+      `INSERT INTO customer_company_account (id, "tenantId", "companyId", "customerId", "updatedAt")
+       VALUES ($1, $2, $3, $4, now())`,
+      [CCA, TENANT, COMPANY, CUSTOMER],
     );
   }, 180_000);
 
@@ -210,6 +287,38 @@ describe('Checkpoint F — verified provider webhook / durable inbox / async cap
   async function freshInvoice(totalAmountMinor = 500n): Promise<string> {
     const orderId = await insertOrder();
     return insertInvoice(orderId, totalAmountMinor);
+  }
+
+  /** task 3b.6 Checkpoint D hardening — a customer-linked Invoice + its
+   *  Checkpoint-C-style `CustomerReceivable(INVOICE)` row, created directly
+   *  by raw SQL (mirrors `customer-receipt-collection.integration.test.ts`'s
+   *  own fixture exactly). */
+  async function freshCustomerInvoice(totalAmountMinor = 500n): Promise<{
+    invoiceId: string;
+    receivableId: string;
+  }> {
+    const orderId = uid();
+    await pool.query(
+      `INSERT INTO "order"
+         (id, "tenantId", "companyId", "originBranchId", "fulfillingBranchId", "customerId", kind, status,
+          "currencyCode", "currencyExponent", "commercialSnapshotFingerprint",
+          "commercialSnapshotFingerprintVersion", "taxPriceMode", "taxRoundingScope",
+          "taxRoundingMode", "updatedAt")
+       VALUES ($1,$2,$3,$4,$4,$5,'WALK_IN','DRAFT','AED',2,$6,2,'TAX_EXCLUSIVE','LINE','HALF_UP',now())`,
+      [orderId, TENANT, COMPANY, BRANCH, CUSTOMER, `fp-${orderId}`],
+    );
+    const invoiceId = await insertInvoice(orderId, totalAmountMinor);
+    const receivableId = uid();
+    await pool.query(
+      `INSERT INTO customer_receivable (id, "tenantId", "companyId", "branchId", "customerCompanyAccountId", "sourceType", "invoiceId", "creditAuthorized")
+       VALUES ($1,$2,$3,$4,$5,'INVOICE',$6,true)`,
+      [receivableId, TENANT, COMPANY, BRANCH, CCA, invoiceId],
+    );
+    await pool.query(
+      `UPDATE customer_company_account SET "currentOutstandingMinor" = "currentOutstandingMinor" + $2 WHERE id = $1`,
+      [CCA, totalAmountMinor],
+    );
+    return { invoiceId, receivableId };
   }
 
   /** creates a `provider_credential` + `payment_webhook_endpoint` pair,
@@ -1385,7 +1494,12 @@ describe('Checkpoint F — verified provider webhook / durable inbox / async cap
       }
       const flakyRecovery = new WebhookRecoveryProcessor(
         db,
-        new ProcessorFailsOnce(new AuditWriter(db), new OutboxWriter(db)),
+        new ProcessorFailsOnce(
+          new AuditWriter(db),
+          new OutboxWriter(db),
+          receiptSupport.attribution,
+          receiptSupport.effects,
+        ),
       );
       const first = await flakyRecovery.tick();
       expect(first.failed).toBeGreaterThanOrEqual(1);
@@ -1496,5 +1610,296 @@ describe('Checkpoint F — verified provider webhook / durable inbox / async cap
       [row!.id],
     );
     expect(rows[0]!.targetState).toBe('REQUIRES_ACTION'); // never overwritten to CANCELED
+  });
+
+  // ═════ task 3b.6 Checkpoint D hardening — customer-linked webhook CAPTURED ═
+  describe('Checkpoint D hardening — customer-linked webhook CAPTURED', () => {
+    async function journalFor(sourceKind: string, sourceId: string) {
+      const { rows } = await pool.query<{
+        journalEntryId: string;
+        accountKey: string;
+        debitMinor: string;
+        creditMinor: string;
+      }>(
+        `SELECT je.id AS "journalEntryId", a.key AS "accountKey", jl."debitMinor", jl."creditMinor"
+           FROM journal_entry je
+           JOIN journal_line jl ON jl."journalEntryId" = je.id
+           JOIN account a ON a.id = jl."accountId"
+          WHERE je."sourceKind" = $1 AND je."sourceId" = $2
+          ORDER BY jl."debitMinor" DESC`,
+        [sourceKind, sourceId],
+      );
+      return rows;
+    }
+
+    it('valid CAPTURED against a customer-linked Invoice: every D17 effect exactly once', async () => {
+      const providerKey = `tap-cust-cap-${uid()}`;
+      const { credentialId, endpointId } = await createCredentialAndEndpoint(providerKey);
+      const { invoiceId, receivableId } = await freshCustomerInvoice(300n);
+      const attemptId = await createAttempt({
+        invoiceId,
+        amountMinor: 300n,
+        providerKey,
+        providerCredentialId: credentialId,
+      });
+      const registry = new PaymentProviderRegistry();
+      registry.register(
+        providerKey,
+        fakeWebhookAdapter({
+          kind: 'verifies',
+          event: {
+            providerEventId: `evt-cust-${uid()}`,
+            eventType: 'charge.captured',
+            paymentAttemptId: attemptId,
+            targetState: 'CAPTURED',
+            providerReference: 'ref-cust-cap',
+          },
+        }),
+      );
+      await makeWebhookRepo(registry).handle({
+        endpointId,
+        rawBody: Buffer.from('{}'),
+        headers: {},
+      });
+
+      expect(await attemptState(attemptId)).toBe('CAPTURED');
+      expect(await paymentCount(attemptId)).toBe(1);
+      const { rows: paymentRows } = await pool.query<{ id: string }>(
+        `SELECT p.id FROM payment p WHERE p."sourceAttemptId" = $1`,
+        [attemptId],
+      );
+      const paymentId = paymentRows[0]!.id;
+
+      const { rows: allocRows } = await pool.query<{ id: string }>(
+        `SELECT id FROM payment_allocation WHERE "paymentId" = $1`,
+        [paymentId],
+      );
+      expect(allocRows).toHaveLength(1);
+      const allocationId = allocRows[0]!.id;
+
+      const { rows: entryRows } = await pool.query<{ entryKind: string }>(
+        `SELECT "entryKind" FROM customer_account_entry WHERE "paymentId" = $1 OR "paymentAllocationId" = $2`,
+        [paymentId, allocationId],
+      );
+      expect(entryRows.map((r) => r.entryKind).sort()).toEqual(['PAYMENT', 'PAYMENT_ALLOCATION']);
+
+      const { rows: ccaRows } = await pool.query<{ currentOutstandingMinor: string }>(
+        `SELECT "currentOutstandingMinor" FROM customer_company_account WHERE id = $1`,
+        [CCA],
+      );
+      expect(ccaRows[0]!.currentOutstandingMinor).toBe('0'); // 300 - 300
+
+      const { rows: invRows } = await pool.query<{ invoicePaymentStatus: string }>(
+        `SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`,
+        [invoiceId],
+      );
+      expect(invRows[0]!.invoicePaymentStatus).toBe('PAID');
+
+      const receiptJournal = await journalFor('customer_receipt_payment', paymentId);
+      expect(receiptJournal).toEqual([
+        {
+          journalEntryId: receiptJournal[0]!.journalEntryId,
+          accountKey: 'ASSET.PAYMENT_CLEARING',
+          debitMinor: '300',
+          creditMinor: '0',
+        },
+        {
+          journalEntryId: receiptJournal[0]!.journalEntryId,
+          accountKey: 'LIABILITY.UNAPPLIED_RECEIPTS',
+          debitMinor: '0',
+          creditMinor: '300',
+        },
+      ]);
+      const allocationJournal = await journalFor('payment_allocation', allocationId);
+      expect(allocationJournal).toEqual([
+        {
+          journalEntryId: allocationJournal[0]!.journalEntryId,
+          accountKey: 'LIABILITY.UNAPPLIED_RECEIPTS',
+          debitMinor: '300',
+          creditMinor: '0',
+        },
+        {
+          journalEntryId: allocationJournal[0]!.journalEntryId,
+          accountKey: 'ASSET.ACCOUNTS_RECEIVABLE',
+          debitMinor: '0',
+          creditMinor: '300',
+        },
+      ]);
+      void receivableId;
+    });
+
+    it('duplicate CAPTURED against the SAME customer-linked attempt: zero duplicate Payment/chronology/projection/journal', async () => {
+      const providerKey = `tap-cust-dup-${uid()}`;
+      const { credentialId, endpointId } = await createCredentialAndEndpoint(providerKey);
+      const { invoiceId } = await freshCustomerInvoice(200n);
+      const attemptId = await createAttempt({
+        invoiceId,
+        amountMinor: 200n,
+        providerKey,
+        providerCredentialId: credentialId,
+      });
+      const deliver = (providerEventId: string) => {
+        const registry = new PaymentProviderRegistry();
+        registry.register(
+          providerKey,
+          fakeWebhookAdapter({
+            kind: 'verifies',
+            event: {
+              providerEventId,
+              eventType: 'x',
+              paymentAttemptId: attemptId,
+              targetState: 'CAPTURED',
+              providerReference: 'ref-cust-dup',
+            },
+          }),
+        );
+        return makeWebhookRepo(registry).handle({
+          endpointId,
+          rawBody: Buffer.from('{}'),
+          headers: {},
+        });
+      };
+      await deliver(`evt-a-${uid()}`);
+      expect(await paymentCount(attemptId)).toBe(1);
+      const { rows: p1 } = await pool.query<{ id: string }>(
+        `SELECT id FROM payment WHERE "sourceAttemptId" = $1`,
+        [attemptId],
+      );
+      const paymentId = p1[0]!.id;
+
+      await deliver(`evt-b-${uid()}`); // duplicate delivery, different providerEventId
+
+      expect(await paymentCount(attemptId)).toBe(1); // still exactly one
+      const { rows: entryRows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::int AS n FROM customer_account_entry WHERE "paymentId" = $1`,
+        [paymentId],
+      );
+      expect(entryRows[0]!.n).toBe(1);
+      const { rows: journalRows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::int AS n FROM journal_entry WHERE "sourceKind" = 'customer_receipt_payment' AND "sourceId" = $1`,
+        [paymentId],
+      );
+      expect(journalRows[0]!.n).toBe(1);
+      const { rows: ccaRows } = await pool.query<{ currentOutstandingMinor: string }>(
+        `SELECT "currentOutstandingMinor" FROM customer_company_account WHERE id = $1`,
+        [CCA],
+      );
+      expect(ccaRows[0]!.currentOutstandingMinor).toBe('0'); // 200 - 200, decremented exactly once
+    });
+
+    it('walk-in provider CAPTURED: zero CustomerAccountEntry, zero customer_receipt_payment journal, zero customer-AR journal — 3b.9 owns walk-in GL', async () => {
+      const providerKey = `tap-walkin-${uid()}`;
+      const { credentialId, endpointId } = await createCredentialAndEndpoint(providerKey);
+      const invoiceId = await freshInvoice(150n); // walk-in — no customerId
+      const attemptId = await createAttempt({
+        invoiceId,
+        amountMinor: 150n,
+        providerKey,
+        providerCredentialId: credentialId,
+      });
+      const registry = new PaymentProviderRegistry();
+      registry.register(
+        providerKey,
+        fakeWebhookAdapter({
+          kind: 'verifies',
+          event: {
+            providerEventId: `evt-walkin-${uid()}`,
+            eventType: 'x',
+            paymentAttemptId: attemptId,
+            targetState: 'CAPTURED',
+            providerReference: 'ref-walkin',
+          },
+        }),
+      );
+      await makeWebhookRepo(registry).handle({
+        endpointId,
+        rawBody: Buffer.from('{}'),
+        headers: {},
+      });
+
+      expect(await paymentCount(attemptId)).toBe(1);
+      const { rows: invRows } = await pool.query<{ invoicePaymentStatus: string }>(
+        `SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`,
+        [invoiceId],
+      );
+      expect(invRows[0]!.invoicePaymentStatus).toBe('PAID'); // status still derives (D21)
+
+      const { rows: p1 } = await pool.query<{ id: string }>(
+        `SELECT id FROM payment WHERE "sourceAttemptId" = $1`,
+        [attemptId],
+      );
+      const paymentId = p1[0]!.id;
+      const { rows: entryRows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::int AS n FROM customer_account_entry WHERE "paymentId" = $1`,
+        [paymentId],
+      );
+      expect(entryRows[0]!.n).toBe(0);
+      const receiptJournal = await journalFor('customer_receipt_payment', paymentId);
+      expect(receiptJournal).toEqual([]);
+      const { rows: allocRows } = await pool.query<{ id: string }>(
+        `SELECT id FROM payment_allocation WHERE "paymentId" = $1`,
+        [paymentId],
+      );
+      const allocationJournal = await journalFor('payment_allocation', allocRows[0]!.id);
+      expect(allocationJournal).toEqual([]);
+    });
+
+    it('recovery path produces the SAME customer-linked effects, exactly once (task 7)', async () => {
+      const providerKey = `tap-cust-rec-${uid()}`;
+      const { credentialId, endpointId } = await createCredentialAndEndpoint(providerKey);
+      const { invoiceId } = await freshCustomerInvoice(250n);
+      const attemptId = await createAttempt({
+        invoiceId,
+        amountMinor: 250n,
+        providerKey,
+        providerCredentialId: credentialId,
+      });
+      // durably record a RECEIVED-but-unprocessed inbox row directly (mirrors
+      // the existing "crash BEFORE the immediate processor ever runs" fixture
+      // shape elsewhere in this file) — the recovery pass is the ONLY thing
+      // that ever processes it, through the SAME real `processor` instance.
+      const { rows: epRows } = await pool.query<{ providerCredentialId: string }>(
+        `SELECT "providerCredentialId" FROM payment_webhook_endpoint WHERE id = $1`,
+        [endpointId],
+      );
+      const inboxRows = await runScoped(prisma, { tenantId: TENANT }, (tx) =>
+        inbox.insertVerifiedEventInTx(tx, {
+          tenantId: TENANT,
+          companyId: COMPANY,
+          branchId: BRANCH,
+          providerCredentialId: epRows[0]!.providerCredentialId,
+          providerEventId: `evt-cust-rec-${uid()}`,
+          eventType: 'x',
+          payloadHash: `hash-${uid()}`,
+          paymentAttemptId: attemptId,
+          targetState: 'CAPTURED',
+          providerReference: 'ref-cust-rec-recovery',
+        }),
+      );
+      const recovery = new WebhookRecoveryProcessor(db, processor);
+      const result = await recovery.tick();
+      expect(result.processed).toBeGreaterThanOrEqual(1);
+
+      expect(await attemptState(attemptId)).toBe('CAPTURED');
+      expect(await paymentCount(attemptId)).toBe(1);
+      const { rows: p1 } = await pool.query<{ id: string }>(
+        `SELECT id FROM payment WHERE "sourceAttemptId" = $1`,
+        [attemptId],
+      );
+      const paymentId = p1[0]!.id;
+      const { rows: entryRows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::int AS n FROM customer_account_entry WHERE "paymentId" = $1`,
+        [paymentId],
+      );
+      expect(entryRows[0]!.n).toBe(1);
+      const receiptJournal = await journalFor('customer_receipt_payment', paymentId);
+      expect(receiptJournal).toHaveLength(2);
+      const { rows: invRows } = await pool.query<{ invoicePaymentStatus: string }>(
+        `SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`,
+        [invoiceId],
+      );
+      expect(invRows[0]!.invoicePaymentStatus).toBe('PAID');
+      void inboxRows;
+    });
   });
 });

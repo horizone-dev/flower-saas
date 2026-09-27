@@ -19,6 +19,7 @@ import { AccountingPeriodRepository } from './accounting-period.repository.js';
 import { computePostingFingerprint, type PostingFingerprintLine } from './posting-fingerprint.js';
 import { derivePostingDate } from './posting-date.js';
 import { isPgError } from '../../common/errors/pg-error.js';
+import { isFiscalDate } from '@flower/shared-types';
 
 export interface PostJournalLine {
   accountKey: string;
@@ -36,6 +37,22 @@ export interface PostJournalInput {
   posTerminalId?: string;
   description?: string;
   createdByUserId?: string | null;
+  /**
+   * Task 3b.6 Checkpoint F Final Hardening (§2/§4) — an OPTIONAL, controlled
+   * business accounting date (`YYYY-MM-DD` civil fiscal date), for the rare
+   * internal caller that must post as-of a specific historical date (opening
+   * balances) rather than today. **Omitted (every pre-F caller, unchanged
+   * byte-for-byte): existing behavior — derive today's company-local
+   * accounting date from `Clock.now()` + `Company.accountingTimezone`, exactly
+   * as before this field existed.** Supplied: validated as a strict fiscal
+   * date (`isFiscalDate`, no JS `Date` parsing — the string is used verbatim,
+   * never shifted by timezone conversion), the `AccountingPeriod` containing
+   * THAT date is resolved and must be OPEN (the exact same
+   * `findOpenForPostingDate` gate every caller already goes through — no
+   * bypass), and the `JournalEntry.postingDate` equals that date exactly.
+   * Never an arbitrary timestamp — only a plain civil date string.
+   */
+  accountingDate?: string;
 }
 
 export interface PostJournalResult {
@@ -84,7 +101,10 @@ export class PostingEngineService {
     this.assertConstructedBalance(input.lines);
 
     const config = await this.companyConfig.lockForPosting(tx, input.companyId);
-    const postingDate = derivePostingDate(this.clock.now(), config.accountingTimezone);
+    const postingDate =
+      input.accountingDate !== undefined
+        ? this.resolveExplicitAccountingDate(input.accountingDate)
+        : derivePostingDate(this.clock.now(), config.accountingTimezone);
     const period = await this.periods.findOpenForPostingDate(tx, {
       tenantId: input.tenantId,
       companyId: input.companyId,
@@ -118,6 +138,7 @@ export class PostingEngineService {
       lines: fingerprintLines,
       branchId,
       posTerminalId,
+      accountingDate: input.accountingDate ?? null,
     });
 
     return this.insertAndSeal(tx, {
@@ -188,6 +209,10 @@ export class PostingEngineService {
       lines: inverseLines,
       branchId,
       posTerminalId,
+      // reversals never accept/derive an explicit accounting date (they
+      // always post at today's own period) — `null`, uniformly, same as
+      // every other pre-F caller.
+      accountingDate: null,
     });
 
     try {
@@ -218,6 +243,25 @@ export class PostingEngineService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Task 3b.6 Checkpoint F Final Hardening (§4) — validates a caller-supplied
+   * `accountingDate` is a strict `YYYY-MM-DD` civil fiscal date (reusing the
+   * SAME `isFiscalDate` pure validator Task 3.9's DATE-contract froze — no JS
+   * `Date` parsing anywhere in this path, so no timezone-conversion shift is
+   * possible) and returns it VERBATIM as the `postingDate` string — never an
+   * arbitrary timestamp, never re-derived from `Clock`.
+   */
+  private resolveExplicitAccountingDate(accountingDate: string): string {
+    if (!isFiscalDate(accountingDate)) {
+      throw new DomainError(
+        'INVALID_ACCOUNTING_DATE',
+        `accountingDate "${accountingDate}" must be a valid YYYY-MM-DD civil calendar date`,
+        400,
+      );
+    }
+    return accountingDate;
   }
 
   /** Defensive pre-check — the DB deferred trigger is the authoritative backstop. */
