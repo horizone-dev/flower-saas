@@ -174,6 +174,17 @@ export const PERMISSIONS = {
     'receivables:advance:apply',
     'receivables:opening_balance:manage',
   ],
+  // Task 3b.7 Checkpoint C — Settlement (provider payout reconciliation), a
+  // brand new group mirroring `payments`/`receivables`'s own precedent.
+  // `settlements:view`/`settlements:manage` are DRAFT-lifecycle operational
+  // actions (create/edit/ingest/match — never money-moving on their own, no
+  // SettlementApplication/GL effect exists yet in Checkpoint C).
+  // `settlements:finalize` is registered now (permission-only, exactly like
+  // `customers:credit:override` in 3b.2 and `orders:cancel` in 3b.3) — no
+  // finalize route exists until Checkpoint D; it is step-up gated (below)
+  // since finalizing is what will eventually create the SettlementApplication/
+  // journal/Invoice-SETTLED effect.
+  settlements: ['settlements:view', 'settlements:manage', 'settlements:finalize'],
 } as const satisfies Record<string, readonly string[]>;
 
 export type PermissionGroup = keyof typeof PERMISSIONS;
@@ -432,6 +443,31 @@ export const PHASE_3B_6_TENANT_PERMISSIONS = [
 export type Phase3b6TenantPermission = (typeof PHASE_3B_6_TENANT_PERMISSIONS)[number];
 
 /**
+ * Task 3b.7 Checkpoint C — Settlement DRAFT lifecycle (ingestion + matching).
+ * The frozen 3-key contract. `owner`/`admin`/`accountant` gain all three
+ * (`settlements:view`+`settlements:manage`+`settlements:finalize`);
+ * `manager` gains `settlements:view`+`settlements:manage` only (NOT
+ * `settlements:finalize` — mirrors `accounting:period:manage`'s
+ * Owner/Admin-narrower precedent, extended here to also include the
+ * Accountant system role, the one role whose entire purpose is this
+ * domain); `cashier`/`sales` gain neither key — settlement reconciliation
+ * is a back-office function, not a POS-floor action (unlike
+ * `payments:collect`/`receivables:collect`). `settlements:finalize` is
+ * step-up gated (STEP_UP_PERMISSIONS below) — it is the permission that
+ * will eventually gate creating SettlementApplication/GL/Invoice-SETTLED
+ * effects (Checkpoint D), even though no finalize route exists yet.
+ * `settlements:view`/`settlements:manage` are NOT step-up gated. Existing
+ * tenants get the identical backfill in the task 3b.7 permissions migration.
+ */
+export const PHASE_3B_7_TENANT_PERMISSIONS = [
+  'settlements:view',
+  'settlements:manage',
+  'settlements:finalize',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b7TenantPermission = (typeof PHASE_3B_7_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the
@@ -498,6 +534,14 @@ export const STEP_UP_PERMISSIONS: ReadonlySet<string> = new Set<string>([
   // `receivables:*` key uses this — `:view`/`:collect`/`:advance:apply` are
   // routine transactional actions, matching `payments:collect`'s precedent.
   'receivables:opening_balance:manage',
+  // Task 3b.7 Checkpoint C — settlement finalization will eventually create
+  // the SettlementApplication/GL/Invoice-SETTLED financial effect
+  // (Checkpoint D). No finalize route exists yet, but the permission key
+  // itself is step-up gated now, matching `accounting:period:manage`'s own
+  // "money/financial-integrity action" precedent. `settlements:view`/
+  // `settlements:manage` are NOT step-up gated (ordinary DRAFT-lifecycle
+  // operational actions, no money-moving effect exists yet).
+  'settlements:finalize',
   ...PLATFORM_PERMISSIONS.filter(
     (k) =>
       k === 'platform:tenants:manage' ||

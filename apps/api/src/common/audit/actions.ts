@@ -278,6 +278,21 @@ export const AUDITABLE_ACTIONS = {
   'receivable.opening_receivable_created': { resourceType: 'customer_receivable', security: false },
   'receivable.opening_advance_created': { resourceType: 'customer_advance', security: false },
 
+  // ── settlements: provider payout reconciliation DRAFT lifecycle (task
+  // 3b.7 Checkpoint C) ────────────────────────────────────────────────────
+  // Business events, NOT security events — same bucket/precedent as every
+  // other financial-domain action above (no tenant-lifecycle, RBAC, secrets-
+  // vault, or session/impersonation membership). NO SettlementApplication/
+  // GL/Invoice effect exists yet in Checkpoint C — these audit only the
+  // DRAFT-lifecycle facts. Bounded payloads only: ids, amount/currency,
+  // before/after identifiers — never a raw CSV/provider payload, never PII.
+  // `settlement.updated` covers batch metadata edits, manual line adds, AND
+  // CSV imports (one bounded action, `changeKind` in the payload
+  // distinguishes them) — deliberately not three separate actions.
+  'settlement.created': { resourceType: 'settlement_batch', security: false },
+  'settlement.updated': { resourceType: 'settlement_batch', security: false },
+  'settlement.match_changed': { resourceType: 'settlement_line', security: false },
+
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
   'IMPERSONATION:started': { resourceType: 'tenant', security: true },
