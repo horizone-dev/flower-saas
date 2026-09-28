@@ -10,6 +10,7 @@ import {
   PHASE_3B_5_TENANT_PERMISSIONS,
   PHASE_3B_6_TENANT_PERMISSIONS,
   PHASE_3B_7_TENANT_PERMISSIONS,
+  PHASE_3B_8_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -131,6 +132,12 @@ const SETTLEMENTS_FULL = PHASE_3B_7_TENANT_PERMISSIONS;
 const SETTLEMENTS_MANAGER_TIER = PHASE_3B_7_TENANT_PERMISSIONS.filter(
   (k) => k !== 'settlements:finalize',
 );
+/** credit_notes:view + credit_notes:issue + refunds:view + refunds:execute —
+ *  owner/admin/manager/accountant, ALL FOUR identically (3b.8, §27 of the
+ *  frozen 3b.8-A architecture — no manager-tier carve-out this time, an
+ *  explicit, owner-accepted departure from `settlements:finalize`'s own
+ *  narrower Owner/Admin/Accountant-only precedent). */
+const CREDIT_NOTES_REFUNDS_FULL = PHASE_3B_8_TENANT_PERMISSIONS;
 
 export interface SystemRoleTemplate {
   key: string;
@@ -153,6 +160,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ...RECEIVABLES_MANAGER_TIER,
       RECEIVABLES_OPENING_BALANCE_MANAGE,
       ...SETTLEMENTS_FULL,
+      ...CREDIT_NOTES_REFUNDS_FULL,
     ],
   },
   {
@@ -167,6 +175,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ...RECEIVABLES_MANAGER_TIER,
       RECEIVABLES_OPENING_BALANCE_MANAGE,
       ...SETTLEMENTS_FULL,
+      ...CREDIT_NOTES_REFUNDS_FULL,
     ],
   },
   {
@@ -181,6 +190,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ...PAYMENTS,
       ...RECEIVABLES_MANAGER_TIER,
       ...SETTLEMENTS_MANAGER_TIER,
+      ...CREDIT_NOTES_REFUNDS_FULL,
     ],
   },
   { key: 'supervisor', name: 'Supervisor', permissions: ['users:view'] },
@@ -197,7 +207,11 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
   { key: 'florist', name: 'Florist', permissions: ['users:view'] },
   { key: 'storekeeper', name: 'Storekeeper', permissions: ['users:view'] },
   { key: 'purchase_staff', name: 'Purchase Staff', permissions: ['users:view'] },
-  { key: 'accountant', name: 'Accountant', permissions: ['users:view', ...SETTLEMENTS_FULL] },
+  {
+    key: 'accountant',
+    name: 'Accountant',
+    permissions: ['users:view', ...SETTLEMENTS_FULL, ...CREDIT_NOTES_REFUNDS_FULL],
+  },
   { key: 'dispatcher', name: 'Dispatcher', permissions: ['users:view'] },
   { key: 'driver', name: 'Driver', permissions: ['users:view'] },
   { key: 'receptionist', name: 'Receptionist', permissions: ['users:view'] },
