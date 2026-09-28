@@ -13,6 +13,7 @@
     "test": "vitest run",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
+    "reconcile-historical-settlements": "node dist/scripts/reconcile-historical-settlements.js",
     "clean": "rimraf dist node_modules .turbo"
   },
   "dependencies": {

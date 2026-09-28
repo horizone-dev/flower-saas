@@ -115,4 +115,22 @@ export const ACCOUNTING_REFERENCE_ACCOUNTS: readonly AccountReferenceRow[] = [
     defaultDisplayCode: '5000',
     defaultDisplayName: 'Receivable Write-Off',
   },
+  // Task 3b.7 Checkpoint B — the provider settlement fee expense account
+  // (docs/decisions/ADR-0019.md follow-on). Debited for the exact
+  // `providerFeeMinor` leg of a settlement journal (Dr EXPENSE.PAYMENT_
+  // PROCESSING_FEE / Cr ASSET.PAYMENT_CLEARING), omitted entirely when a
+  // batch's fee is zero (no zero-valued journal line is ever created). NOT
+  // `CONTRA_REVENUE.SETTLEMENT_DISCOUNT` (an unrelated early-payment-discount
+  // concept) and NOT `EXPENSE.RECEIVABLE_WRITE_OFF`. '5100' continues the
+  // EXPENSE category's own numbering (only prior EXPENSE entry is '5000'),
+  // following the same one-gap-per-category convention as every other
+  // category above. Backfilled for every existing company by migration
+  // `20261003120000_settlement_core_schema`; new-company provisioning picks
+  // it up for free (unchanged code, maps this array verbatim).
+  {
+    key: 'EXPENSE.PAYMENT_PROCESSING_FEE',
+    category: 'EXPENSE',
+    defaultDisplayCode: '5100',
+    defaultDisplayName: 'Payment Processing Fee',
+  },
 ];

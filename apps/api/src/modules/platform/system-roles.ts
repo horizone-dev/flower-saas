@@ -9,6 +9,7 @@ import {
   PHASE_3B_2_TENANT_PERMISSIONS,
   PHASE_3B_5_TENANT_PERMISSIONS,
   PHASE_3B_6_TENANT_PERMISSIONS,
+  PHASE_3B_7_TENANT_PERMISSIONS,
 } from '@flower/permissions';
 
 /**
@@ -76,6 +77,16 @@ import {
  * `customers:credit:override`'s Owner/Admin-narrower precedent — fabricating
  * a financial balance from nothing is not a Manager-tier action). Existing
  * tenants get the identical backfill in the task 3b.6 permissions migration.
+ *
+ * Task 3b.7 Checkpoint C (owner-frozen matrix): `owner`/`admin`/`accountant`
+ * gain all 3 `settlements:*` keys; `manager` gains `settlements:view`+
+ * `settlements:manage` only (NOT `settlements:finalize` — mirrors
+ * `accounting:period:manage`'s Owner/Admin-narrower precedent);
+ * `cashier`/`sales` gain neither — settlement reconciliation is a
+ * back-office function, not a POS-floor action. This is the FIRST real
+ * permission grant to the `accountant` system role (previously `users:view`
+ * only). Existing tenants get the identical backfill in the task 3b.7
+ * permissions migration.
  */
 
 const P = PHASE_1_TENANT_PERMISSIONS;
@@ -114,6 +125,12 @@ const RECEIVABLES_OPERATIONAL = PHASE_3B_6_TENANT_PERMISSIONS.filter(
 );
 /** receivables:opening_balance:manage — Owner/Admin-tier only (3b.6). */
 const RECEIVABLES_OPENING_BALANCE_MANAGE = 'receivables:opening_balance:manage';
+/** settlements:view + settlements:manage + settlements:finalize — owner/admin/accountant (3b.7). */
+const SETTLEMENTS_FULL = PHASE_3B_7_TENANT_PERMISSIONS;
+/** settlements:view + settlements:manage only — manager (3b.7). */
+const SETTLEMENTS_MANAGER_TIER = PHASE_3B_7_TENANT_PERMISSIONS.filter(
+  (k) => k !== 'settlements:finalize',
+);
 
 export interface SystemRoleTemplate {
   key: string;
@@ -135,6 +152,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ...PAYMENTS,
       ...RECEIVABLES_MANAGER_TIER,
       RECEIVABLES_OPENING_BALANCE_MANAGE,
+      ...SETTLEMENTS_FULL,
     ],
   },
   {
@@ -148,6 +166,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ...PAYMENTS,
       ...RECEIVABLES_MANAGER_TIER,
       RECEIVABLES_OPENING_BALANCE_MANAGE,
+      ...SETTLEMENTS_FULL,
     ],
   },
   {
@@ -161,6 +180,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
       ...CUSTOMERS_OPERATIONAL,
       ...PAYMENTS,
       ...RECEIVABLES_MANAGER_TIER,
+      ...SETTLEMENTS_MANAGER_TIER,
     ],
   },
   { key: 'supervisor', name: 'Supervisor', permissions: ['users:view'] },
@@ -177,7 +197,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
   { key: 'florist', name: 'Florist', permissions: ['users:view'] },
   { key: 'storekeeper', name: 'Storekeeper', permissions: ['users:view'] },
   { key: 'purchase_staff', name: 'Purchase Staff', permissions: ['users:view'] },
-  { key: 'accountant', name: 'Accountant', permissions: ['users:view'] },
+  { key: 'accountant', name: 'Accountant', permissions: ['users:view', ...SETTLEMENTS_FULL] },
   { key: 'dispatcher', name: 'Dispatcher', permissions: ['users:view'] },
   { key: 'driver', name: 'Driver', permissions: ['users:view'] },
   { key: 'receptionist', name: 'Receptionist', permissions: ['users:view'] },

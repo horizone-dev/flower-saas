@@ -423,7 +423,11 @@ describe('CustomerReceiptCollectionRepository (task 3b.6 Checkpoint D, integrati
     const { rows } = await pool.query(`SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`, [
       invoiceId,
     ]);
-    expect(rows[0]!.invoicePaymentStatus).toBe('PAID');
+    // 3b.7 evolution: a CASH receipt's coverage is settlement-final
+    // immediately (no provider settlement to wait for), so the live
+    // PAID->SETTLED projection now promotes this Invoice directly —
+    // correctly stronger than 3b.6's own PAID-only ceiling.
+    expect(rows[0]!.invoicePaymentStatus).toBe('SETTLED');
   });
 
   it('D29.5/D14: Opening Receivable OLDER than the Invoice — receipt applies Opening first (combined FIFO)', async () => {

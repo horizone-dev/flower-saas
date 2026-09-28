@@ -16,6 +16,7 @@ import { AccountingModule } from './modules/accounting/accounting.module.js';
 import { CustomerModule } from './modules/customers/customer.module.js';
 import { OrderModule } from './modules/orders/order.module.js';
 import { PaymentModule } from './modules/payments/payment.module.js';
+import { SettlementsModule } from './modules/settlements/settlements.module.js';
 import { HealthModule } from './health/health.module.js';
 
 /**
@@ -42,6 +43,7 @@ import { HealthModule } from './health/health.module.js';
     CustomerModule,
     OrderModule,
     PaymentModule,
+    SettlementsModule,
     HealthModule,
   ],
 })

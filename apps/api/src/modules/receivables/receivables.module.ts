@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AccountingModule } from '../accounting/accounting.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { CustomerModule } from '../customers/customer.module.js';
+import { SettlementsModule } from '../settlements/settlements.module.js';
 import { CustomerInvoiceArRepository } from './customer-invoice-ar.repository.js';
 import { CreditOverrideAuthorizationService } from './credit-override-authorization.service.js';
 import { PaymentCustomerAttributionRepository } from './payment-customer-attribution.repository.js';
@@ -47,6 +48,12 @@ import { CustomerAccountReadController } from './customer-account-read.controlle
  * `CustomerReceiptController`/`Service`/`Repository`/`CollectionRepository`
  * are the new customer-level receipt primitive (D10-D16).
  *
+ * Task 3b.7 Checkpoint D additive import: `SettlementsModule`, for
+ * `InvoiceSettlementProjectionRepository` — injected into
+ * `CustomerReceiptEffectsRepository`'s own `recomputeInvoicePaymentStatusInTx`
+ * tail (the SAME reusable live PAID->SETTLED projection Settlement
+ * finalization itself calls, never duplicated).
+ *
  * Checkpoint E additions: `PaymentAdvanceConversionRepository` (E3/E8, the
  * explicit Payment->CustomerAdvance conversion primitive) and
  * `CustomerAdvanceApplicationRepository` (E11-E19, the explicit
@@ -56,7 +63,7 @@ import { CustomerAccountReadController } from './customer-account-read.controlle
  * HTTP repository/service/controller triads.
  */
 @Module({
-  imports: [AccountingModule, AccessModule, CustomerModule],
+  imports: [AccountingModule, AccessModule, CustomerModule, SettlementsModule],
   controllers: [
     CustomerReceiptController,
     PaymentAdvanceConversionController,

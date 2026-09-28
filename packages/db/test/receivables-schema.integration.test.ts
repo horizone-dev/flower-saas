@@ -1238,8 +1238,8 @@ describe('packages/db — Task 3b.6 Checkpoint B receivables schema', () => {
 
   // ═══════════════════════ B17 — EQUITY.OPENING_BALANCE ═══════════════════════
   describe('EQUITY.OPENING_BALANCE reference account (B17)', () => {
-    it('HG34/HG35: ACCOUNTING_REFERENCE_ACCOUNTS has exactly 15 rows, 14 unchanged + 1 new EQUITY.OPENING_BALANCE', async () => {
-      expect(ACCOUNTING_REFERENCE_ACCOUNTS).toHaveLength(15);
+    it('HG34/HG35: ACCOUNTING_REFERENCE_ACCOUNTS has exactly 16 rows, 14 unchanged + 1 EQUITY.OPENING_BALANCE + 1 EXPENSE.PAYMENT_PROCESSING_FEE (task 3b.7)', async () => {
+      expect(ACCOUNTING_REFERENCE_ACCOUNTS).toHaveLength(16);
       const openingBalance = ACCOUNTING_REFERENCE_ACCOUNTS.find(
         (a) => a.key === 'EQUITY.OPENING_BALANCE',
       );

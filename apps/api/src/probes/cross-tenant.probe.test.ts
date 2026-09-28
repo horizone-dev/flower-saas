@@ -20,6 +20,7 @@ import {
   PHASE_3B_2_TENANT_PERMISSIONS,
   PHASE_3B_3_TENANT_PERMISSIONS,
   PHASE_3B_6_TENANT_PERMISSIONS,
+  PHASE_3B_7_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -73,6 +74,9 @@ describe('cross-tenant isolation probe suite', () => {
     orderId: '',
     orderVersion: 0,
     invoiceId: '',
+    settlementCredId: '',
+    settlementBatchId: '',
+    settlementLineId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -83,6 +87,7 @@ describe('cross-tenant isolation probe suite', () => {
   let ownerBCustomerTok: string; // tenant B, task 3b.2 customers:* permissions
   let ownerBOrderTok: string; // tenant B, task 3b.3 orders:* permissions
   let ownerBReceivablesTok: string; // tenant B, task 3b.6 receivables:* permissions
+  let ownerBSettlementsTok: string; // tenant B, task 3b.7 settlements:* permissions
   let branchUserATok: string; // tenant A, scoped to branch A1 only
 
   beforeAll(async () => {
@@ -178,6 +183,39 @@ describe('cross-tenant isolation probe suite', () => {
          VALUES ($1,$2,'notes','"A-only secret note"'::jsonb,now())`,
         [A.tenantId, A.branchId],
       );
+      // task 3b.7 — an A-owned DRAFT SettlementBatch + one unmatched Line to
+      // probe for (a raw INSERT — bypasses the create/addLine primitives,
+      // which is fine here since this is a fixture, not the code under
+      // test). A dedicated, branch-scoped provider_credential is inserted
+      // rather than reusing `A.credId` (created tenant-wide above via the
+      // platform route), since a SettlementBatch requires its
+      // providerCredentialId to carry the SAME companyId+branchId
+      // (Checkpoint B's own frozen scope trigger).
+      A.settlementCredId = (
+        await one(
+          `INSERT INTO provider_credential (id,"tenantId","companyId","branchId",provider,mode,"secretCiphertext","secretNonce","dekWrapped","updatedAt")
+           VALUES (uuidv7(),$1,$2,$3,'tap','TEST','\\x00','\\x00','\\x00',now()) RETURNING id`,
+          [A.tenantId, A.companyId, A.branchId],
+        )
+      ).id;
+      A.settlementBatchId = (
+        await one(
+          `INSERT INTO settlement_batch
+             (id,"tenantId","companyId","branchId","providerCredentialId","externalSettlementId",
+              "providerSettlementDate","grossSettlementMinor","providerFeeMinor","netBankMinor",
+              "currencyCode","currencyExponent")
+           VALUES (uuidv7(),$1,$2,$3,$4,'probe-ext-0001','2030-01-01',1000,0,1000,'AED',2)
+           RETURNING id`,
+          [A.tenantId, A.companyId, A.branchId, A.settlementCredId],
+        )
+      ).id;
+      A.settlementLineId = (
+        await one(
+          `INSERT INTO settlement_line (id,"tenantId","companyId","branchId","batchId","amountMinor","currencyCode","currencyExponent")
+           VALUES (uuidv7(),$1,$2,$3,$4,1000,'AED',2) RETURNING id`,
+          [A.tenantId, A.companyId, A.branchId, A.settlementBatchId],
+        )
+      ).id;
       const mgrRole = (
         await one(`SELECT id FROM role WHERE "tenantId"=$1 AND key='manager'`, [A.tenantId])
       ).id;
@@ -267,6 +305,17 @@ describe('cross-tenant isolation probe suite', () => {
       userId: B.ownerId,
       accountType: 'OWNER',
       permissions: [...PHASE_3B_6_TENANT_PERMISSIONS],
+    });
+    // task 3b.7 — the full settlements:view/manage/finalize permission tier,
+    // mirroring `system-roles.ts`'s own Owner grant (`mint()` always issues a
+    // fresh step-up, so a finalize probe genuinely exercises the cross-
+    // tenant scope check, never a coincidental STEP_UP_REQUIRED 403).
+    ownerBSettlementsTok = await mint('probe-owner-b-settlements', {
+      realm: 'tenant',
+      tenantId: B.tenantId,
+      userId: B.ownerId,
+      accountType: 'OWNER',
+      permissions: [...PHASE_3B_7_TENANT_PERMISSIONS],
     });
 
     // seed a couple of A-owned resources to probe for
@@ -1626,6 +1675,118 @@ describe('cross-tenant isolation probe suite', () => {
           ownerBReceivablesTok,
         ),
       },
+      // task 3b.7 — tenant B (full settlements:view/manage/finalize owner
+      // permission tier, fresh step-up) can never reach tenant A's
+      // SettlementBatch/Line resources through this branch-nested route
+      // family, even against A's REAL existing DRAFT batch/line (seeded
+      // above) — never a coincidental 404 from an empty/nonexistent
+      // resource. Covers 8 of the 9 settlement routes directly; list (the
+      // 9th) is RLS-filtered-empty rather than denied — proven separately by
+      // Checkpoint C's own dedicated cross-scope tests, not this probe.
+      {
+        name: 'POST create a settlement batch under A as ownerB',
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements`,
+          ownerBSettlementsTok,
+          {
+            providerCredentialId: A.settlementCredId,
+            externalSettlementId: 'probe-cross-tenant-0001',
+            providerSettlementDate: '2030-01-01',
+            grossSettlementMinor: '1000',
+            providerFeeMinor: '0',
+            netBankMinor: '1000',
+            currencyCode: 'AED',
+          },
+          { 'idempotency-key': 'probe-3b7-create-0001' },
+        ),
+      },
+      {
+        name: "GET A's settlement batch detail as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements/${A.settlementBatchId}`,
+          ownerBSettlementsTok,
+        ),
+      },
+      {
+        name: "PATCH A's settlement batch as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'PATCH',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements/${A.settlementBatchId}`,
+          ownerBSettlementsTok,
+          { providerSettlementDate: '2030-02-01' },
+          { 'if-match': '1' },
+        ),
+      },
+      {
+        name: "POST add a line to A's settlement batch as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements/${A.settlementBatchId}/lines`,
+          ownerBSettlementsTok,
+          { amountMinor: '500' },
+          { 'if-match': '1' },
+        ),
+      },
+      {
+        name: "POST CSV-import lines into A's settlement batch as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements/${A.settlementBatchId}/lines/import`,
+          ownerBSettlementsTok,
+          {
+            csvContent: 'externalLineId,providerReference,amountMinor\nprobe-line,probe-ref,500\n',
+          },
+          { 'if-match': '1', 'idempotency-key': 'probe-3b7-import-0001' },
+        ),
+      },
+      {
+        name: "POST match A's settlement line as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements/${A.settlementBatchId}/lines/${A.settlementLineId}/match`,
+          ownerBSettlementsTok,
+          { paymentId: '00000000-0000-7000-8000-000000000000' },
+          { 'if-match': '1' },
+        ),
+      },
+      {
+        name: "POST unmatch A's settlement line as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements/${A.settlementBatchId}/lines/${A.settlementLineId}/unmatch`,
+          ownerBSettlementsTok,
+          undefined,
+          { 'if-match': '1' },
+        ),
+      },
+      {
+        name: "POST finalize A's settlement batch as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/settlements/${A.settlementBatchId}/finalize`,
+          ownerBSettlementsTok,
+          undefined,
+          { 'if-match': '1' },
+        ),
+      },
     ];
     assertNoLeaks(await runIsolationProbes(cases));
 
@@ -1870,6 +2031,14 @@ describe('cross-tenant isolation probe suite', () => {
       // receivables/advances/unapplied-receipts/statement — all against a
       // REAL existing A-owned customer, never a coincidental 404).
       '/v1/companies/:companyId/branches/:branchId/customers',
+      // task 3b.7 — probed above (tenant B, holding the full settlements:*
+      // owner permission tier with a fresh step-up, cannot create/read/edit/
+      // add-line/import/match/unmatch/finalize tenant A's real DRAFT
+      // SettlementBatch/Line, same branch-nested scope rules; list is
+      // RLS-filtered-empty rather than denied, so it does not fit this
+      // binary denied/leaked probe shape — it is proven separately by
+      // Checkpoint C's own dedicated cross-scope tests).
+      '/v1/companies/:companyId/branches/:branchId/settlements',
     ];
     const unprobed = nonPublic.filter((r) => {
       const key = `${r.httpMethod} ${r.path}`;
