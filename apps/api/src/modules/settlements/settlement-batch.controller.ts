@@ -333,4 +333,38 @@ export class SettlementBatchController {
     void reply.header('etag', `"${result.batch.version}"`);
     return { batch: serializeBatch(result.batch), line: serializeLine(result.line) };
   }
+
+  /**
+   * Task 3b.7 Checkpoint D — settlement finalization. `settlements:finalize`
+   * is step-up gated (Checkpoint C's own `STEP_UP_PERMISSIONS` registration)
+   * — no `@NoStepUp()` here, so the existing guard pipeline enforces it
+   * automatically, exactly like `accounting:period:manage`'s own
+   * `closePeriod` route. No request body — every field the finalize
+   * transaction needs is derived entirely from the already-normalized DRAFT
+   * Batch/Lines; the caller supplies only the target id and `If-Match`.
+   */
+  @Post(':id/finalize')
+  @HttpCode(200)
+  @RequirePermission('settlements:finalize')
+  @ScopedParam({ company: 'companyId', branch: 'branchId' })
+  async finalize(
+    @Param('companyId') companyId: string,
+    @Param('branchId') branchId: string,
+    @Param('id') id: string,
+    @Headers('if-match') ifMatch: string | undefined,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    assertUuid(companyId, 'company');
+    assertUuid(branchId, 'branch');
+    assertUuid(id, 'settlement batch');
+    const expectedVersion = requireIfMatch(parseIfMatch(ifMatch));
+    const finalized = await this.settlements.finalize({
+      companyId,
+      branchId,
+      id,
+      expectedVersion,
+    });
+    void reply.header('etag', `"${finalized.version}"`);
+    return serializeBatch(finalized);
+  }
 }

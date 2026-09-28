@@ -7,6 +7,7 @@ import {
   type SettlementLineRow,
 } from './settlement-batch.repository.js';
 import { parseAndValidateSettlementCsv } from './settlement-csv.js';
+import { SettlementFinalizationRepository } from './settlement-finalization.repository.js';
 
 /**
  * Task 3b.7 Checkpoint C — opens the caller transaction (`this.scoped`,
@@ -21,6 +22,7 @@ export class SettlementBatchHttpRepository extends ScopedRepository {
   constructor(
     db: DbService,
     private readonly batches: SettlementBatchRepository,
+    private readonly finalization: SettlementFinalizationRepository,
   ) {
     super(db);
   }
@@ -145,5 +147,18 @@ export class SettlementBatchHttpRepository extends ScopedRepository {
   }> {
     const { tenantId } = requireTenantContext();
     return this.scoped((tx) => this.batches.detailInTx(tx, { tenantId, ...input }));
+  }
+
+  /** Task 3b.7 Checkpoint D — settlement finalization. */
+  async finalizeForBranchScoped(input: {
+    companyId: string;
+    branchId: string;
+    id: string;
+    expectedVersion: number;
+  }): Promise<SettlementBatchRow> {
+    const { tenantId } = requireTenantContext();
+    return this.scoped((tx) =>
+      this.finalization.finalizeInTx(tx, { tenantId, ...input, actorUserId: this.actorUserId() }),
+    );
   }
 }

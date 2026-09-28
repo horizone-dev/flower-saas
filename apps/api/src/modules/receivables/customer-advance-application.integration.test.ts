@@ -379,7 +379,11 @@ describe('CustomerAdvanceApplicationRepository (task 3b.6 Checkpoint E, integrat
     const full = await apply(customerId, advanceId, receivableId, 100n);
     expect(full.remainingAdvanceMinor).toBe(200n);
     expect(full.receivableOutstandingMinor).toBe(0n);
-    expect(full.invoicePaymentStatus).toBe('PAID');
+    // 3b.7 evolution: `freshAdvance` is funded by a CASH Payment
+    // (`freshUnappliedPaymentRaw`), which is settlement-final immediately —
+    // so the live PAID->SETTLED projection now promotes this Invoice
+    // directly, correctly stronger than 3b.6's own PAID-only ceiling.
+    expect(full.invoicePaymentStatus).toBe('SETTLED');
     ccaRows = await pool.query(
       `SELECT "advanceBalanceMinor", "currentOutstandingMinor" FROM customer_company_account WHERE id = $1`,
       [ccaId],
@@ -391,7 +395,8 @@ describe('CustomerAdvanceApplicationRepository (task 3b.6 Checkpoint E, integrat
       `SELECT "invoicePaymentStatus" FROM invoice WHERE id = $1`,
       [invoiceId],
     );
-    expect(invRows[0]!.invoicePaymentStatus).toBe('PAID');
+    // 3b.7 evolution: see the `full.invoicePaymentStatus` comment above.
+    expect(invRows[0]!.invoicePaymentStatus).toBe('SETTLED');
   });
 
   it('15: applying more than the Invoice outstanding is rejected', async () => {
@@ -514,7 +519,11 @@ describe('CustomerAdvanceApplicationRepository (task 3b.6 Checkpoint E, integrat
     const advanceId = await freshOpeningAdvance(ccaId, 500);
     const result = await apply(customerId, advanceId, receivableId, 200n);
     expect(result.receivableOutstandingMinor).toBe(0n);
-    expect(result.invoicePaymentStatus).toBe('PAID');
+    // 3b.7 evolution: an OPENING-sourced Advance is settlement-final
+    // immediately (no funding Payment to ever settle) — so the live
+    // PAID->SETTLED projection now promotes this Invoice directly,
+    // correctly stronger than 3b.6's own PAID-only ceiling.
+    expect(result.invoicePaymentStatus).toBe('SETTLED');
   });
 
   // "final hardening (task 8): an OPENING-sourced Advance applies to an

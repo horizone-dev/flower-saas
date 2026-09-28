@@ -292,6 +292,14 @@ export const AUDITABLE_ACTIONS = {
   'settlement.created': { resourceType: 'settlement_batch', security: false },
   'settlement.updated': { resourceType: 'settlement_batch', security: false },
   'settlement.match_changed': { resourceType: 'settlement_line', security: false },
+  // Task 3b.7 Checkpoint D — settlement finalization. A business event, NOT
+  // a security event (same bucket/precedent as every other financial-domain
+  // action above). Exactly ONE row per successful finalization; a rolled-
+  // back finalization (unmatched lines, total mismatch, version conflict,
+  // concurrent-coverage-change, over-capacity, closed period) writes NO row.
+  // Bounded payload only: ids, amount/currency, a matched-Payment COUNT —
+  // never a Payment/Invoice id array, never a raw provider payload.
+  'settlement.finalized': { resourceType: 'settlement_batch', security: false },
 
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },

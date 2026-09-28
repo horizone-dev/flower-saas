@@ -7,6 +7,7 @@ import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { PostingEngineService } from '../accounting/posting-engine.service.js';
 import { resolveReceiptAccountKeyForTender } from '../payments/tender-account-mapping.js';
 import type { TenderMethod } from '../payments/tender.js';
+import { InvoiceSettlementProjectionRepository } from '../settlements/invoice-settlement-projection.repository.js';
 import { assertCustomerAccountEntryReferenceShape } from './customer-account-entry.js';
 import {
   computeInvoiceCoverage,
@@ -88,6 +89,14 @@ export class CustomerReceiptEffectsRepository {
   constructor(
     private readonly postingEngine: PostingEngineService,
     private readonly audit: AuditWriter,
+    // Defaulted (never actually falls back under real NestJS DI, which
+    // always passes an explicit instance for every constructor param it
+    // manages) so the many existing tests across payments/receivables that
+    // construct this class directly (bypassing DI) keep compiling
+    // unchanged — `InvoiceSettlementProjectionRepository` has zero
+    // dependencies of its own, so a fresh default instance is always
+    // behaviorally identical to the DI-managed singleton.
+    private readonly settlementProjection: InvoiceSettlementProjectionRepository = new InvoiceSettlementProjectionRepository(),
   ) {}
 
   /**
@@ -309,6 +318,27 @@ export class CustomerReceiptEffectsRepository {
    * `advanceAppliedMinor` is structurally always `0n`, per Checkpoint A's own
    * documented invariant — no walk-in-specific branch needed here either).
    * A same-state result is a harmless no-op (no UPDATE issued).
+   *
+   * Task 3b.7 Checkpoint D — additive tail hook (Call Sites B/C combined):
+   * whenever the just-derived status is `PAID`, also calls the ONE reusable
+   * `InvoiceSettlementProjectionRepository.recomputeInTx` — the SAME
+   * function Settlement finalization itself calls for its own discovered
+   * Invoices. This single hook covers EVERY existing PaymentAllocation
+   * producer (local/Multi Payment invoice collection, the customer-level
+   * FIFO receipt path, provider webhook capture, recovery replay — all of
+   * which already call this method, directly or via
+   * `applyInvoiceAllocationEffectsInTx` above) AND
+   * `CustomerAdvanceApplicationRepository`'s own Invoice-target branch
+   * (`customer-advance-application.repository.ts`, which already gates this
+   * call on `sourceType === 'INVOICE'`) — without touching any of those
+   * write paths individually, and without introducing any new lock (this
+   * function only ever performs plain, unlocked reads; the Invoice row is
+   * already safely in the established upstream position in every one of
+   * these callers' own transactions). Never fires speculatively: an
+   * already-PAID Invoice can never legally receive a NEW PaymentAllocation/
+   * CustomerAdvanceApplication (the frozen coverage backstops block
+   * over-allocation), so this only ever runs at the exact moment an Invoice
+   * first becomes financially PAID.
    */
   async recomputeInvoicePaymentStatusInTx(tx: ScopedTx, invoiceId: string): Promise<void> {
     const rows = await tx.$queryRaw<{ totalAmountMinor: bigint; invoicePaymentStatus: string }[]>`
@@ -346,6 +376,9 @@ export class CustomerReceiptEffectsRepository {
         where: { id: invoiceId },
         data: { invoicePaymentStatus: nextStatus },
       });
+    }
+    if (nextStatus === 'PAID') {
+      await this.settlementProjection.recomputeInTx(tx, invoiceId);
     }
   }
 

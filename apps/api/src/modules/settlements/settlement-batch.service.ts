@@ -44,4 +44,8 @@ export class SettlementBatchService {
   }> {
     return this.repo.detailForBranchScoped(input);
   }
+
+  finalize(input: Parameters<SettlementBatchHttpRepository['finalizeForBranchScoped']>[0]) {
+    return this.repo.finalizeForBranchScoped(input);
+  }
 }

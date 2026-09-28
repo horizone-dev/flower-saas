@@ -118,3 +118,44 @@ export function assertInvoicePaymentStatusTransition(
     throw new RangeError(`illegal Invoice payment-status transition ${from} -> ${to}`);
   }
 }
+
+/**
+ * Task 3b.7 Checkpoint D — the frozen extension point this module's own doc
+ * comment anticipated ("3b.7 SETTLED... get to add their own reachable
+ * edges to this SAME graph"). A SEPARATE, wider type/graph — the original
+ * `InvoicePaymentStatus3b6`/`TRANSITIONS`/`assertInvoicePaymentStatusTransition`
+ * above are UNCHANGED (still exactly the 3b.6 coverage-arithmetic graph,
+ * still used unmodified by every existing 3b.6 caller). `SETTLED` is
+ * FORWARD-ONLY from `PAID` — never a coverage-arithmetic state itself (it
+ * layers settlement-finality on top of an already-PAID invoice), so `UNPAID`/
+ * `PARTIAL` have no edge to it and `SETTLED` has no edge back to `PAID`.
+ */
+export type InvoiceSettlementStatus3b7 = InvoicePaymentStatus3b6 | 'SETTLED';
+
+const TRANSITIONS_3B7: Readonly<
+  Record<InvoiceSettlementStatus3b7, readonly InvoiceSettlementStatus3b7[]>
+> = Object.freeze({
+  UNPAID: ['UNPAID'],
+  PARTIAL: ['PARTIAL'],
+  PAID: ['PAID', 'SETTLED'],
+  SETTLED: ['SETTLED'],
+});
+
+export function canTransitionInvoiceSettlementStatus(
+  from: InvoiceSettlementStatus3b7,
+  to: InvoiceSettlementStatus3b7,
+): boolean {
+  return TRANSITIONS_3B7[from].includes(to);
+}
+
+/** Throws for any edge outside the frozen 3b.7 graph — in particular
+ *  `SETTLED -> PAID` (3b.7 is forward-only; reversal is a future 3b.8+
+ *  concept) and any edge out of `UNPAID`/`PARTIAL` into `SETTLED`. */
+export function assertInvoiceSettlementStatusTransition(
+  from: InvoiceSettlementStatus3b7,
+  to: InvoiceSettlementStatus3b7,
+): void {
+  if (!canTransitionInvoiceSettlementStatus(from, to)) {
+    throw new RangeError(`illegal Invoice settlement-status transition ${from} -> ${to}`);
+  }
+}
