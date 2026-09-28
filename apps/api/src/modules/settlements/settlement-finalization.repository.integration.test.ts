@@ -1315,15 +1315,24 @@ describe('SettlementFinalizationRepository (task 3b.7 Checkpoint D, integration)
       const allocationId = allocRows.rows[0].id;
 
       // T1: the real finalize, started concurrently — Discovery #1 runs
-      // before T2 commits, so it does NOT see this Invoice.
-      const t1Promise = finalize(batchId, 1);
+      // before T2 commits, so it does NOT see this Invoice. A rejection
+      // handler is attached IMMEDIATELY (never a bare `finalize(...)` left
+      // to reject unobserved across the awaits below) — no window exists in
+      // which Node could see this as an unhandled rejection.
+      const t1OutcomePromise = finalize(batchId, 1).then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (error: unknown) => ({ status: 'rejected' as const, error }),
+      );
       await new Promise((r) => setTimeout(r, 300)); // let T1 reach + block on the Payment lock
       await t2.query('COMMIT');
       await t2.end();
 
-      await expect(t1Promise).rejects.toMatchObject({
-        code: 'SETTLEMENT_CONCURRENT_COVERAGE_CHANGE',
-      });
+      const t1Outcome = await t1OutcomePromise;
+      expect(t1Outcome.status).toBe('rejected');
+      if (t1Outcome.status !== 'rejected') {
+        throw new Error('expected T1 to reject with SETTLEMENT_CONCURRENT_COVERAGE_CHANGE');
+      }
+      expect(t1Outcome.error).toMatchObject({ code: 'SETTLEMENT_CONCURRENT_COVERAGE_CHANGE' });
       expect(await applicationCount(batchId)).toBe(0);
       expect((await batchRow(batchId)).state).toBe('DRAFT');
 
@@ -1450,7 +1459,14 @@ describe('SettlementFinalizationRepository (task 3b.7 Checkpoint D, integration)
       await blocker.query('BEGIN');
       await blocker.query(`SELECT id FROM payment WHERE id = $1 FOR UPDATE`, [payment]);
 
-      const t1Promise = finalize(batchId, 1);
+      // A rejection handler is attached IMMEDIATELY — never a bare
+      // `finalize(...)` left to reject unobserved across the long
+      // orchestration below (deterministic-barrier polling, the real T2
+      // application, and a second discovery query all await in between).
+      const t1OutcomePromise = finalize(batchId, 1).then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (error: unknown) => ({ status: 'rejected' as const, error }),
+      );
       await waitForLockWaitOn('%FROM "payment" WHERE%FOR UPDATE%');
 
       // proof #1 (before T2): Discovery, run via the identical SQL the
@@ -1485,9 +1501,12 @@ describe('SettlementFinalizationRepository (task 3b.7 Checkpoint D, integration)
       await blocker.query('COMMIT');
       await blocker.end();
 
-      await expect(t1Promise).rejects.toMatchObject({
-        code: 'SETTLEMENT_CONCURRENT_COVERAGE_CHANGE',
-      });
+      const t1Outcome = await t1OutcomePromise;
+      expect(t1Outcome.status).toBe('rejected');
+      if (t1Outcome.status !== 'rejected') {
+        throw new Error('expected T1 to reject with SETTLEMENT_CONCURRENT_COVERAGE_CHANGE');
+      }
+      expect(t1Outcome.error).toMatchObject({ code: 'SETTLEMENT_CONCURRENT_COVERAGE_CHANGE' });
 
       // zero side effects survive the aborted T1.
       expect(await applicationCount(batchId)).toBe(0);
