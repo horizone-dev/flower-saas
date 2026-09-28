@@ -300,6 +300,14 @@ export const AUDITABLE_ACTIONS = {
   // Bounded payload only: ids, amount/currency, a matched-Payment COUNT —
   // never a Payment/Invoice id array, never a raw provider payload.
   'settlement.finalized': { resourceType: 'settlement_batch', security: false },
+  // Task 3b.7 Checkpoint E — historical PAID->SETTLED Invoice reconciliation.
+  // A maintenance-run summary, NOT a per-Invoice event (mirrors
+  // `accounting.company_coa_backfilled`'s own company-scoped backfill
+  // precedent) — exactly ONE row per batch/run, `resourceId` = the company
+  // being reconciled. Bounded payload only: processed/settled/unchanged
+  // counts and `hasMore` — never an Invoice/Payment id array, never PII,
+  // never a provider payload.
+  'settlement.reconciliation_run': { resourceType: 'company', security: false },
 
   // ── sessions + impersonation ──────────────────────────────────────────
   'session.revoked': { resourceType: 'session', security: true },
