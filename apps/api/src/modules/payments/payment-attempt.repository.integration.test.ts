@@ -581,6 +581,116 @@ describe('Checkpoint E — async PaymentAttempt / provider port (integration)', 
       ).rejects.toMatchObject({ code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE' });
     });
 
+    // ── task 3b.8 Integration Closure (F1) — the reservation must use the
+    //    CANONICAL remaining receivable balance (invoice total − allocations −
+    //    advance applications − CreditNote AR reduction), never the nominal
+    //    total: a credit-noted invoice has nothing left to collect and must be
+    //    rejected as a clean domain conflict, not reach the DB backstop. ─────
+    /** a FULL pure-AR-reduction CreditNote (nothing was paid) for a
+     *  `freshInvoice`-shaped invoice (one line, qty 1, unit price = total, no
+     *  tax) — header + line in ONE transaction (the completeness triggers are
+     *  deferred), exactly like the real CreditNote issuance command. */
+    async function creditNoteInvoiceFully(invoiceId: string, totalMinor: bigint): Promise<void> {
+      const { rows } = await pool.query<{
+        branchId: string;
+        lineId: string;
+      }>(
+        `SELECT i."branchId", (SELECT ol.id FROM order_line ol WHERE ol."orderId" = i."orderId" LIMIT 1) AS "lineId"
+           FROM invoice i WHERE i.id = $1`,
+        [invoiceId],
+      );
+      const { branchId, lineId } = rows[0]!;
+      const cnId = uid();
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query(
+          `INSERT INTO credit_note
+             (id,"tenantId","companyId","branchId","invoiceId","creditNoteNumber","issuedAt","accountingDate",
+              "currencyCode","currencyExponent","reasonCode","subtotalAmountMinor","taxTotalAmountMinor",
+              "totalAmountMinor","arReductionMinor","advanceExcessMinor")
+           VALUES ($1,$2,$3,$4,$5,$6,now(),CURRENT_DATE,'AED',2,'CUSTOMER_REQUEST',$7,0,$7,$7,0)`,
+          [cnId, TENANT, COMPANY, branchId, invoiceId, `CN-E-${cnId.slice(0, 8)}`, totalMinor],
+        );
+        await c.query(
+          `INSERT INTO credit_note_line
+             (id,"tenantId","companyId","creditNoteId","orderLineId","quantityCredited","grossCreditedMinor",
+              "discountCreditedMinor","documentDiscountShareCreditedMinor","netAfterDocumentDiscountCreditedMinor",
+              "taxCreditedMinor","lineTotalCreditedMinor","currencyCode","currencyExponent")
+           VALUES ($1,$2,$3,$4,$5,'1.0000',$6,0,0,$6,0,$6,'AED',2)`,
+          [uid(), TENANT, COMPANY, cnId, lineId, totalMinor],
+        );
+        await c.query('COMMIT');
+      } catch (err) {
+        await c.query('ROLLBACK');
+        throw err;
+      } finally {
+        c.release();
+      }
+    }
+
+    it('F1: a credit-noted (AR fully reversed) invoice has nothing collectible — a new reservation is a clean INVOICE_INSUFFICIENT_AVAILABLE_BALANCE and creates NO attempt', async () => {
+      const invoiceId = await freshInvoice(500n);
+      await creditNoteInvoiceFully(invoiceId, 500n);
+      const key = `e-f1-${uid()}`;
+      await expect(
+        runScoped(prisma, { tenantId: TENANT }, (tx) =>
+          reservation.reserveAsyncAttemptInTx(tx, {
+            tenantId: TENANT,
+            companyId: COMPANY,
+            branchId: BRANCH,
+            invoiceId,
+            method: 'ONLINE_GATEWAY',
+            amountMinor: 100n,
+            providerKey: 'tap-ok',
+            providerCredentialId: CRED_OK,
+            createdByUserId: uid(),
+            actingUserId: null,
+            idempotencyKey: key,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE', status: 409 });
+      expect(await countAttempts(key)).toBe(0);
+    });
+
+    it('F1: an attempt reserved BEFORE a CreditNote closed the invoice never makes a later reservation throw a RangeError — it is a clean 409 (reserved may exceed the now-zero remaining balance)', async () => {
+      const invoiceId = await freshInvoice(500n);
+      const reserved = await runScoped(prisma, { tenantId: TENANT }, (tx) =>
+        reservation.reserveAsyncAttemptInTx(tx, {
+          tenantId: TENANT,
+          companyId: COMPANY,
+          branchId: BRANCH,
+          invoiceId,
+          method: 'ONLINE_GATEWAY',
+          amountMinor: 300n,
+          providerKey: 'tap-ok',
+          providerCredentialId: CRED_OK,
+          createdByUserId: uid(),
+          actingUserId: null,
+          idempotencyKey: `e-f1-pre-${uid()}`,
+        }),
+      );
+      expect(reserved.state).toBe('PENDING');
+      await creditNoteInvoiceFully(invoiceId, 500n);
+      await expect(
+        runScoped(prisma, { tenantId: TENANT }, (tx) =>
+          reservation.reserveAsyncAttemptInTx(tx, {
+            tenantId: TENANT,
+            companyId: COMPANY,
+            branchId: BRANCH,
+            invoiceId,
+            method: 'ONLINE_GATEWAY',
+            amountMinor: 100n,
+            providerKey: 'tap-ok',
+            providerCredentialId: CRED_OK,
+            createdByUserId: uid(),
+            actingUserId: null,
+            idempotencyKey: `e-f1-post-${uid()}`,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE', status: 409 });
+    });
+
     it('rejects a non-provider-backed method (defense-in-depth against the async route)', async () => {
       const invoiceId = await freshInvoice(100n);
       await expect(
@@ -906,6 +1016,96 @@ describe('Checkpoint E — async PaymentAttempt / provider port (integration)', 
   });
 
   // ══════════════ §E12/§E16/§E17/§E18/§E23/§E24 — full orchestration ═══════
+  // ══════════════ task 3b.8 Integration Closure (F4) — lock hierarchy ═══════════
+  // The post-invoice cancellation locks ORDER -> INVOICE. The async reservation used to lock
+  // INVOICE first and touch the order only through the FK of the `payment_attempt` row it
+  // inserts (an implicit FOR KEY SHARE on the order row). It now takes the ORDER lock first.
+  // Real independent PostgreSQL transactions at the exact interleaving that deadlocked: the
+  // canceller holds the order, the reservation is observed BLOCKED on it, and only then does
+  // the canceller ask for the invoice.
+  describe('F4 — an async reservation locks ORDER before INVOICE (no deadlock with a cancellation)', () => {
+    const blockedBy = async (blockerPid: number): Promise<number[]> =>
+      (
+        await pool.query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`,
+          [blockerPid],
+        )
+      ).rows.map((r) => r.pid);
+
+    async function waitUntilBlockedBy(blockerPid: number, timeoutMs = 20_000): Promise<void> {
+      const deadline = Date.now() + timeoutMs;
+      while ((await blockedBy(blockerPid)).length === 0) {
+        if (Date.now() > deadline)
+          throw new Error('the reservation never blocked on the order lock');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+
+    it('while a canceller holds the ORDER row, the reservation waits AT the order holding NO invoice lock; the canceller then takes the invoice at once (no 40P01) and the reservation completes after it', async () => {
+      const orderId = await insertOrder();
+      const invoiceId = await insertInvoice(orderId, 1000n);
+
+      const canceller = await pool.connect();
+      const watcher = await pool.connect();
+      let reserved: Promise<{ ok: true } | { ok: false; error: unknown }> | null = null;
+      try {
+        await canceller.query('BEGIN');
+        await canceller.query(`SELECT "id" FROM "order" WHERE "id" = $1 FOR UPDATE`, [orderId]);
+        const cancellerPid = (
+          await canceller.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+        ).rows[0]!.pid;
+
+        reserved = runScoped(prisma, { tenantId: TENANT }, (tx) =>
+          reservation.reserveAsyncAttemptInTx(tx, {
+            tenantId: TENANT,
+            companyId: COMPANY,
+            branchId: BRANCH,
+            invoiceId,
+            method: 'ONLINE_GATEWAY',
+            amountMinor: 300n,
+            providerKey: 'tap-ok',
+            providerCredentialId: CRED_OK,
+            createdByUserId: uid(),
+            actingUserId: null,
+            idempotencyKey: `f4-${uid()}`,
+          }),
+        ).then(
+          () => ({ ok: true as const }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        await waitUntilBlockedBy(cancellerPid);
+
+        // HIERARCHY PROOF — the blocked reservation holds NO lock on the invoice (the old order
+        // had already locked it FOR UPDATE here, so this NOWAIT fails with 55P03).
+        await watcher.query('BEGIN');
+        await expect(
+          watcher.query(`SELECT "id" FROM "invoice" WHERE "id" = $1 FOR UPDATE NOWAIT`, [
+            invoiceId,
+          ]),
+        ).resolves.toBeTruthy();
+        await watcher.query('ROLLBACK');
+
+        // the cancellation's SECOND lock — immediate; under the old order this is the deadlock.
+        await canceller.query(`SELECT "id" FROM "invoice" WHERE "id" = $1 FOR UPDATE`, [invoiceId]);
+        await canceller.query('COMMIT');
+
+        const outcome = await reserved;
+        expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+        const { rows } = await pool.query<{ n: number }>(
+          `SELECT COUNT(*)::int AS n FROM payment_attempt WHERE "targetInvoiceId" = $1 AND state = 'PENDING'`,
+          [invoiceId],
+        );
+        expect(rows[0]!.n).toBe(1);
+      } finally {
+        await watcher.query('ROLLBACK').catch(() => undefined);
+        await canceller.query('ROLLBACK').catch(() => undefined);
+        watcher.release();
+        canceller.release();
+        if (reserved) await reserved;
+      }
+    });
+  });
+
   describe('orchestration — PaymentAttemptRepository (§E12/§E16-E18/§E23/§E24)', () => {
     it('resolved AUTHORIZED result: applies Phase 2 and returns it', async () => {
       const invoiceId = await freshInvoice(500n);

@@ -4,6 +4,8 @@ import { CatalogModule } from '../catalog/catalog.module.js';
 import { CustomerModule } from '../customers/customer.module.js';
 import { LocalizationModule } from '../localization/localization.module.js';
 import { ReceivablesModule } from '../receivables/receivables.module.js';
+import { AccountingModule } from '../accounting/accounting.module.js';
+import { AccessModule } from '../access/access.module.js';
 import { OrderRepository } from './order.repository.js';
 import { OrderService } from './order.service.js';
 import { OrderCreateFingerprintProvider } from './order-create-fingerprint.provider.js';
@@ -13,6 +15,8 @@ import { InvoiceRepository } from './invoice.repository.js';
 import { InvoiceService } from './invoice.service.js';
 import { InvoiceController } from './invoice.controller.js';
 import { TaxFinalizationService } from './tax-finalization.service.js';
+import { CancellationChargeRepository } from './cancellation-charge.repository.js';
+import { CreditNoteRepository } from './credit-note.repository.js';
 
 /**
  * `orders` module (task 3b.3 — Orders + Invoice + Numbering). Imports
@@ -49,12 +53,34 @@ import { TaxFinalizationService } from './tax-finalization.service.js';
  * now calls `CustomerInvoiceArRepository` (customer-linked Invoice AR +
  * credit-limit hard gate + `invoice_ar` journal) for every customer-linked
  * issuance. `ReceivablesModule` itself imports `AccountingModule`
- * (`PostingEngineService`), so this module still never imports it directly —
- * the prior "NO `AccountingModule` import" note above now describes a
- * TRANSITIVE dependency's own scope, not this module's.
+ * (`PostingEngineService`) but does NOT re-export it — a module never
+ * auto-re-exports a transitive grandchild dependency.
+ *
+ * Task 3b.8 Checkpoint C adds a DIRECT `AccountingModule` import
+ * (`PostingEngineService`, for `CancellationChargeRepository`'s GL posting —
+ * the prior "NO `AccountingModule` import" framing is now superseded) and a
+ * DIRECT `AccessModule` import (`PolicyEngine`, for `OrderRepository`'s own
+ * manual `cancellation_charges:issue` + step-up check on the with-charge
+ * cancellation path — the SAME engine the guard pipeline itself uses, never
+ * a second authorization system). `CancellationChargeRepository` is the
+ * internal-only CancellationCharge atomic-write primitive (deliberately NOT
+ * wired to any controller — mirrors `InvoiceIssuanceRepository`'s own shape
+ * exactly), called from `OrderRepository.cancelForBranchScoped`.
+ *
+ * Task 3b.8 Checkpoint D adds `CreditNoteRepository` — the internal-only,
+ * full-order post-invoice-cancellation CreditNote atomic-write primitive
+ * (same "NOT wired to any controller" shape), called from
+ * `OrderRepository.cancelForBranchScoped`'s new post-invoice branch.
  */
 @Module({
-  imports: [CatalogModule, CustomerModule, LocalizationModule, ReceivablesModule],
+  imports: [
+    CatalogModule,
+    CustomerModule,
+    LocalizationModule,
+    ReceivablesModule,
+    AccountingModule,
+    AccessModule,
+  ],
   controllers: [OrderController, InvoiceController],
   providers: [
     OrderRepository,
@@ -65,6 +91,8 @@ import { TaxFinalizationService } from './tax-finalization.service.js';
     InvoiceRepository,
     InvoiceService,
     TaxFinalizationService,
+    CancellationChargeRepository,
+    CreditNoteRepository,
   ],
 })
 export class OrderModule {}

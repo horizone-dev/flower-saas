@@ -11,7 +11,7 @@ import {
 import { ScopedRepository, DbService } from '../../common/data/index.js';
 import { requireTenantContext, getContext } from '../../common/context/index.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
-import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
+import { DomainError, NotFoundError, ForbiddenError } from '../../common/errors/domain-error.js';
 import { isPgError } from '../../common/errors/pg-error.js';
 import { SystemClock } from '../../common/clock/clock.js';
 import { derivePostingDate } from '../accounting/posting-date.js';
@@ -20,14 +20,60 @@ import { BranchPricingService } from '../catalog/branch-pricing.service.js';
 import { TaxResolutionService } from '../catalog/tax-resolution.service.js';
 import { CustomerRepository } from '../customers/customer.repository.js';
 import { LocalizationService } from '../localization/localization.service.js';
+import { PolicyEngine } from '../access/policy-engine.js';
 import type { OrderLineInputDto } from './dto/order-line-input.dto.js';
 import {
   computeCommercialSnapshotFingerprintV2,
   computeCommercialSnapshotFingerprintByVersion,
   type CommercialSnapshotLine,
 } from './commercial-snapshot.js';
+import { computeLineTaxAmountMinor, inclusiveNetAmountMinor } from './tax-arithmetic.js';
+import {
+  CancellationChargeRepository,
+  type ResolvedCancellationChargeTax,
+} from './cancellation-charge.repository.js';
+import { CreditNoteRepository } from './credit-note.repository.js';
+import {
+  assertInvoiceCancellationStatusTransition,
+  type InvoiceCancellationStatus3b8,
+} from '../receivables/invoice-payment-status.js';
 
 const PG_FK_VIOLATION = '23503';
+
+/**
+ * Task 3b.8 Checkpoint D — the post-confirmation, pre-completion fulfilment
+ * stages an invoiced Order may still be cancelled from. Deliberately an
+ * allow-list, not a deny-list (fail closed on any status this task never
+ * anticipated) — excludes `CANCELLED` (already terminal), `COMPLETED`/
+ * `DELIVERED` (fulfilment already finished — physical disposition is a
+ * separate, out-of-scope concern, ADR-0019 §29, but reversing an already-
+ * complete commercial sale is a judgment call this checkpoint does not make),
+ * and `REJECTED`/`PAYMENT_FAILED`/`REFUNDED`/`DELIVERY_FAILED`/`RESCHEDULED`
+ * (anomalous outcomes with no producer against an invoiced Order in current
+ * code).
+ */
+const POST_INVOICE_CANCELLABLE_STATUSES: ReadonlySet<string> = new Set([
+  'CONFIRMED',
+  'IN_PRODUCTION',
+  'READY',
+  'OUT_FOR_DELIVERY',
+  'AWAITING_PICKUP',
+]);
+
+/**
+ * Task 3b.8 Checkpoint D — `invoicePaymentStatus` values a post-invoice
+ * cancellation may never be attempted against. `SETTLED` is excluded because
+ * reversing it requires undoing the settlement-discount effect (ADR-0019
+ * §25) — out of scope (`SettlementApplication` is untouched by this
+ * checkpoint). The rest are already-terminal cancellation/refund/void states.
+ */
+const INVOICE_CANCELLATION_BLOCKED_STATUSES: ReadonlySet<string> = new Set([
+  'SETTLED',
+  'CANCELLED',
+  'PARTIALLY_REFUNDED',
+  'REFUNDED',
+  'VOID',
+]);
 
 export interface OrderRow {
   id: string;
@@ -226,6 +272,9 @@ export class OrderRepository extends ScopedRepository {
     private readonly taxResolution: TaxResolutionService,
     private readonly customers: CustomerRepository,
     private readonly localization: LocalizationService,
+    private readonly policy: PolicyEngine,
+    private readonly cancellationCharge: CancellationChargeRepository,
+    private readonly creditNote: CreditNoteRepository,
   ) {
     super(db);
   }
@@ -662,6 +711,521 @@ export class OrderRepository extends ScopedRepository {
     return this.transitionForBranchScoped(input, 'HELD', 'DRAFT', 'order.resumed');
   }
 
+  // ── cancel — task 3b.8 Checkpoint C, NO-CHARGE PATH ONLY ────────────────
+
+  /**
+   * Pre-invoice, no-charge cancellation (§4/§6/§7 of the governing
+   * instructions). DRAFT or HELD -> CANCELLED, one transaction, walk-in
+   * allowed. Creates NO Invoice/Payment/PaymentAllocation/CustomerReceivable/
+   * CustomerAdvance/GL journal — a pure status transition, mirroring Hold/
+   * Resume's own "operational only, zero commercial re-resolution" shape
+   * exactly (never touches `commercialSnapshotFingerprint`).
+   *
+   * The mandatory cancellation reason's durable, authoritative home is
+   * `audit_log.reason` (`AuditWriter.record`'s dedicated column) — the SAME
+   * transaction that flips `status` writes it, so a rolled-back cancellation
+   * leaves no audit row and loses no reason silently. No new `Order` column
+   * exists or is needed for this — `AuditWriter` is the existing durable
+   * mechanism every other Order mutation in this file already reuses.
+   *
+   * Race-with-Invoice-issuance is structurally closed by the status check
+   * alone (`issueFinalInvoice` flips DRAFT/HELD -> CONFIRMED in the SAME
+   * transaction it inserts the Invoice row, so an Order can never be
+   * DRAFT/HELD and invoiced at once) — the explicit `invoice` existence
+   * re-check below is deliberate defense-in-depth, mirroring
+   * `issueFinalInvoice`'s own "the unique index on invoice.orderId is the
+   * ultimate guarantee" precedent, never a substitute for the status check.
+   */
+  async cancelForBranchScoped(input: {
+    companyId: string;
+    branchId: string;
+    orderId: string;
+    expectedVersion: number;
+    reason: string;
+    cancellationCharge?: {
+      requestedAmountMinor: bigint;
+      reasonCode: string;
+      accountingDate?: string;
+    };
+  }): Promise<OrderRow> {
+    const { tenantId } = requireTenantContext();
+
+    // Financial authority for the charge path — checked BEFORE any DB work
+    // (mirrors `CreditOverrideAuthorizationService`'s own "authorize first"
+    // discipline). `orders:cancel` (the cancellation COMMAND authority) was
+    // already enforced by the route's own `@RequirePermission` — this is the
+    // ADDITIONAL, distinct financial-DOCUMENT authority (owner decision,
+    // Checkpoint C blocker-resolution gate) plus step-up, via the SAME
+    // `PolicyEngine` the guard pipeline itself uses (never a second
+    // authorization system, §2).
+    if (input.cancellationCharge) {
+      const ctx = getContext();
+      const decision = ctx
+        ? this.policy.can(ctx, 'cancellation_charges:issue', {
+            companyId: input.companyId,
+            branchId: input.branchId,
+          })
+        : { allowed: false as const, reason: 'NO_CONTEXT' as const };
+      if (!decision.allowed) {
+        if (decision.reason === 'STEP_UP_REQUIRED') {
+          throw new DomainError('STEP_UP_REQUIRED', 'a fresh step-up is required', 403);
+        }
+        throw new ForbiddenError(
+          'you do not have permission to issue a cancellation charge',
+          'MISSING_PERMISSION',
+        );
+      }
+    }
+
+    // Tax/fiscal-policy resolution NEVER participates in the write
+    // transaction below (`LocalizationService` opens its own short-lived
+    // scoped reads — mirrors `resolveLines`'s "resolve, snapshot, then act"
+    // discipline exactly; see `cancellation-charge.repository.ts`'s own doc
+    // comment for why mixing a non-participating call into an already-open
+    // `tx` is unsafe). Resolved unconditionally here (before the Order is
+    // even locked) — occasionally wasted if the Order later turns out
+    // ineligible, an accepted trade-off already used by
+    // `createWalkInDraftForBranchScoped` itself.
+    const resolvedTax = input.cancellationCharge
+      ? await this.resolveCancellationChargeTax(input.companyId, input.cancellationCharge)
+      : null;
+
+    const actorUserId = getContext()?.userId ?? null;
+
+    return this.scoped(async (tx) => {
+      const currentRows = await tx.$queryRaw<Record<string, unknown>[]>`
+        SELECT * FROM "order"
+         WHERE "id" = ${input.orderId}::uuid
+           AND "tenantId" = ${tenantId}::uuid
+           AND "companyId" = ${input.companyId}::uuid
+           AND "originBranchId" = ${input.branchId}::uuid
+         FOR UPDATE`;
+      const current = currentRows[0];
+      if (!current) throw new NotFoundError('order', 'ORDER_NOT_FOUND');
+      const currentOrder = mapOrderRow(current);
+
+      const existingInvoice = await tx.$queryRaw<{ id: string }[]>`
+        SELECT "id" FROM "invoice" WHERE "orderId" = ${currentOrder.id}::uuid`;
+      const invoiceId = existingInvoice[0]?.id ?? null;
+
+      if (invoiceId) {
+        return this.cancelInvoicedOrderInTx(tx, {
+          tenantId,
+          companyId: input.companyId,
+          branchId: input.branchId,
+          currentOrder,
+          invoiceId,
+          expectedVersion: input.expectedVersion,
+          reason: input.reason,
+          ...(input.cancellationCharge ? { cancellationCharge: input.cancellationCharge } : {}),
+          resolvedTax,
+          actorUserId,
+        });
+      }
+
+      // ── PRE-INVOICE PATH (task 3b.8 Checkpoint C — FROZEN, unchanged) ──────
+      if (currentOrder.status !== 'DRAFT' && currentOrder.status !== 'HELD') {
+        throw new DomainError(
+          'ORDER_INVALID_STATE_TRANSITION',
+          `order must be DRAFT or HELD to cancel (currently ${currentOrder.status})`,
+          409,
+        );
+      }
+      if (currentOrder.version !== input.expectedVersion) {
+        throw new DomainError(
+          'ORDER_VERSION_CONFLICT',
+          `order changed elsewhere (expected version ${input.expectedVersion}, now ${currentOrder.version})`,
+          409,
+        );
+      }
+
+      let chargeResult: {
+        cancellationChargeId: string;
+        cancellationChargeNumber: string;
+        customerReceivableId: string;
+      } | null = null;
+      if (input.cancellationCharge && resolvedTax) {
+        // Walk-in financial charge remains unsupported (§8) — the no-charge
+        // path is the ONLY option for an anonymous Order.
+        if (!currentOrder.customerId) {
+          throw new DomainError(
+            'CANCELLATION_CHARGE_REQUIRES_CUSTOMER',
+            'a cancellation charge requires a customer-linked order — walk-in financial charges are not supported',
+            422,
+          );
+        }
+        // join-gated lock, NEVER a client-supplied account id (mirrors
+        // `CustomerInvoiceArRepository.lockAccount` exactly) — derives the
+        // account from `(tenantId, companyId, customerId)` only, proving the
+        // customer belongs to THIS tenant/company via the join.
+        const accountRows = await tx.$queryRaw<{ id: string }[]>`
+          SELECT cca."id"
+            FROM "customer_company_account" cca
+            INNER JOIN "customer" c ON c."tenantId" = cca."tenantId" AND c."id" = cca."customerId"
+           WHERE cca."tenantId" = ${tenantId}::uuid
+             AND cca."companyId" = ${input.companyId}::uuid
+             AND cca."customerId" = ${currentOrder.customerId}::uuid
+           FOR UPDATE OF cca`;
+        const account = accountRows[0];
+        if (!account) {
+          throw new DomainError(
+            'CUSTOMER_COMPANY_ACCOUNT_NOT_FOUND',
+            'this customer is not associated with the current company',
+            404,
+          );
+        }
+
+        const result = await this.cancellationCharge.issueCancellationCharge(tx, resolvedTax, {
+          tenantId,
+          companyId: input.companyId,
+          branchId: input.branchId,
+          orderId: currentOrder.id,
+          customerCompanyAccountId: account.id,
+          reasonCode: input.cancellationCharge.reasonCode,
+          note: input.reason,
+          actorUserId,
+        });
+        chargeResult = result;
+      }
+
+      const updated = await tx.order.update({
+        where: { id: currentOrder.id },
+        data: { status: 'CANCELLED', version: { increment: 1 } },
+      });
+
+      await this.audit.record(tx, {
+        action: 'order.cancelled',
+        resourceType: 'order',
+        resourceId: currentOrder.id,
+        tenantId,
+        companyId: input.companyId,
+        branchId: input.branchId,
+        reason: input.reason,
+        after: {
+          fromStatus: currentOrder.status,
+          toStatus: 'CANCELLED',
+          hasCharge: chargeResult !== null,
+          ...(chargeResult
+            ? {
+                cancellationChargeId: chargeResult.cancellationChargeId,
+                cancellationChargeNumber: chargeResult.cancellationChargeNumber,
+              }
+            : {}),
+        },
+      });
+
+      return mapOrderRow(updated);
+    });
+  }
+
+  /**
+   * Task 3b.8 Checkpoint D — the POST-INVOICE cancellation path, reached
+   * exclusively from `cancelForBranchScoped` once an Invoice is found for
+   * this Order, inside the SAME already-locked transaction/row (never a
+   * second lock acquisition). Full-order only (owner-approved narrowing):
+   * every OrderLine is credited at its full remaining quantity via
+   * `CreditNoteRepository.issueCreditNoteForFullCancellation` — no
+   * partial/line-level selection, no split resolution (the resulting Advance
+   * is a single pool; drawing cash out of it is a separate, later Refund
+   * request). CancellationCharge, when requested, is issued via the SAME
+   * Checkpoint C primitive, now carrying this Order's own `invoiceId` — its
+   * own amount/receivable/journal are entirely independent arithmetic from
+   * the CreditNote's own totals, NEVER netted against each other.
+   *
+   * Eligibility (checked AGAINST THE FRESHLY-LOCKED Order/Invoice rows, never
+   * a stale pre-lock read, mirroring `CustomerInvoiceArRepository.
+   * lockAndAuthorizeCredit`'s own discipline):
+   *   - Order.status must be one of the post-confirmation, pre-completion
+   *     fulfilment stages (`POST_INVOICE_CANCELLABLE_STATUSES` below) — an
+   *     already-CANCELLED/COMPLETED/DELIVERED/REJECTED/PAYMENT_FAILED/
+   *     REFUNDED/DELIVERY_FAILED/RESCHEDULED Order is never eligible here.
+   *   - Order.customerId must be present — a walk-in invoiced Order has no
+   *     CreditNote path at all in this task (§ owner authority: "Walk-ins
+   *     remain blocked from CreditNote, Refund and financial
+   *     CancellationCharge in Task 3b.8") — `WALKIN_POST_INVOICE_
+   *     CANCELLATION_NOT_AVAILABLE` (422).
+   *   - Invoice.invoicePaymentStatus must NOT be `SETTLED` (reversing a
+   *     settlement effect would require touching `SettlementApplication` —
+   *     explicitly out of Checkpoint D's scope) nor an already-terminal
+   *     cancellation/refund/void state — `INVOICE_CANCELLATION_NOT_SUPPORTED`
+   *     (409), naming the exact blocking status.
+   *
+   * The `credit_notes:issue` financial-document authority (+ step-up) is
+   * checked HERE, against the freshly-locked state, exactly mirroring how
+   * `cancellation_charges:issue` is checked unconditionally before the
+   * transaction for the pre-invoice path — the difference is structural, not
+   * a weaker discipline: invoice-presence is SERVER state the caller cannot
+   * declare up front, so it can only be known after this lock.
+   */
+  private async cancelInvoicedOrderInTx(
+    tx: ScopedTx,
+    input: {
+      tenantId: string;
+      companyId: string;
+      branchId: string;
+      currentOrder: OrderRow;
+      invoiceId: string;
+      expectedVersion: number;
+      reason: string;
+      cancellationCharge?: {
+        requestedAmountMinor: bigint;
+        reasonCode: string;
+        accountingDate?: string;
+      };
+      resolvedTax: ResolvedCancellationChargeTax | null;
+      actorUserId: string | null;
+    },
+  ): Promise<OrderRow> {
+    const { currentOrder } = input;
+
+    if (!POST_INVOICE_CANCELLABLE_STATUSES.has(currentOrder.status)) {
+      throw new DomainError(
+        'ORDER_INVALID_STATE_TRANSITION',
+        `an invoiced order in status ${currentOrder.status} cannot be cancelled`,
+        409,
+      );
+    }
+    if (currentOrder.version !== input.expectedVersion) {
+      throw new DomainError(
+        'ORDER_VERSION_CONFLICT',
+        `order changed elsewhere (expected version ${input.expectedVersion}, now ${currentOrder.version})`,
+        409,
+      );
+    }
+
+    const ctx = getContext();
+    const decision = ctx
+      ? this.policy.can(ctx, 'credit_notes:issue', {
+          companyId: input.companyId,
+          branchId: input.branchId,
+        })
+      : { allowed: false as const, reason: 'NO_CONTEXT' as const };
+    if (!decision.allowed) {
+      if (decision.reason === 'STEP_UP_REQUIRED') {
+        throw new DomainError('STEP_UP_REQUIRED', 'a fresh step-up is required', 403);
+      }
+      throw new ForbiddenError(
+        'you do not have permission to issue a credit note',
+        'MISSING_PERMISSION',
+      );
+    }
+
+    if (!currentOrder.customerId) {
+      throw new DomainError(
+        'WALKIN_POST_INVOICE_CANCELLATION_NOT_AVAILABLE',
+        'a walk-in (no customer) invoiced order cannot be cancelled — credit note issuance requires a customer-linked order',
+        422,
+      );
+    }
+
+    const invoiceRows = await tx.$queryRaw<{ invoicePaymentStatus: string }[]>`
+      SELECT "invoicePaymentStatus" FROM "invoice" WHERE "id" = ${input.invoiceId}::uuid FOR UPDATE`;
+    const invoice = invoiceRows[0];
+    if (!invoice) throw new NotFoundError('invoice', 'INVOICE_NOT_FOUND');
+    if (INVOICE_CANCELLATION_BLOCKED_STATUSES.has(invoice.invoicePaymentStatus)) {
+      throw new DomainError(
+        'INVOICE_CANCELLATION_NOT_SUPPORTED',
+        `an invoice in status ${invoice.invoicePaymentStatus} cannot be cancelled in this task`,
+        409,
+      );
+    }
+
+    // join-gated lock, NEVER a client-supplied account id — identical shape
+    // to the pre-invoice charge path's own account lock.
+    const accountRows = await tx.$queryRaw<{ id: string }[]>`
+      SELECT cca."id"
+        FROM "customer_company_account" cca
+        INNER JOIN "customer" c ON c."tenantId" = cca."tenantId" AND c."id" = cca."customerId"
+       WHERE cca."tenantId" = ${input.tenantId}::uuid
+         AND cca."companyId" = ${input.companyId}::uuid
+         AND cca."customerId" = ${currentOrder.customerId}::uuid
+       FOR UPDATE OF cca`;
+    const account = accountRows[0];
+    if (!account) {
+      throw new DomainError(
+        'CUSTOMER_COMPANY_ACCOUNT_NOT_FOUND',
+        'this customer is not associated with the current company',
+        404,
+      );
+    }
+
+    // Accounting date resolution NEVER opens a nested transaction from inside
+    // this already-open `tx` (the exact lock-wait-hang class documented on
+    // `resolveCancellationChargeTax`): when a charge was requested,
+    // `resolvedTax.accountingDate` was ALREADY resolved pre-tx via
+    // `LocalizationService` — reused verbatim here too, so the CreditNote and
+    // the CancellationCharge always share ONE civil date. Otherwise (no
+    // charge requested at all) the company's own `accountingTimezone` is read
+    // via a plain raw query PARTICIPATING in this SAME `tx` — never a second
+    // transaction.
+    const creditNoteAccountingDate =
+      input.cancellationCharge?.accountingDate ??
+      input.resolvedTax?.accountingDate ??
+      derivePostingDate(
+        this.clock.now(),
+        await this.loadAccountingTimezoneInTx(tx, input.companyId),
+      );
+
+    const creditNoteResult = await this.creditNote.issueCreditNoteForFullCancellation(tx, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      branchId: input.branchId,
+      orderId: currentOrder.id,
+      invoiceId: input.invoiceId,
+      customerCompanyAccountId: account.id,
+      reasonCode: input.cancellationCharge?.reasonCode ?? 'OTHER',
+      note: input.reason,
+      accountingDate: creditNoteAccountingDate,
+      actorUserId: input.actorUserId,
+    });
+
+    let chargeResult: {
+      cancellationChargeId: string;
+      cancellationChargeNumber: string;
+      customerReceivableId: string;
+    } | null = null;
+    if (input.cancellationCharge && input.resolvedTax) {
+      const result = await this.cancellationCharge.issueCancellationCharge(tx, input.resolvedTax, {
+        tenantId: input.tenantId,
+        companyId: input.companyId,
+        branchId: input.branchId,
+        orderId: currentOrder.id,
+        invoiceId: input.invoiceId,
+        customerCompanyAccountId: account.id,
+        reasonCode: input.cancellationCharge.reasonCode,
+        note: input.reason,
+        actorUserId: input.actorUserId,
+      });
+      chargeResult = result;
+    }
+
+    assertInvoiceCancellationStatusTransition(
+      invoice.invoicePaymentStatus as InvoiceCancellationStatus3b8,
+      creditNoteResult.nextInvoicePaymentStatus,
+    );
+    await tx.invoice.update({
+      where: { id: input.invoiceId },
+      data: { invoicePaymentStatus: creditNoteResult.nextInvoicePaymentStatus },
+    });
+
+    const updated = await tx.order.update({
+      where: { id: currentOrder.id },
+      data: { status: 'CANCELLED', version: { increment: 1 } },
+    });
+
+    await this.audit.record(tx, {
+      action: 'order.cancelled',
+      resourceType: 'order',
+      resourceId: currentOrder.id,
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      branchId: input.branchId,
+      reason: input.reason,
+      after: {
+        fromStatus: currentOrder.status,
+        toStatus: 'CANCELLED',
+        hasCharge: chargeResult !== null,
+        creditNoteId: creditNoteResult.creditNoteId,
+        creditNoteNumber: creditNoteResult.creditNoteNumber,
+        nextInvoicePaymentStatus: creditNoteResult.nextInvoicePaymentStatus,
+        ...(chargeResult
+          ? {
+              cancellationChargeId: chargeResult.cancellationChargeId,
+              cancellationChargeNumber: chargeResult.cancellationChargeNumber,
+            }
+          : {}),
+      },
+    });
+
+    return mapOrderRow(updated);
+  }
+
+  /**
+   * Task 3b.8 Checkpoint C (§9/§11) — resolves country -> fiscal policy
+   * (priceTaxMode/roundingMode) -> tax rate for
+   * `Company.cancellationFeeTaxCategoryKey` (NEVER `TaxResolutionService` —
+   * that resolves via a catalog variant, which a CancellationCharge has
+   * none of), then computes the exact Money split, all on ONE civil date
+   * (the caller's explicit `accountingDate` or today in
+   * `Company.accountingTimezone`, §13). `cancellationFeeTaxCategoryKey
+   * IS NULL` fails closed (409) — never a silent default tax category. A
+   * resolved zero/no-rate outcome (REGIME_NONE / NO_RATE_FOR_CATEGORY) is a
+   * valid terminal state (0 tax), the SAME frozen "caller boundary"
+   * convention `tax-arithmetic.ts` already establishes for a no-rate Order
+   * line — never a second, stricter rule invented here.
+   */
+  private async resolveCancellationChargeTax(
+    companyId: string,
+    chargeInput: { requestedAmountMinor: bigint; accountingDate?: string },
+  ): Promise<ResolvedCancellationChargeTax> {
+    const company = await this.resolveCompanyFiscalContext(companyId);
+    if (!company.cancellationFeeTaxCategoryKey) {
+      throw new DomainError(
+        'CANCELLATION_CHARGE_TAX_POLICY_NOT_CONFIGURED',
+        'this company has no cancellationFeeTaxCategoryKey configured — a cancellation charge ' +
+          'cannot be issued until Company-level tax policy is configured (fail closed, never a ' +
+          'silent default tax category)',
+        409,
+      );
+    }
+
+    const civilDate =
+      chargeInput.accountingDate ?? derivePostingDate(this.clock.now(), company.accountingTimezone);
+    const countryCode = await this.localization.resolveCompanyCountry(companyId);
+    const fiscalPolicy = await this.localization.resolveFiscalPolicyOn(countryCode, civilDate);
+    const resolvedRate = await this.localization.resolveTaxRate(
+      countryCode,
+      company.cancellationFeeTaxCategoryKey,
+      civilDate,
+    );
+    const rateBps = resolvedRate.rate?.rateBps ?? null;
+
+    let netAmountMinor: bigint;
+    let taxAmountMinor: bigint;
+    let totalAmountMinor: bigint;
+    if (rateBps === null) {
+      taxAmountMinor = 0n;
+      if (fiscalPolicy.priceTaxMode === 'TAX_EXCLUSIVE') {
+        netAmountMinor = chargeInput.requestedAmountMinor;
+        totalAmountMinor = netAmountMinor;
+      } else {
+        totalAmountMinor = chargeInput.requestedAmountMinor;
+        netAmountMinor = totalAmountMinor;
+      }
+    } else if (fiscalPolicy.priceTaxMode === 'TAX_EXCLUSIVE') {
+      netAmountMinor = chargeInput.requestedAmountMinor;
+      taxAmountMinor = computeLineTaxAmountMinor(
+        netAmountMinor,
+        rateBps,
+        'TAX_EXCLUSIVE',
+        fiscalPolicy.roundingMode,
+      );
+      totalAmountMinor = netAmountMinor + taxAmountMinor;
+    } else {
+      totalAmountMinor = chargeInput.requestedAmountMinor;
+      taxAmountMinor = computeLineTaxAmountMinor(
+        totalAmountMinor,
+        rateBps,
+        'TAX_INCLUSIVE',
+        fiscalPolicy.roundingMode,
+      );
+      netAmountMinor = inclusiveNetAmountMinor(totalAmountMinor, taxAmountMinor);
+    }
+
+    return {
+      currencyCode: company.defaultCurrency,
+      currencyExponent: currencyExponent(company.defaultCurrency),
+      accountingDate: civilDate,
+      taxCategoryKey: company.cancellationFeeTaxCategoryKey,
+      rateBps,
+      priceTaxMode: fiscalPolicy.priceTaxMode,
+      roundingMode: fiscalPolicy.roundingMode,
+      netAmountMinor,
+      taxAmountMinor,
+      totalAmountMinor,
+    };
+  }
+
   private async transitionForBranchScoped(
     input: { companyId: string; branchId: string; orderId: string; expectedVersion: number },
     fromStatus: string,
@@ -738,15 +1302,47 @@ export class OrderRepository extends ScopedRepository {
    * this value is never stored, only passed transiently to
    * `TaxResolutionService.resolve`.
    */
-  private async resolveCompanyFiscalContext(
-    companyId: string,
-  ): Promise<{ defaultCurrency: string; accountingTimezone: string }> {
+  /**
+   * Task 3b.8 Checkpoint D — reads `Company.accountingTimezone` via a plain
+   * raw query PARTICIPATING in the caller's already-open `tx` (never
+   * `resolveCompanyFiscalContext`, which opens its OWN `this.scoped(...)`
+   * transaction — calling that from inside an already-open `tx` risks the
+   * exact lock-wait-hang class documented elsewhere in this file). Used only
+   * as the last-resort default when neither an explicit `accountingDate` nor
+   * an already-resolved `resolvedTax.accountingDate` is available.
+   */
+  private async loadAccountingTimezoneInTx(tx: ScopedTx, companyId: string): Promise<string> {
+    const rows = await tx.$queryRaw<{ accountingTimezone: string | null }[]>`
+      SELECT "accountingTimezone" FROM "company" WHERE "id" = ${companyId}::uuid`;
+    const timezone = rows[0]?.accountingTimezone;
+    if (!timezone) {
+      throw new DomainError(
+        'ORDER_COMPANY_ACCOUNTING_TIMEZONE_NOT_CONFIGURED',
+        'this company has no accounting timezone configured — required to derive the civil date for the credit note',
+        409,
+      );
+    }
+    return timezone;
+  }
+
+  private async resolveCompanyFiscalContext(companyId: string): Promise<{
+    defaultCurrency: string;
+    accountingTimezone: string;
+    /** Task 3b.8 Checkpoint C — Company-level only, no branch override (§10).
+     *  `null` when unconfigured; callers that need it fail closed themselves
+     *  (never a silent default tax category). */
+    cancellationFeeTaxCategoryKey: string | null;
+  }> {
     const { tenantId } = requireTenantContext();
     return this.scoped(async (tx) => {
       const rows = await tx.$queryRaw<
-        { defaultCurrency: string | null; accountingTimezone: string | null }[]
+        {
+          defaultCurrency: string | null;
+          accountingTimezone: string | null;
+          cancellationFeeTaxCategoryKey: string | null;
+        }[]
       >`
-        SELECT "defaultCurrency", "accountingTimezone" FROM "company"
+        SELECT "defaultCurrency", "accountingTimezone", "cancellationFeeTaxCategoryKey" FROM "company"
          WHERE "id" = ${companyId}::uuid AND "tenantId" = ${tenantId}::uuid`;
       const row = rows[0];
       if (!row) throw new NotFoundError('company');
@@ -764,7 +1360,11 @@ export class OrderRepository extends ScopedRepository {
           409,
         );
       }
-      return { defaultCurrency: row.defaultCurrency, accountingTimezone: row.accountingTimezone };
+      return {
+        defaultCurrency: row.defaultCurrency,
+        accountingTimezone: row.accountingTimezone,
+        cancellationFeeTaxCategoryKey: row.cancellationFeeTaxCategoryKey,
+      };
     });
   }
 

@@ -38,8 +38,9 @@ export interface ValidateSynchronousMultiPaymentInput {
   readonly components: readonly SynchronousTenderComponent[];
   /**
    * The authoritative `availableToCollect` value (from
-   * `computeAvailableToCollect`, computed by the caller under the Invoice
-   * lock). Optional here because this is a pure validator and the caller may
+   * `computeAvailableToCollectFromOutstanding` over the canonical receivable
+   * balance, computed by the caller under the Invoice lock). Optional here
+   * because this is a pure validator and the caller may
    * not yet have that value when merely shaping/pre-checking a request; when
    * provided, it is enforced.
    */

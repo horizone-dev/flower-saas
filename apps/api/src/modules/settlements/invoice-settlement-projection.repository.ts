@@ -52,7 +52,10 @@ export class InvoiceSettlementProjectionRepository {
     // ── CustomerAdvanceApplication coverage, via this Invoice's OWN
     //    INVOICE-sourced CustomerReceivable (never the OPENING-only
     //    CustomerReceivablePaymentApplication path — that table structurally
-    //    can never reach an Invoice, per its own DB trigger). ──────────────
+    //    can never reach an Invoice, per its own DB trigger). Each covering
+    //    advance's finality follows its FUNDING source: PAYMENT / OPENING, or —
+    //    task 3b.8 Integration Closure F2 — CREDIT_NOTE, traced through its
+    //    CreditNoteCoverageRelease provenance (`isAdvanceSettlementFinal`). ─────
     const receivableRows = await tx.$queryRaw<{ id: string }[]>`
       SELECT "id" FROM "customer_receivable"
        WHERE "invoiceId" = ${invoiceId}::uuid AND "sourceType" = 'INVOICE'`;
@@ -62,14 +65,7 @@ export class InvoiceSettlementProjectionRepository {
         SELECT DISTINCT "customerAdvanceId" FROM "customer_advance_application"
          WHERE "customerReceivableId" = ${receivable.id}::uuid`;
       for (const app of advanceApplications) {
-        const advanceRows = await tx.$queryRaw<
-          { sourceType: string; sourcePaymentId: string | null }[]
-        >`SELECT "sourceType", "sourcePaymentId" FROM "customer_advance" WHERE "id" = ${app.customerAdvanceId}::uuid`;
-        const advance = advanceRows[0];
-        if (!advance) continue; // defensive
-        if (advance.sourceType === 'OPENING') continue; // immediately settlement-final
-        // sourceType === 'PAYMENT' — inherit finality from the funding Payment
-        if (!(await this.isPaymentSettlementFinal(tx, advance.sourcePaymentId!))) return; // leave PAID
+        if (!(await this.isAdvanceSettlementFinal(tx, app.customerAdvanceId))) return; // leave PAID
       }
     }
 
@@ -80,6 +76,83 @@ export class InvoiceSettlementProjectionRepository {
       where: { id: invoiceId },
       data: { invoicePaymentStatus: 'SETTLED' },
     });
+  }
+
+  /**
+   * Task 3b.8 Integration Closure (F2) — the settlement-finality of ONE
+   * CustomerAdvance that covers an Invoice, dispatched by what FUNDED it. A pure
+   * dispatch over the frozen per-Payment predicate below — it introduces no new
+   * finality rule:
+   *   PAYMENT      -> the funding Payment's own finality (3b.7, unchanged).
+   *   OPENING      -> immediately final: an opening balance has no Payment to
+   *                   settle (3b.7, unchanged).
+   *   CREDIT_NOTE  -> traced through its single CreditNoteCoverageRelease (see
+   *                   {@link isCreditNoteAdvanceSettlementFinal}).
+   *   anything else -> NOT final: fail closed, the Invoice stays PAID.
+   */
+  private async isAdvanceSettlementFinal(
+    tx: ScopedTx,
+    customerAdvanceId: string,
+  ): Promise<boolean> {
+    const advanceRows = await tx.$queryRaw<
+      { sourceType: string; sourcePaymentId: string | null }[]
+    >`SELECT "sourceType", "sourcePaymentId" FROM "customer_advance" WHERE "id" = ${customerAdvanceId}::uuid`;
+    const advance = advanceRows[0];
+    if (!advance) return true; // defensive — the application's FK guarantees the advance exists
+    switch (advance.sourceType) {
+      case 'OPENING':
+        return true; // immediately settlement-final
+      case 'PAYMENT':
+        return (
+          advance.sourcePaymentId !== null &&
+          (await this.isPaymentSettlementFinal(tx, advance.sourcePaymentId))
+        );
+      case 'CREDIT_NOTE':
+        return this.isCreditNoteAdvanceSettlementFinal(tx, customerAdvanceId);
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * A CREDIT_NOTE-sourced advance has NO funding Payment of its own
+   * (`sourcePaymentId` is NULL) — it is funded by exactly ONE
+   * `CreditNoteCoverageRelease` (the 1:1 `customerAdvanceId` link), the append-only
+   * provenance of which prior coverage the CreditNote converted into it. Its
+   * finality IS the finality of that source, by the release's own kind:
+   *   PAYMENT_ALLOCATION  -> `sourcePaymentId` = the released allocation's Payment.
+   *   ADVANCE_APPLICATION -> `sourcePaymentId` = the underlying PAYMENT-sourced
+   *                          advance's own Payment (the application's source is
+   *                          inherited, never re-derived).
+   *   OPENING_ADVANCE     -> the underlying advance was an OPENING advance —
+   *                          immediately final (`sourcePaymentId` is NULL).
+   * Both Payment-traced kinds then use the SAME `isPaymentSettlementFinal`
+   * (CASH / BANK_TRANSFER final; OTHER_MANUAL never; a provider Payment only once
+   * the WHOLE Payment is covered by FINALIZED settlements). A missing release or
+   * an unrecognized kind fails closed (not final).
+   */
+  private async isCreditNoteAdvanceSettlementFinal(
+    tx: ScopedTx,
+    customerAdvanceId: string,
+  ): Promise<boolean> {
+    const releaseRows = await tx.$queryRaw<
+      { sourceKind: string; sourcePaymentId: string | null }[]
+    >`SELECT "sourceKind", "sourcePaymentId" FROM "credit_note_coverage_release"
+       WHERE "customerAdvanceId" = ${customerAdvanceId}::uuid`;
+    const release = releaseRows[0];
+    if (!release) return false;
+    switch (release.sourceKind) {
+      case 'OPENING_ADVANCE':
+        return true;
+      case 'PAYMENT_ALLOCATION':
+      case 'ADVANCE_APPLICATION':
+        return (
+          release.sourcePaymentId !== null &&
+          (await this.isPaymentSettlementFinal(tx, release.sourcePaymentId))
+        );
+      default:
+        return false;
+    }
   }
 
   /**
@@ -97,7 +170,15 @@ export class InvoiceSettlementProjectionRepository {
    *     the settled portion alone would exceed that one Invoice's own
    *     allocation).
    */
-  private async isPaymentSettlementFinal(tx: ScopedTx, paymentId: string): Promise<boolean> {
+  /**
+   * Task 3b.8 Checkpoint D (provider-stub reconciliation) — promoted from
+   * `private` to `public` so `RefundAttemptReservationRepository` can reuse
+   * this EXACT frozen predicate for the schema's own
+   * `PROVIDER_REFUND_REQUIRES_FULL_SETTLEMENT` gate (`RefundAttempt`'s own
+   * doc comment) — never a duplicate arithmetic implementation. No behavior
+   * change to either of this method's existing 3b.7 callers.
+   */
+  async isPaymentSettlementFinal(tx: ScopedTx, paymentId: string): Promise<boolean> {
     const rows = await tx.$queryRaw<{ method: string; amountMinor: bigint }[]>`
       SELECT "method", "amountMinor" FROM "payment" WHERE "id" = ${paymentId}::uuid`;
     const payment = rows[0];

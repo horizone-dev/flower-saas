@@ -198,6 +198,43 @@ export const AUDITABLE_ACTIONS = {
   'order.confirmed': { resourceType: 'order', security: false },
   'invoice.issued': { resourceType: 'invoice', security: false },
 
+  // ── orders: Cancellation / Refund / Credit Note (task 3b.8 Checkpoint C) ──
+  // Business event, NOT a security event (same bucket/precedent as every
+  // other order-lifecycle action above). ONE row per successful cancellation
+  // (no-charge and with-charge paths alike) — the dedicated `reason` column
+  // is this action's own durable, authoritative home for the mandatory
+  // cancellation reason (§7 of the frozen contract; no `Order.cancellationReason`
+  // column exists or is needed — `AuditWriter.record`'s `reason` field, written
+  // transactionally with the status transition, is the existing durable
+  // mechanism this checkpoint reuses, exactly as instructed). Bounded payload:
+  // ids, before/after status labels, a `hasCharge` boolean — never a raw
+  // commercial snapshot/customer PII dump.
+  'order.cancelled': { resourceType: 'order', security: false },
+  /** the with-charge path's OWN financial-document artifact — mirrors
+   *  `invoice.issued`'s exact precedent (a SEPARATE row for a SEPARATE
+   *  artifact, alongside the `order.cancelled` transition row above, same as
+   *  `order.confirmed` + `invoice.issued`). Bounded payload: ids, document
+   *  number, amount/currency, the created receivable id — never a raw
+   *  customer/tax-policy dump. `receivable.created` is deliberately NOT
+   *  reused a second time here — the receivable is a 1:1, always-co-created
+   *  row, not an independent business event (unlike Invoice AR's own
+   *  `receivable.created`, which records a distinct, independently
+   *  meaningful fact). */
+  'cancellation_charge.issued': { resourceType: 'cancellation_charge', security: false },
+
+  // ── orders: post-invoice Credit Note / Refund (task 3b.8 Checkpoint D) ──
+  // Business event, NOT a security event (same bucket as every 3b.8
+  // Checkpoint C action above). Bounded payload: ids, document number,
+  // amount/currency, the arReduction/advanceExcess split — never a raw
+  // commercial snapshot/customer PII dump.
+  'credit_note.issued': { resourceType: 'credit_note', security: false },
+  /** the separate, later, explicit money-out action (ADR-0019 §27) — one row
+   *  per persisted `RefundAttempt` (PENDING, before any provider I/O) and one
+   *  row per confirmed-successful immutable `Refund`. Bounded payload: ids,
+   *  method, amount/currency, state — never a raw provider payload/secret. */
+  'refund.requested': { resourceType: 'refund_attempt', security: false },
+  'refund.completed': { resourceType: 'refund', security: false },
+
   // ── payments (task 3b.5 Checkpoint G) ──────────────────────────────────
   // Business events, NOT security events — ordinary financial activity
   // recording, not permission/secret/attribution change. Bounded payloads
@@ -251,6 +288,14 @@ export const AUDITABLE_ACTIONS = {
   // tenant-lifecycle, RBAC, secrets-vault, or session/impersonation
   // membership). Bounded payload only: ids, amount/currency — never PII.
   'receivable.opening_payment_applied': {
+    resourceType: 'customer_receivable_payment_application',
+    security: false,
+  },
+  // Task 3b.8 Integration Closure — the same application row/leg for a
+  // CANCELLATION_CHARGE receivable (a distinct, truthful action name rather than
+  // an "opening" action carrying a charge). Same bucket/precedent: a business
+  // event, never `security: true`; bounded payload (ids, amount/currency).
+  'receivable.cancellation_charge_payment_applied': {
     resourceType: 'customer_receivable_payment_application',
     security: false,
   },

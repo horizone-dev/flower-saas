@@ -52,7 +52,8 @@ function versionConflictError(expected: number, current: number): DomainError {
  *   -> Discovery #1 (read-only)
  *   -> lock affected Invoice rows, sorted ascending
  *   -> lock matched Payment rows, sorted ascending
- *   -> lock Payment-funded CustomerAdvance rows, sorted ascending
+ *   -> lock Payment-funded CustomerAdvance rows (PAYMENT-sourced, and
+ *      CREDIT_NOTE-sourced via release provenance), sorted ascending
  *   -> Discovery #2 (stable-set check)
  *   -> create SettlementApplications (Batch still DRAFT — Checkpoint B's
  *      two-phase Application/Batch gate requires this)
@@ -139,10 +140,17 @@ export class SettlementFinalizationRepository {
     //      required because CustomerAdvanceApplication capacity
     //      serialization locks CustomerAdvance, not the funding Payment
     //      (the frozen 3b.6 `fn_lock_and_validate_advance_capacity` trigger,
-    //      unchanged, unmodified here). ───────────────────────────────────
+    //      unchanged, unmodified here). Task 3b.8 Integration Closure (F2): a
+    //      CREDIT_NOTE-sourced advance is Payment-funded too, through its
+    //      CreditNoteCoverageRelease provenance — locked in the SAME
+    //      ascending-id statement, so its application capacity serializes
+    //      against this finalization exactly like a PAYMENT-sourced advance's. ─
     await tx.$queryRaw`
       SELECT "id" FROM "customer_advance"
-       WHERE "sourceType" = 'PAYMENT' AND "sourcePaymentId" = ANY(${matchedPaymentIds}::uuid[])
+       WHERE ("sourceType" = 'PAYMENT' AND "sourcePaymentId" = ANY(${matchedPaymentIds}::uuid[]))
+          OR ("sourceType" = 'CREDIT_NOTE' AND "id" IN (
+                SELECT r."customerAdvanceId" FROM "credit_note_coverage_release" r
+                 WHERE r."sourcePaymentId" = ANY(${matchedPaymentIds}::uuid[])))
        ORDER BY "id" ASC FOR UPDATE`;
 
     // ── 8. Discovery #2 — stable-set check, now that every write-serializing
@@ -313,7 +321,10 @@ export class SettlementFinalizationRepository {
 
   /** Path A (direct PaymentAllocation) UNION Path B (Payment-funded
    *  CustomerAdvance -> CustomerAdvanceApplication -> INVOICE-sourced
-   *  CustomerReceivable), DISTINCT, sorted ascending. The
+   *  CustomerReceivable) UNION Path C (task 3b.8 Integration Closure F2: a
+   *  CREDIT_NOTE-sourced CustomerAdvance whose CreditNoteCoverageRelease
+   *  provenance traces to a matched Payment -> its CustomerAdvanceApplication ->
+   *  INVOICE-sourced CustomerReceivable), DISTINCT, sorted ascending. The
    *  CustomerReceivablePaymentApplication -> OPENING path is deliberately
    *  excluded — it can never reach an Invoice (frozen DB trigger). */
   private async discoverAffectedInvoiceIds(
@@ -333,9 +344,20 @@ export class SettlementFinalizationRepository {
          AND ca."sourcePaymentId" = ANY(${matchedPaymentIds}::uuid[])
          AND cr."sourceType" = 'INVOICE'
          AND cr."invoiceId" IS NOT NULL`;
+    const pathC = await tx.$queryRaw<{ invoiceId: string }[]>`
+      SELECT DISTINCT cr."invoiceId"
+        FROM "credit_note_coverage_release" r
+        JOIN "customer_advance" ca ON ca."id" = r."customerAdvanceId"
+        JOIN "customer_advance_application" caa ON caa."customerAdvanceId" = ca."id"
+        JOIN "customer_receivable" cr ON cr."id" = caa."customerReceivableId"
+       WHERE ca."sourceType" = 'CREDIT_NOTE'
+         AND r."sourcePaymentId" = ANY(${matchedPaymentIds}::uuid[])
+         AND cr."sourceType" = 'INVOICE'
+         AND cr."invoiceId" IS NOT NULL`;
     const ids = new Set<string>();
     for (const r of pathA) ids.add(r.invoiceId);
     for (const r of pathB) ids.add(r.invoiceId);
+    for (const r of pathC) ids.add(r.invoiceId);
     return [...ids].sort();
   }
 

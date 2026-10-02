@@ -19,6 +19,34 @@
  * kind of later-task extension this module's own doc anticipated. No
  * existing kind's reference column or behavior changes.
  *
+ * Task 3b.8 Checkpoint C added the 9th kind, `CANCELLATION_CHARGE` — the
+ * exact vocabulary migration 44's own `customer_account_entry_kind_chk` /
+ * `customer_account_entry_reference_xor_chk` already reserved (grouped with
+ * `INVOICE`/`OPENING_RECEIVABLE` under the SAME `customerReceivableId`
+ * reference column; the DB trigger separately requires the referenced
+ * receivable's own `sourceType = 'CANCELLATION_CHARGE'`). Purely additive —
+ * no existing kind's reference column or behavior changes.
+ *
+ * Task 3b.8 Checkpoint D adds the final 2 kinds migration 44's own CHECK
+ * already reserved (`creditNoteId` for `CREDIT_NOTE`, written only when
+ * `CreditNote.arReductionMinor > 0`; `customerAdvanceRefundApplicationId` for
+ * `REFUND`, one entry per `CustomerAdvanceRefundApplication` row — mirrors
+ * `paymentAllocationId`'s own one-entry-per-row precedent for a fan-out).
+ * `ADVANCE`/`ADVANCE_APPLIED` are REUSED UNCHANGED for a CREDIT_NOTE-sourced
+ * Advance / its later application — no new kind needed for either.
+ *
+ * Task 3b.8 Integration Closure adds the 12th kind,
+ * `CANCELLATION_CHARGE_PAYMENT_APPLIED` — a Payment applied to a
+ * CANCELLATION_CHARGE receivable (the DB payment-application target is OPENING +
+ * CANCELLATION_CHARGE). It shares the legacy `OPENING_RECEIVABLE_PAYMENT_APPLIED`
+ * sole reference column (`customerReceivablePaymentApplicationId`) but is its OWN
+ * kind: the legacy kind stays FROZEN, unchanged and unrenamed, for
+ * opening-receivable payment history, and the DB cross-table trigger
+ * structurally keeps the two apart (each kind may only reference an application
+ * whose own target receivable has the matching sourceType). Advance application
+ * to a charge keeps the generic `ADVANCE_APPLIED` (target-agnostic, per the
+ * frozen schema).
+ *
  * `CustomerAccountEntry` is chronology/history ONLY — never a receipt,
  * allocation, receivable-principal, advance, or PostingEngine-idempotency
  * authority. It exists purely so the customer statement can show a source
@@ -34,7 +62,11 @@ export type CustomerAccountEntryKind =
   | 'ADVANCE'
   | 'ADVANCE_APPLIED'
   | 'OPENING_RECEIVABLE'
-  | 'OPENING_ADVANCE';
+  | 'OPENING_ADVANCE'
+  | 'CANCELLATION_CHARGE'
+  | 'CREDIT_NOTE'
+  | 'REFUND'
+  | 'CANCELLATION_CHARGE_PAYMENT_APPLIED';
 
 export const CUSTOMER_ACCOUNT_ENTRY_KINDS: readonly CustomerAccountEntryKind[] = Object.freeze([
   'INVOICE',
@@ -45,6 +77,10 @@ export const CUSTOMER_ACCOUNT_ENTRY_KINDS: readonly CustomerAccountEntryKind[] =
   'ADVANCE_APPLIED',
   'OPENING_RECEIVABLE',
   'OPENING_ADVANCE',
+  'CANCELLATION_CHARGE',
+  'CREDIT_NOTE',
+  'REFUND',
+  'CANCELLATION_CHARGE_PAYMENT_APPLIED',
 ]);
 
 /** The one reference field each entryKind must populate — everything else must be absent. */
@@ -55,6 +91,8 @@ export type CustomerAccountEntryReferences = {
   readonly customerAdvanceId?: string;
   readonly customerAdvanceApplicationId?: string;
   readonly customerReceivablePaymentApplicationId?: string;
+  readonly creditNoteId?: string;
+  readonly customerAdvanceRefundApplicationId?: string;
 };
 
 const REFERENCE_COLUMN_FOR_KIND: Readonly<
@@ -62,12 +100,16 @@ const REFERENCE_COLUMN_FOR_KIND: Readonly<
 > = Object.freeze({
   INVOICE: 'customerReceivableId',
   OPENING_RECEIVABLE: 'customerReceivableId',
+  CANCELLATION_CHARGE: 'customerReceivableId',
   PAYMENT: 'paymentId',
   PAYMENT_ALLOCATION: 'paymentAllocationId',
   OPENING_RECEIVABLE_PAYMENT_APPLIED: 'customerReceivablePaymentApplicationId',
+  CANCELLATION_CHARGE_PAYMENT_APPLIED: 'customerReceivablePaymentApplicationId',
   ADVANCE: 'customerAdvanceId',
   OPENING_ADVANCE: 'customerAdvanceId',
   ADVANCE_APPLIED: 'customerAdvanceApplicationId',
+  CREDIT_NOTE: 'creditNoteId',
+  REFUND: 'customerAdvanceRefundApplicationId',
 });
 
 const ALL_REFERENCE_COLUMNS: readonly (keyof CustomerAccountEntryReferences)[] = Object.freeze([
@@ -77,6 +119,8 @@ const ALL_REFERENCE_COLUMNS: readonly (keyof CustomerAccountEntryReferences)[] =
   'customerAdvanceId',
   'customerAdvanceApplicationId',
   'customerReceivablePaymentApplicationId',
+  'creditNoteId',
+  'customerAdvanceRefundApplicationId',
 ]);
 
 /**

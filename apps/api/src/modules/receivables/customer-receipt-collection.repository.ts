@@ -9,6 +9,8 @@ import { DomainError, NotFoundError } from '../../common/errors/domain-error.js'
 import { isProviderBackedTender, type TenderMethod } from '../payments/tender.js';
 import type { PaymentEventType } from '../payments/payment-events.js';
 import { allocateFifo, type OpenReceivable } from './receivable-fifo-allocation.js';
+import type { ReceivableSourceType } from './receivable-balance.js';
+import { loadReceivableBalances } from './receivable-balance.repository.js';
 import { CustomerReceiptEffectsRepository } from './customer-receipt-effects.repository.js';
 
 export interface CollectCustomerReceiptInput {
@@ -25,7 +27,7 @@ export interface CollectCustomerReceiptInput {
 
 export interface CustomerReceiptAllocationResult {
   receivableId: string;
-  sourceType: 'INVOICE' | 'OPENING';
+  sourceType: ReceivableSourceType;
   amountMinor: bigint;
 }
 
@@ -51,11 +53,18 @@ interface CandidateRow {
 /**
  * Task 3b.6 Checkpoint D (D10-D16) — the customer-level canonical-receipt
  * primitive: locally-confirmed tenders ONLY, FIFO fan-out across a single
- * customer's combined open-receivable queue (Invoice-origin AND
- * Opening-origin, one deterministic `createdAt ASC, id ASC` order), never a
- * provider/async path. NOT HTTP-exposed directly — `CustomerReceiptRepository`
- * opens the caller transaction and delegates here, mirroring
- * `PaymentCollectionRepository`'s own relationship to `PaymentRepository`.
+ * customer's combined open-receivable queue (Invoice-origin, Opening-origin
+ * AND — task 3b.8 Integration Closure — CancellationCharge-origin, one
+ * deterministic `createdAt ASC, id ASC` order), never a provider/async path.
+ * NOT HTTP-exposed directly — `CustomerReceiptRepository` opens the caller
+ * transaction and delegates here, mirroring `PaymentCollectionRepository`'s
+ * own relationship to `PaymentRepository`.
+ *
+ * Every candidate's outstanding comes from the ONE canonical balance
+ * (`receivable-balance.ts` via `receivable-balance.repository.ts`): an invoice
+ * fully (or partly) AR-reversed by a CreditNote is never collectible beyond its
+ * true remaining amount, and a CancellationCharge receivable is a first-class
+ * receivable (never an "OPENING" fallthrough).
  *
  * Fixed lock order (owner Checkpoint D contract §D13/§D15, reusing the
  * frozen B15 hierarchy verbatim): lock each coverage anchor (the underlying
@@ -177,39 +186,49 @@ export class CustomerReceiptCollectionRepository {
     const openReceivables: OpenReceivable[] = [];
     const sourceById = new Map<
       string,
-      { sourceType: 'INVOICE' | 'OPENING'; invoiceId: string | null }
+      { sourceType: ReceivableSourceType; invoiceId: string | null }
     >();
     for (const candidate of candidates) {
-      let outstandingMinor: bigint;
+      // lock the coverage anchor FIRST (canonical order): the underlying
+      // `invoice` row for an INVOICE-sourced candidate, the `customer_receivable`
+      // row itself for every NON-invoice candidate (OPENING / CANCELLATION_CHARGE
+      // — the same anchor the DB coverage backstop locks).
       if (candidate.sourceType === 'INVOICE') {
-        const rows = await tx.$queryRaw<{ totalAmountMinor: bigint }[]>`
-          SELECT "totalAmountMinor" FROM "invoice" WHERE "id" = ${candidate.invoiceId}::uuid FOR UPDATE`;
-        const invoice = rows[0];
-        if (!invoice) continue; // defensive — cannot happen under B8's own FK
-        const allocRows = await tx.$queryRaw<{ total: bigint }[]>`
-          SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "payment_allocation" WHERE "invoiceId" = ${candidate.invoiceId}::uuid`;
-        const advRows = await tx.$queryRaw<{ total: bigint }[]>`
-          SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "customer_advance_application" WHERE "customerReceivableId" = ${candidate.id}::uuid`;
-        outstandingMinor = invoice.totalAmountMinor - allocRows[0]!.total - advRows[0]!.total;
+        const locked = await tx.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "invoice" WHERE "id" = ${candidate.invoiceId}::uuid FOR UPDATE`;
+        if (!locked[0]) continue; // defensive — cannot happen under B8's own FK
       } else {
-        const rows = await tx.$queryRaw<{ openingAmountMinor: bigint }[]>`
-          SELECT "openingAmountMinor" FROM "customer_receivable" WHERE "id" = ${candidate.id}::uuid FOR UPDATE`;
-        const receivable = rows[0];
-        if (!receivable) continue;
-        const advRows = await tx.$queryRaw<{ total: bigint }[]>`
-          SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "customer_advance_application" WHERE "customerReceivableId" = ${candidate.id}::uuid`;
-        const payAppRows = await tx.$queryRaw<{ total: bigint }[]>`
-          SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "customer_receivable_payment_application" WHERE "customerReceivableId" = ${candidate.id}::uuid`;
-        outstandingMinor = receivable.openingAmountMinor - advRows[0]!.total - payAppRows[0]!.total;
+        const locked = await tx.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "customer_receivable" WHERE "id" = ${candidate.id}::uuid FOR UPDATE`;
+        if (!locked[0]) continue;
       }
 
-      if (outstandingMinor <= 0n) continue; // fully covered since discovery — skip
+      // ...THEN recompute its authoritative outstanding under that lock through
+      // the ONE canonical balance loader (task 3b.8 Integration Closure): the
+      // formula is by receivable source type — INVOICE / OPENING /
+      // CANCELLATION_CHARGE — and an INVOICE receivable is closed by a
+      // CreditNote's AR reduction exactly as the maintained projection is. A
+      // candidate with a missing/unknown principal fails closed (RangeError),
+      // never falls back to "OPENING" arithmetic.
+      const [balance] = await loadReceivableBalances(tx, {
+        tenantId: input.tenantId,
+        companyId: input.companyId,
+        customerCompanyAccountId: account.id,
+        branchId: input.branchId,
+        receivableId: candidate.id,
+      });
+      if (!balance) continue;
+      if (balance.outstandingMinor <= 0n) continue; // fully covered/credited since discovery — skip
 
       sourceById.set(candidate.id, {
-        sourceType: candidate.sourceType as 'INVOICE' | 'OPENING',
+        sourceType: balance.sourceType,
         invoiceId: candidate.invoiceId,
       });
-      openReceivables.push({ id: candidate.id, createdAt: candidate.createdAt, outstandingMinor });
+      openReceivables.push({
+        id: candidate.id,
+        createdAt: candidate.createdAt,
+        outstandingMinor: balance.outstandingMinor,
+      });
     }
 
     // ── 5. lock CustomerCompanyAccount — AFTER every coverage anchor, BEFORE
@@ -348,6 +367,9 @@ export class CustomerReceiptCollectionRepository {
           actorUserId: input.createdByUserId,
         });
       } else {
+        // every NON-invoice receivable (OPENING / CANCELLATION_CHARGE) is
+        // settled through a `CustomerReceivablePaymentApplication` — one shared
+        // leg, no special per-source subsystem.
         await this.effects.applyOpeningApplicationEffectsInTx(tx, {
           tenantId: input.tenantId,
           companyId: input.companyId,
@@ -358,6 +380,7 @@ export class CustomerReceiptCollectionRepository {
           amountMinor: allocation.amountMinor,
           currencyCode: currency.currencyCode,
           currencyExponent: currency.currencyExponent,
+          receivableSourceType: source.sourceType,
           actorUserId: input.createdByUserId,
         });
       }

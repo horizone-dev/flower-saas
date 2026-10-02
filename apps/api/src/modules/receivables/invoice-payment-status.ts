@@ -159,3 +159,107 @@ export function assertInvoiceSettlementStatusTransition(
     throw new RangeError(`illegal Invoice settlement-status transition ${from} -> ${to}`);
   }
 }
+
+/**
+ * Task 3b.8 Checkpoint D — the frozen extension point this module's own doc
+ * comment anticipated for 3b.8 ("CANCELLED`/`PARTIALLY_REFUNDED`/`REFUNDED`").
+ * A SEPARATE, wider type/graph again — `InvoiceSettlementStatus3b7`'s own
+ * type/graph above is UNCHANGED. `VOID` is deliberately excluded (Invoice's
+ * own schema doc comment: "VOID remains unused — no producer anywhere, by
+ * 3b.8 owner freeze"). Checkpoint D's own scope is full-order cancellation
+ * ONLY (no partial/line-level selection, no SETTLED-invoice cancellation —
+ * reversing a settlement effect would touch `SettlementApplication`, out of
+ * scope) — so every edge below is a ONE-TIME terminal transition out of
+ * UNPAID/PARTIAL/PAID into exactly one of the three new terminal states, and
+ * every one of those three is itself terminal (no further edge anywhere,
+ * including no same-state no-op re-entry — a SECOND cancellation of an
+ * already-cancelled Invoice is a caller-level `ORDER_INVALID_STATE_TRANSITION`
+ * reject, never a repeated projection write).
+ */
+export type InvoiceCancellationStatus3b8 =
+  InvoiceSettlementStatus3b7 | 'PARTIALLY_REFUNDED' | 'REFUNDED' | 'CANCELLED';
+
+const TRANSITIONS_3B8: Readonly<
+  Record<InvoiceCancellationStatus3b8, readonly InvoiceCancellationStatus3b8[]>
+> = Object.freeze({
+  UNPAID: ['UNPAID', 'CANCELLED'],
+  PARTIAL: ['PARTIAL', 'PARTIALLY_REFUNDED'],
+  PAID: ['PAID', 'SETTLED', 'REFUNDED'],
+  SETTLED: ['SETTLED'],
+  PARTIALLY_REFUNDED: ['PARTIALLY_REFUNDED'],
+  REFUNDED: ['REFUNDED'],
+  CANCELLED: ['CANCELLED'],
+});
+
+export function canTransitionInvoiceCancellationStatus(
+  from: InvoiceCancellationStatus3b8,
+  to: InvoiceCancellationStatus3b8,
+): boolean {
+  return TRANSITIONS_3B8[from].includes(to);
+}
+
+/** Throws for any edge outside the frozen 3b.8 graph — in particular
+ *  `SETTLED -> *` (settled-invoice cancellation is out of Checkpoint D's
+ *  scope — it would require reversing the `SettlementApplication` effect)
+ *  and any edge out of an already-terminal cancellation/refund state. */
+export function assertInvoiceCancellationStatusTransition(
+  from: InvoiceCancellationStatus3b8,
+  to: InvoiceCancellationStatus3b8,
+): void {
+  if (!canTransitionInvoiceCancellationStatus(from, to)) {
+    throw new RangeError(`illegal Invoice cancellation-status transition ${from} -> ${to}`);
+  }
+}
+
+export interface FullCancellationResolutionInput {
+  readonly invoiceTotalMinor: bigint;
+  /** `paymentAllocatedMinor + advanceAppliedMinor` — the exact same coverage
+   *  sum `computeInvoiceCoverage` uses, computed fresh under lock. */
+  readonly paidMinor: bigint;
+}
+
+export interface FullCancellationResolutionResult {
+  /** the still-unpaid remainder — simply reversed, never refunded (ADR-0019
+   *  §19: "it was never money"). */
+  readonly arReductionMinor: bigint;
+  /** the actually-received portion — becomes a new CREDIT_NOTE-sourced
+   *  CustomerAdvance (account credit), never cash directly (ADR-0019 §19). */
+  readonly advanceExcessMinor: bigint;
+  /** the projected `invoicePaymentStatus` this full cancellation produces. */
+  readonly nextStatus: 'CANCELLED' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
+}
+
+/**
+ * Task 3b.8 Checkpoint D — pure full-order-cancellation monetary resolution
+ * (ADR-0019 §19), evaluated against actual money received only, never the
+ * nominal total. Always a 100%/0% split for a FULL cancellation (no partial
+ * line selection exists in this checkpoint) — `arReductionMinor` is exactly
+ * the unpaid remainder, `advanceExcessMinor` is exactly what was paid;
+ * `arReductionMinor + advanceExcessMinor === invoiceTotalMinor` always.
+ */
+export function computeFullCancellationResolution(
+  input: FullCancellationResolutionInput,
+): FullCancellationResolutionResult {
+  assertNonNegative(input.invoiceTotalMinor, 'invoiceTotalMinor');
+  assertNonNegative(input.paidMinor, 'paidMinor');
+  if (input.paidMinor > input.invoiceTotalMinor) {
+    throw new RangeError(
+      `computeFullCancellationResolution: paidMinor (${input.paidMinor}) exceeds ` +
+        `invoiceTotalMinor (${input.invoiceTotalMinor}) — a corrupted invariant`,
+    );
+  }
+
+  const advanceExcessMinor = input.paidMinor;
+  const arReductionMinor = input.invoiceTotalMinor - input.paidMinor;
+
+  let nextStatus: 'CANCELLED' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
+  if (advanceExcessMinor === 0n) {
+    nextStatus = 'CANCELLED';
+  } else if (arReductionMinor === 0n) {
+    nextStatus = 'REFUNDED';
+  } else {
+    nextStatus = 'PARTIALLY_REFUNDED';
+  }
+
+  return { arReductionMinor, advanceExcessMinor, nextStatus };
+}

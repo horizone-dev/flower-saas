@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { SystemClock } from '../../common/clock/clock.js';
 import { AccountingModule } from '../accounting/accounting.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { CustomerModule } from '../customers/customer.module.js';
@@ -31,6 +32,12 @@ import { CustomerAccountReadRepository } from './customer-account-read.repositor
 import { CustomerAccountReadHttpRepository } from './customer-account-read.http.repository.js';
 import { CustomerAccountReadService } from './customer-account-read.service.js';
 import { CustomerAccountReadController } from './customer-account-read.controller.js';
+import { RefundExecutionRepository } from './refund-execution.repository.js';
+import { RefundAttemptReservationRepository } from './refund-attempt-reservation.repository.js';
+import { ProviderRefundEventInboxRepository } from './provider-refund-event-inbox.repository.js';
+import { RefundRepository } from './refund.repository.js';
+import { RefundService } from './refund.service.js';
+import { RefundController } from './refund.controller.js';
 
 /**
  * `receivables` module (task 3b.6 Checkpoints C/D/E). Imports `AccountingModule`
@@ -61,6 +68,32 @@ import { CustomerAccountReadController } from './customer-account-read.controlle
  * `CustomerReceiptEffectsRepository.recomputeInvoicePaymentStatusInTx` —
  * never a duplicate arithmetic implementation), plus their own thin
  * HTTP repository/service/controller triads.
+ *
+ * Task 3b.8 Checkpoint D adds `RefundExecutionRepository`/`RefundRepository`/
+ * `RefundService`/`RefundController` — the separate, later, explicit Refund
+ * action that drains a CREDIT_NOTE-sourced `CustomerAdvance`. CASH/
+ * BANK_TRANSFER execute fully, synchronously; OTHER_MANUAL is rejected (no
+ * exact financial account mapping, per `Refund`'s own schema doc comment).
+ *
+ * Internal provider-refund foundation (same checkpoint, NOT reachable from any
+ * public route yet): `RefundAttemptReservationRepository` can durably persist
+ * a PENDING `RefundAttempt` — resolving `providerCredentialId` ONLY from the
+ * authoritative chain `CustomerAdvance -> CreditNoteCoverageRelease.
+ * sourcePaymentId -> Payment.sourceAttemptId -> PaymentAttempt.
+ * providerCredentialId` (never invented, never client-supplied), gating on
+ * `PROVIDER_REFUND_REQUIRES_FULL_SETTLEMENT` by reusing
+ * `InvoiceSettlementProjectionRepository.isPaymentSettlementFinal` (promoted
+ * to `public` for this reuse, never duplicated). The public refund route
+ * rejects CARD_TERMINAL/ONLINE_GATEWAY with `501 REFUND_PROVIDER_NOT_IMPLEMENTED`
+ * BEFORE any transaction, so it is completely side-effect free
+ * (`RefundRepository` does not inject the reservation primitive at all) —
+ * the foundation is exercised directly by tests until `PaymentProvider.
+ * refund`/`getStatus` exist. `ProviderRefundEventInboxRepository` mirrors
+ * `ProviderPaymentEventInboxRepository`'s own dedup'd webhook-inbox shape for
+ * `provider_refund_event` — likewise a primitive only, wired to no HTTP route
+ * (no `verifyWebhook` contract exists for refunds).
+ * `SystemClock` is declared locally here too (mirrors `AccountingModule`'s/
+ * `OrderModule`'s own local declaration — no shared `ClockModule` exists).
  */
 @Module({
   imports: [AccountingModule, AccessModule, CustomerModule, SettlementsModule],
@@ -71,8 +104,10 @@ import { CustomerAccountReadController } from './customer-account-read.controlle
     OpeningBalanceController,
     CustomerWithOpeningBalanceController,
     CustomerAccountReadController,
+    RefundController,
   ],
   providers: [
+    SystemClock,
     CustomerInvoiceArRepository,
     CreditOverrideAuthorizationService,
     PaymentCustomerAttributionRepository,
@@ -95,6 +130,11 @@ import { CustomerAccountReadController } from './customer-account-read.controlle
     CustomerAccountReadRepository,
     CustomerAccountReadHttpRepository,
     CustomerAccountReadService,
+    RefundExecutionRepository,
+    RefundAttemptReservationRepository,
+    ProviderRefundEventInboxRepository,
+    RefundRepository,
+    RefundService,
   ],
   exports: [
     CustomerInvoiceArRepository,

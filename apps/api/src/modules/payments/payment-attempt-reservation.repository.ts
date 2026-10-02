@@ -6,12 +6,14 @@ import type { ScopedTx } from '@flower/db';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { OutboxWriter } from '../../common/audit/outbox.writer.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
-import { computeAvailableToCollect } from './available-to-collect.js';
+import { computeAvailableToCollectFromOutstanding } from './available-to-collect.js';
 import { assertPaymentAttemptOrderBinding } from './order-binding.js';
 import { isProviderBackedTender, type TenderMethod } from './tender.js';
 import { assertPaymentAttemptTransition } from './payment-attempt-state.js';
 import type { PaymentProviderInitiationState } from './payment-provider.port.js';
 import type { PaymentEventType } from './payment-events.js';
+import { loadInvoiceBalance } from '../receivables/receivable-balance.repository.js';
+import { lockOrderThenInvoiceInTx } from './payment-target-lock.repository.js';
 
 /** The client-semantic fields that identify "this logical request" for the
  *  DB-fallback idempotency check (owner recovery-pass §6) — every field a
@@ -223,8 +225,10 @@ export class PaymentAttemptReservationRepository {
    * second one — required because this phase's commit can outlive the
    * overall HTTP request/response cycle that the shared idempotency store
    * actually protects (see that migration's doc comment for the full
-   * reasoning). The Invoice lock is taken ONLY on the create path — a pure
-   * reuse never needs it. Callers that already ran
+   * reasoning). The Order + Invoice locks (canonical ORDER -> INVOICE
+   * hierarchy, task 3b.8 Integration Closure F4 — see
+   * `payment-target-lock.repository.ts`) are taken ONLY on the create path —
+   * a pure reuse never needs them. Callers that already ran
    * {@link findExistingForRecoveryInTx} and got `null` still reach this
    * method's own lookup below — it is the race-safe backstop for two
    * concurrent identical retries both passing that earlier check before
@@ -266,44 +270,29 @@ export class PaymentAttemptReservationRepository {
       );
     }
 
-    // ── 1. lock the target Invoice in EXACT trusted scope — mirrors
-    //      `PaymentCollectionRepository` exactly (frozen C/D query). ───────
-    const invoiceRows = await tx.$queryRaw<
-      {
-        id: string;
-        orderId: string;
-        currencyCode: string;
-        currencyExponent: number;
-        totalAmountMinor: bigint;
-      }[]
-    >`
-      SELECT "id", "orderId", "currencyCode", "currencyExponent", "totalAmountMinor"
-        FROM "invoice"
-       WHERE "id" = ${input.invoiceId}::uuid
-         AND "tenantId" = ${input.tenantId}::uuid
-         AND "companyId" = ${input.companyId}::uuid
-         AND "branchId" = ${input.branchId}::uuid
-       FOR UPDATE`;
-    const invoice = invoiceRows[0];
-    if (!invoice) throw new NotFoundError('invoice', 'INVOICE_NOT_FOUND');
+    // ── 1/2. the canonical lock hierarchy (task 3b.8 Integration Closure F4) —
+    //      the ORDER first (FOR SHARE), then the target Invoice (FOR UPDATE) in
+    //      EXACT trusted scope — identical to `PaymentCollectionRepository`. The
+    //      post-invoice cancellation locks ORDER -> INVOICE; locking INVOICE
+    //      first and reaching the order only through the FK of the
+    //      `payment_attempt` insert below was a deadlock (40P01). See
+    //      `payment-target-lock.repository.ts` for the full lock graph. ───────
+    const { invoice, order } = await lockOrderThenInvoiceInTx(tx, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      branchId: input.branchId,
+      invoiceId: input.invoiceId,
+    });
 
-    // ── 2. load the Order this Invoice was issued from. ───────────────────
-    const orderRows = await tx.$queryRaw<
-      { id: string; commercialSnapshotFingerprint: string; version: number }[]
-    >`
-      SELECT "id", "commercialSnapshotFingerprint", "version"
-        FROM "order"
-       WHERE "id" = ${invoice.orderId}::uuid`;
-    const order = orderRows[0];
-    if (!order) throw new NotFoundError('order', 'ORDER_NOT_FOUND');
-
-    // ── 3/4/5. the SAME frozen reservation formula (owner §E9, reused
-    //      verbatim from C/D — no reservation table). ─────────────────────
-    const confirmedRows = await tx.$queryRaw<{ total: bigint }[]>`
-      SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total
-        FROM "payment_allocation"
-       WHERE "invoiceId" = ${invoice.id}::uuid`;
-    const confirmedAmountMinor = confirmedRows[0]!.total;
+    // ── 3/4/5. the SAME reservation formula (owner §E9 — no reservation
+    //      table), over the CANONICAL remaining receivable balance (invoice
+    //      total − allocations − advance applications − CreditNote AR
+    //      reduction; task 3b.8 Integration Closure F1) — identical to
+    //      `PaymentCollectionRepository`. ──────────────────────────────────
+    const balance = await loadInvoiceBalance(tx, {
+      tenantId: input.tenantId,
+      invoiceId: invoice.id,
+    });
 
     const reservedRows = await tx.$queryRaw<{ total: bigint }[]>`
       SELECT COALESCE(SUM(pa."amountMinor"), 0)::bigint AS total
@@ -314,9 +303,8 @@ export class PaymentAttemptReservationRepository {
          AND NOT EXISTS (SELECT 1 FROM "payment" p WHERE p."sourceAttemptId" = pa."id")`;
     const activeReservedAmountMinor = reservedRows[0]!.total;
 
-    const availableToCollect = computeAvailableToCollect(
-      invoice.totalAmountMinor,
-      confirmedAmountMinor,
+    const availableToCollect = computeAvailableToCollectFromOutstanding(
+      balance.outstandingMinor,
       activeReservedAmountMinor,
     );
 
@@ -429,7 +417,11 @@ export class PaymentAttemptReservationRepository {
     input: ApplyProviderInitiationResultInput,
   ): Promise<AppliedProviderInitiationResult> {
     // ── 1/2. lock Invoice then PaymentAttempt, in that fixed order (matches
-    //      every other payments-module lock order in this repository). ────
+    //      every other payments-module lock order in this repository). This
+    //      path only READS the order (a plain SELECT below) and its UPDATE of
+    //      the attempt does not touch the order's foreign key, so it holds no
+    //      lock the cancellation's ORDER lock can conflict with — it cannot
+    //      close a cycle with it (see `payment-target-lock.repository.ts`). ──
     const invoiceRows = await tx.$queryRaw<{ id: string }[]>`
       SELECT "id"
         FROM "invoice"

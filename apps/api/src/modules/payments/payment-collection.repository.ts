@@ -10,13 +10,15 @@ import { Injectable } from '@nestjs/common';
 import type { ScopedTx } from '@flower/db';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
 import { OutboxWriter } from '../../common/audit/outbox.writer.js';
-import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
-import { computeAvailableToCollect } from './available-to-collect.js';
+import { DomainError } from '../../common/errors/domain-error.js';
+import { computeAvailableToCollectFromOutstanding } from './available-to-collect.js';
 import { assertPaymentAttemptOrderBinding } from './order-binding.js';
 import { isProviderBackedTender, type TenderMethod } from './tender.js';
 import type { PaymentEventType } from './payment-events.js';
 import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
 import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import { loadInvoiceBalance } from '../receivables/receivable-balance.repository.js';
+import { lockOrderThenInvoiceInTx } from './payment-target-lock.repository.js';
 
 export interface SynchronousTenderInput {
   /** CASH | BANK_TRANSFER | OTHER_MANUAL | CARD_TERMINAL — ONLINE_GATEWAY
@@ -115,11 +117,15 @@ export interface CaptureSingleTenderResult {
  * `TaxFinalizationService` exactly. Participates in the CALLER's
  * already-open `ScopedTx` — never opens or commits its own transaction.
  *
- * Fixed lock order (owner Checkpoint C contract §C2, reused verbatim,
- * frozen for E/F too): lock the Invoice ONCE, load the Order ONCE, compute
- * confirmed+reserved amounts ONCE under that lock, validate the ENTIRE
- * tender set, and only then write — one attempt/event/Payment/Allocation
- * per tender, all inside the same transaction the caller already owns.
+ * Fixed lock order (owner Checkpoint C contract §C2, frozen for E/F too —
+ * and, since task 3b.8 Integration Closure F4, the canonical ORDER -> INVOICE
+ * hierarchy shared with the post-invoice cancellation): lock the Order (FOR
+ * SHARE) and then the Invoice (FOR UPDATE) ONCE via
+ * `lockOrderThenInvoiceInTx`, read the Order ONCE under that lock, compute
+ * the remaining balance + reserved amounts ONCE under the Invoice lock,
+ * validate the ENTIRE tender set, and only then write — one
+ * attempt/event/Payment/Allocation per tender, all inside the same
+ * transaction the caller already owns.
  *
  * Checkpoint C's single-tender behavior is exactly the `tenders.length ===
  * 1` case of this primitive — `captureSingleTenderInTx` below is now a
@@ -186,49 +192,35 @@ export class PaymentCollectionRepository {
       );
     }
 
-    // ── 1. lock the target Invoice in EXACT trusted tenant/company/branch
-    //      scope — a wrong company/branch never matches this WHERE clause,
-    //      regardless of DB RLS (which is tenant-only, Checkpoint B §1). ────
-    const invoiceRows = await tx.$queryRaw<
-      {
-        id: string;
-        orderId: string;
-        currencyCode: string;
-        currencyExponent: number;
-        totalAmountMinor: bigint;
-      }[]
-    >`
-      SELECT "id", "orderId", "currencyCode", "currencyExponent", "totalAmountMinor"
-        FROM "invoice"
-       WHERE "id" = ${input.invoiceId}::uuid
-         AND "tenantId" = ${input.tenantId}::uuid
-         AND "companyId" = ${input.companyId}::uuid
-         AND "branchId" = ${input.branchId}::uuid
-       FOR UPDATE`;
-    const invoice = invoiceRows[0];
-    if (!invoice) throw new NotFoundError('invoice', 'INVOICE_NOT_FOUND');
+    // ── 1/2. the canonical lock hierarchy (task 3b.8 Integration Closure F4):
+    //      the ORDER first (FOR SHARE), then the target Invoice (FOR UPDATE) in
+    //      EXACT trusted tenant/company/branch scope — a wrong company/branch
+    //      never matches (regardless of DB RLS, which is tenant-only, Checkpoint
+    //      B §1). The post-invoice cancellation locks ORDER -> INVOICE; taking
+    //      INVOICE first here and touching the order only through the FK of the
+    //      `payment_attempt` insert below was a deadlock (40P01). The Order is
+    //      read ONCE under that lock — every component tender's PaymentAttempt
+    //      binds to this SAME snapshot (§D19), never re-read per tender. See
+    //      `payment-target-lock.repository.ts` for the full lock graph. ───────
+    const { invoice, order } = await lockOrderThenInvoiceInTx(tx, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      branchId: input.branchId,
+      invoiceId: input.invoiceId,
+    });
 
-    // ── 2. load (not lock — an issued Order's commercial fields are already
-    //      immutable, 3b.3 Checkpoint C triggers) the Order this Invoice was
-    //      issued from, ONCE — every component tender's PaymentAttempt binds
-    //      to this SAME snapshot (§D19), never re-read per tender. ─────────
-    const orderRows = await tx.$queryRaw<
-      { id: string; commercialSnapshotFingerprint: string; version: number }[]
-    >`
-      SELECT "id", "commercialSnapshotFingerprint", "version"
-        FROM "order"
-       WHERE "id" = ${invoice.orderId}::uuid`;
-    const order = orderRows[0];
-    if (!order) throw new NotFoundError('order', 'ORDER_NOT_FOUND');
-
-    // ── 3/4/5. confirmed allocations + active provider-backed reservations,
-    //      computed ONCE under the Invoice lock above — then the frozen
-    //      pure formula, checked against the REQUEST TOTAL (not per-tender). ─
-    const confirmedRows = await tx.$queryRaw<{ total: bigint }[]>`
-      SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total
-        FROM "payment_allocation"
-       WHERE "invoiceId" = ${invoice.id}::uuid`;
-    const confirmedAmountMinor = confirmedRows[0]!.total;
+    // ── 3/4/5. the CANONICAL remaining receivable balance (invoice total −
+    //      allocations − advance applications − CreditNote AR reduction — task
+    //      3b.8 Integration Closure F1; the same figure the DB coverage backstop
+    //      enforces) + active provider-backed reservations, computed ONCE under
+    //      the Invoice lock above, checked against the REQUEST TOTAL (not
+    //      per-tender). A CreditNote/advance application can leave a prior
+    //      reservation larger than what is outstanding — availability floors at
+    //      0 (a clean 409 below), it never reaches the raw DB trigger. ───────
+    const balance = await loadInvoiceBalance(tx, {
+      tenantId: input.tenantId,
+      invoiceId: invoice.id,
+    });
 
     const reservedRows = await tx.$queryRaw<{ total: bigint }[]>`
       SELECT COALESCE(SUM(pa."amountMinor"), 0)::bigint AS total
@@ -239,9 +231,8 @@ export class PaymentCollectionRepository {
          AND NOT EXISTS (SELECT 1 FROM "payment" p WHERE p."sourceAttemptId" = pa."id")`;
     const activeReservedAmountMinor = reservedRows[0]!.total;
 
-    const availableToCollect = computeAvailableToCollect(
-      invoice.totalAmountMinor,
-      confirmedAmountMinor,
+    const availableToCollect = computeAvailableToCollectFromOutstanding(
+      balance.outstandingMinor,
       activeReservedAmountMinor,
     );
 

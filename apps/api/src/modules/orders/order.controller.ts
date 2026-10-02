@@ -19,6 +19,7 @@ import { OrderCreateFingerprintProvider } from './order-create-fingerprint.provi
 import type { OrderRow, OrderLineRow } from './order.repository.js';
 import { createOrderSchema, type CreateOrderDto } from './dto/create-order.dto.js';
 import { updateOrderSchema, type UpdateOrderDto } from './dto/update-order.dto.js';
+import { cancelOrderSchema, type CancelOrderDto } from './dto/cancel-order.dto.js';
 
 /**
  * Fastify's JSON serializer cannot encode a native `BigInt` — every
@@ -219,6 +220,58 @@ export class OrderController {
     assertUuid(id, 'order');
     const expectedVersion = requireIfMatch(parseIfMatch(ifMatch));
     const order = await this.orders.resume({ companyId, branchId, orderId: id, expectedVersion });
+    return serializeOrder(order);
+  }
+
+  /**
+   * Task 3b.8 Checkpoint C — both the no-charge and with-charge paths.
+   * `orders:cancel` is the frozen CANCELLATION COMMAND authority (never bare
+   * `orders:manage`, §5), enforced by the route decorator below —
+   * `STEP_UP_PERMISSIONS` does not include it, so `@NoStepUp()` here mirrors
+   * every other route in this controller's own explicit-intent style rather
+   * than relying on that omission implicitly (the no-charge path genuinely
+   * has no money-moving effect). The WITH-CHARGE path's OWN, DISTINCT
+   * financial-DOCUMENT authority (`cancellation_charges:issue`, owner
+   * decision, Checkpoint C blocker-resolution gate) plus step-up is checked
+   * MANUALLY inside `OrderRepository.cancelForBranchScoped` — via the SAME
+   * `PolicyEngine` the guard pipeline itself uses — only when
+   * `dto.cancellationCharge` is present, since one static route decorator
+   * cannot vary by request body content.
+   */
+  @Post(':id/cancel')
+  @HttpCode(200)
+  @RequirePermission('orders:cancel')
+  @NoStepUp()
+  @ScopedParam({ company: 'companyId', branch: 'branchId' })
+  async cancel(
+    @Param('companyId') companyId: string,
+    @Param('branchId') branchId: string,
+    @Param('id') id: string,
+    @Headers('if-match') ifMatch: string | undefined,
+    @Body(new ZodBody(cancelOrderSchema)) dto: CancelOrderDto,
+  ) {
+    assertUuid(companyId, 'company');
+    assertUuid(branchId, 'branch');
+    assertUuid(id, 'order');
+    const expectedVersion = requireIfMatch(parseIfMatch(ifMatch));
+    const order = await this.orders.cancel({
+      companyId,
+      branchId,
+      orderId: id,
+      expectedVersion,
+      reason: dto.reason,
+      ...(dto.cancellationCharge !== undefined
+        ? {
+            cancellationCharge: {
+              requestedAmountMinor: BigInt(dto.cancellationCharge.requestedAmountMinor),
+              reasonCode: dto.cancellationCharge.reasonCode,
+              ...(dto.cancellationCharge.accountingDate !== undefined
+                ? { accountingDate: dto.cancellationCharge.accountingDate }
+                : {}),
+            },
+          }
+        : {}),
+    });
     return serializeOrder(order);
   }
 }

@@ -9,13 +9,18 @@ import { currencyExponent, isKnownCurrency } from '@flower/money';
 import { isFiscalDate } from '@flower/shared-types';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { assertValidIanaTimezone, derivePostingDate } from '../accounting/posting-date.js';
+import type { ReceivableSourceType } from './receivable-balance.js';
+import { loadAdvanceBalances, loadReceivableBalances } from './receivable-balance.repository.js';
 
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
 
-/** The frozen 8-kind `CustomerAccountEntry.entryKind` vocabulary (Checkpoint
- *  A/D) — Checkpoint G resolves EVERY one of these, never silently skipping
- *  an unrecognized value (G14). */
+/** The closed `CustomerAccountEntry.entryKind` vocabulary — Checkpoint G
+ *  resolves EVERY one of these, never silently skipping an unrecognized value
+ *  (G14). The first 8 kinds are the original 3b.6 vocabulary, resolved exactly
+ *  as before; `CANCELLATION_CHARGE` / `CREDIT_NOTE` / `REFUND` were added by
+ *  task 3b.8 (migration 44) and `CANCELLATION_CHARGE_PAYMENT_APPLIED` by the
+ *  Integration Closure (migration 46) — all resolved here. */
 const KNOWN_ENTRY_KINDS = new Set([
   'INVOICE',
   'PAYMENT',
@@ -25,6 +30,10 @@ const KNOWN_ENTRY_KINDS = new Set([
   'ADVANCE_APPLIED',
   'OPENING_RECEIVABLE',
   'OPENING_ADVANCE',
+  'CANCELLATION_CHARGE',
+  'CREDIT_NOTE',
+  'REFUND',
+  'CANCELLATION_CHARGE_PAYMENT_APPLIED',
 ]);
 
 export interface ReadScopeInput {
@@ -95,9 +104,12 @@ export interface CustomerAccountSummary {
 
 export interface ReceivableRow {
   customerReceivableId: string;
-  sourceType: 'INVOICE' | 'OPENING';
+  sourceType: ReceivableSourceType;
   invoiceId: string | null;
   invoiceNumber: string | null;
+  /** `CANCELLATION_CHARGE` receivables only (the analog of `invoiceId`/`invoiceNumber`). */
+  cancellationChargeId: string | null;
+  cancellationChargeNumber: string | null;
   sourceDate: string;
   originalAmountMinor: bigint;
   paidByPaymentMinor: bigint;
@@ -114,10 +126,16 @@ export interface ReceivableRow {
 
 export interface AdvanceRow {
   customerAdvanceId: string;
-  sourceType: 'PAYMENT' | 'OPENING';
+  sourceType: 'PAYMENT' | 'OPENING' | 'CREDIT_NOTE';
   sourcePaymentId: string | null;
   originalAmountMinor: bigint;
+  /** Σ CustomerAdvanceApplication. */
   appliedAmountMinor: bigint;
+  /** Σ CustomerAdvanceRefundApplication (a completed Refund draining this advance). */
+  refundedAmountMinor: bigint;
+  /** Σ entitlement reservation of a PENDING provider RefundAttempt. */
+  reservedAmountMinor: bigint;
+  /** original − applied − refunded − reserved: what may be applied/refunded NOW. */
   availableAmountMinor: bigint;
   currencyCode: string;
   currencyExponent: number;
@@ -161,9 +179,15 @@ export interface StatementOpeningState {
  * is recomputed on each call from the frozen authoritative source rows
  * (`CustomerReceivable`/`CustomerAdvance`/`Payment`/`PaymentAllocation`/
  * `CustomerAdvanceApplication`/`CustomerReceivablePaymentApplication`/
- * `Invoice`) — `CustomerAccountEntry` is consulted ONLY as the chronology/
- * reference index for the statement (G1's frozen principle), never as a
- * source of Money. `CustomerOpeningBalanceInit` is NEVER read here — it has
+ * `Invoice` — and, task 3b.8 Integration Closure, `CancellationCharge`/
+ * `CreditNote`/`CustomerAdvanceRefundApplication`/`Refund`/PENDING
+ * `RefundAttempt` reservations) — `CustomerAccountEntry` is consulted ONLY as
+ * the chronology/reference index for the statement (G1's frozen principle),
+ * never as a source of Money. Receivable and advance balances are NEVER
+ * re-derived here: they come from the ONE canonical formula
+ * (`receivable-balance.ts` via `receivable-balance.repository.ts`) that FIFO
+ * receipt collection and CustomerAdvance application share, so the read model
+ * and the maintained projections cannot drift apart. `CustomerOpeningBalanceInit` is NEVER read here — it has
  * no application-readable grant at all (Checkpoint F Absolute Final Freeze
  * Gate) and carries no Money regardless.
  *
@@ -267,35 +291,28 @@ export class CustomerAccountReadRepository {
       branchId: string | null;
     },
   ): Promise<{ outstandingMinor: bigint; openCount: number }> {
-    const rows = await tx.$queryRaw<
-      { id: string; original: bigint; paidByPayment: bigint; paidByAdvance: bigint }[]
-    >`
-      SELECT cr."id" AS "id",
-             CASE WHEN cr."sourceType" = 'INVOICE' THEN i."totalAmountMinor" ELSE cr."openingAmountMinor" END AS "original",
-             CASE WHEN cr."sourceType" = 'INVOICE'
-               THEN COALESCE((SELECT SUM(pa."amountMinor") FROM "payment_allocation" pa WHERE pa."invoiceId" = cr."invoiceId"), 0)::bigint
-               ELSE COALESCE((SELECT SUM(crpa."amountMinor") FROM "customer_receivable_payment_application" crpa WHERE crpa."customerReceivableId" = cr."id"), 0)::bigint
-             END AS "paidByPayment",
-             COALESCE((SELECT SUM(caa."amountMinor") FROM "customer_advance_application" caa WHERE caa."customerReceivableId" = cr."id"), 0)::bigint AS "paidByAdvance"
-        FROM "customer_receivable" cr
-        LEFT JOIN "invoice" i ON i."id" = cr."invoiceId"
-       WHERE cr."tenantId" = ${input.tenantId}::uuid
-         AND cr."companyId" = ${input.companyId}::uuid
-         AND cr."customerCompanyAccountId" = ${input.customerCompanyAccountId}::uuid
-         AND (${input.branchId}::uuid IS NULL OR cr."branchId" = ${input.branchId}::uuid)`;
+    // The canonical per-receivable balance (INVOICE / OPENING /
+    // CANCELLATION_CHARGE, incl. a CreditNote's AR reduction) — never a local
+    // copy of the formula (task 3b.8 Integration Closure).
+    const rows = await loadReceivableBalances(tx, input);
     let outstandingMinor = 0n;
     let openCount = 0;
     for (const r of rows) {
-      const outstanding = r.original - r.paidByPayment - r.paidByAdvance;
-      if (outstanding > 0n) {
-        outstandingMinor += outstanding;
+      if (r.outstandingMinor > 0n) {
+        outstandingMinor += r.outstandingMinor;
         openCount += 1;
       }
     }
     return { outstandingMinor, openCount };
   }
 
-  private async sumAdvancesAvailable(
+  /** `availableMinor` = what may be applied/refunded NOW (net of PENDING
+   *  provider-refund reservations) — the headline figure. `bookedMinor` =
+   *  principal − applications − refund applications — exactly the advance's
+   *  contribution to the maintained `advanceBalanceMinor` projection (a PENDING
+   *  reservation does NOT move that projection), hence the ONLY figure that can
+   *  legitimately be reconciled against it. */
+  private async sumAdvances(
     tx: ScopedTx,
     input: {
       tenantId: string;
@@ -303,25 +320,19 @@ export class CustomerAccountReadRepository {
       customerCompanyAccountId: string;
       branchId: string | null;
     },
-  ): Promise<{ availableMinor: bigint; openCount: number }> {
-    const rows = await tx.$queryRaw<{ id: string; original: bigint; applied: bigint }[]>`
-      SELECT ca."id" AS "id", ca."amountMinor" AS "original",
-             COALESCE((SELECT SUM(caa."amountMinor") FROM "customer_advance_application" caa WHERE caa."customerAdvanceId" = ca."id"), 0)::bigint AS "applied"
-        FROM "customer_advance" ca
-       WHERE ca."tenantId" = ${input.tenantId}::uuid
-         AND ca."companyId" = ${input.companyId}::uuid
-         AND ca."customerCompanyAccountId" = ${input.customerCompanyAccountId}::uuid
-         AND (${input.branchId}::uuid IS NULL OR ca."branchId" = ${input.branchId}::uuid)`;
+  ): Promise<{ availableMinor: bigint; bookedMinor: bigint; openCount: number }> {
+    const rows = await loadAdvanceBalances(tx, input);
     let availableMinor = 0n;
+    let bookedMinor = 0n;
     let openCount = 0;
     for (const a of rows) {
-      const available = a.original - a.applied;
-      if (available > 0n) {
-        availableMinor += available;
+      if (a.bookedRemainingMinor > 0n) bookedMinor += a.bookedRemainingMinor;
+      if (a.availableMinor > 0n) {
+        availableMinor += a.availableMinor;
         openCount += 1;
       }
     }
-    return { availableMinor, openCount };
+    return { availableMinor, bookedMinor, openCount };
   }
 
   // ═══════════════════════════ G5/G6/G7/G8/G9 — summary ═══════════════════
@@ -335,7 +346,7 @@ export class CustomerAccountReadRepository {
       customerCompanyAccountId: account.customerCompanyAccountId,
       branchId: input.branchId,
     });
-    const branchAdvances = await this.sumAdvancesAvailable(tx, {
+    const branchAdvances = await this.sumAdvances(tx, {
       tenantId: input.tenantId,
       companyId: input.companyId,
       customerCompanyAccountId: account.customerCompanyAccountId,
@@ -361,7 +372,7 @@ export class CustomerAccountReadRepository {
       customerCompanyAccountId: account.customerCompanyAccountId,
       branchId: null,
     });
-    const companyAdvances = await this.sumAdvancesAvailable(tx, {
+    const companyAdvances = await this.sumAdvances(tx, {
       tenantId: input.tenantId,
       companyId: input.companyId,
       customerCompanyAccountId: account.customerCompanyAccountId,
@@ -397,7 +408,10 @@ export class CustomerAccountReadRepository {
         projectionIntegrity: {
           receivableProjectionMatches:
             companyReceivables.outstandingMinor === account.currentOutstandingMinor,
-          advanceProjectionMatches: companyAdvances.availableMinor === account.advanceBalanceMinor,
+          // booked (principal − applied − refunded), NOT the reservation-net
+          // `available` figure: the maintained projection never moves for a
+          // PENDING reservation (task 3b.8 Integration Closure).
+          advanceProjectionMatches: companyAdvances.bookedMinor === account.advanceBalanceMinor,
         },
       },
       asOf: new Date().toISOString(),
@@ -505,78 +519,57 @@ export class CustomerAccountReadRepository {
 
     // G's Absolute Final Freeze Gate (§9) — this is an OPEN-receivables
     // endpoint: only rows whose computed outstanding is > 0 may ever be
-    // returned. The filter must live INSIDE the SQL (a CTE), never applied
-    // to the JS array after fetching — otherwise a `LIMIT n+1` page could
-    // silently under-fill (skipping CLOSED rows without extending the scan)
-    // and `nextCursor` would be wrong.
-    const rows = await tx.$queryRaw<
-      {
-        id: string;
-        sourceType: string;
-        invoiceId: string | null;
-        invoiceNumber: string | null;
-        sourceDate: string;
-        original: bigint;
-        paidByPayment: bigint;
-        paidByAdvance: bigint;
-        currencyCode: string;
-        currencyExponent: number;
-        createdAt: Date;
-        openingEffectiveDate: string | null;
-        openingNote: string | null;
-      }[]
-    >`
-      WITH candidate AS (
-        SELECT cr."id" AS "id", cr."sourceType" AS "sourceType", cr."invoiceId" AS "invoiceId",
-               i."invoiceNumber" AS "invoiceNumber",
-               to_char(COALESCE(i."invoiceDate", cr."openingEffectiveDate"), 'YYYY-MM-DD') AS "sourceDate",
-               CASE WHEN cr."sourceType" = 'INVOICE' THEN i."totalAmountMinor" ELSE cr."openingAmountMinor" END AS "original",
-               CASE WHEN cr."sourceType" = 'INVOICE'
-                 THEN COALESCE((SELECT SUM(pa."amountMinor") FROM "payment_allocation" pa WHERE pa."invoiceId" = cr."invoiceId"), 0)::bigint
-                 ELSE COALESCE((SELECT SUM(crpa."amountMinor") FROM "customer_receivable_payment_application" crpa WHERE crpa."customerReceivableId" = cr."id"), 0)::bigint
-               END AS "paidByPayment",
-               COALESCE((SELECT SUM(caa."amountMinor") FROM "customer_advance_application" caa WHERE caa."customerReceivableId" = cr."id"), 0)::bigint AS "paidByAdvance",
-               COALESCE(i."currencyCode", cr."currencyCode") AS "currencyCode",
-               COALESCE(i."currencyExponent", cr."currencyExponent") AS "currencyExponent",
-               cr."createdAt" AS "createdAt",
-               to_char(cr."openingEffectiveDate", 'YYYY-MM-DD') AS "openingEffectiveDate",
-               cr."openingNote" AS "openingNote"
-          FROM "customer_receivable" cr
-          LEFT JOIN "invoice" i ON i."id" = cr."invoiceId"
-         WHERE cr."tenantId" = ${input.tenantId}::uuid
-           AND cr."companyId" = ${input.companyId}::uuid
-           AND cr."branchId" = ${input.branchId}::uuid
-           AND cr."customerCompanyAccountId" = ${account.customerCompanyAccountId}::uuid
-      )
-      SELECT * FROM candidate
-       WHERE ("original" - "paidByPayment" - "paidByAdvance") > 0
-         AND (${cursor}::uuid IS NULL OR "id" > ${cursor}::uuid)
-       ORDER BY "id" ASC
-       LIMIT ${limit + 1}`;
-
-    const hasMore = rows.length > limit;
-    const page = rows.slice(0, limit);
+    // returned, and the filter must be applied BEFORE pagination, never to an
+    // already-truncated page — otherwise a short page could silently
+    // under-fill (skipping CLOSED rows without extending the scan) and
+    // `nextCursor` would be wrong. Task 3b.8 Integration Closure: the figures
+    // now come from the ONE canonical balance loader (INVOICE / OPENING /
+    // CANCELLATION_CHARGE, incl. a CreditNote's AR reduction), which fetches
+    // EVERY receivable of this account+branch ordered by `id` (no SQL
+    // `LIMIT`); the `outstanding > 0` filter, the cursor and the `limit + 1`
+    // look-ahead are then applied in that order to the full ordered set, so a
+    // page can never under-fill. (`listUnappliedReceipts` below already
+    // paginates the same way; the set per customer+branch is small and
+    // bounded.)
+    const all = await loadReceivableBalances(tx, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      customerCompanyAccountId: account.customerCompanyAccountId,
+      branchId: input.branchId,
+    });
+    const cursorKey = cursor === null ? null : cursor.toLowerCase();
+    const open = all.filter(
+      (r) => r.outstandingMinor > 0n && (cursorKey === null || r.customerReceivableId > cursorKey),
+    );
+    const hasMore = open.length > limit;
+    const page = open.slice(0, limit);
 
     const data: ReceivableRow[] = page.map((r) => {
-      const outstanding = r.original - r.paidByPayment - r.paidByAdvance;
-      const sourceDateStr = r.sourceDate;
+      // every returned row is OPEN by construction (outstanding > 0 above) and
+      // always has a resolvable currency (invoice / charge / opening principal).
+      if (r.currencyCode === null || r.currencyExponent === null) {
+        throw new RangeError(
+          `CustomerReceivable ${r.customerReceivableId} has no resolvable currency`,
+        );
+      }
+      const sourceDateStr = r.sourceDate as string;
       return {
-        customerReceivableId: r.id,
-        sourceType: r.sourceType as 'INVOICE' | 'OPENING',
+        customerReceivableId: r.customerReceivableId,
+        sourceType: r.sourceType,
         invoiceId: r.invoiceId,
         invoiceNumber: r.invoiceNumber,
+        cancellationChargeId: r.cancellationChargeId,
+        cancellationChargeNumber: r.cancellationChargeNumber,
         sourceDate: sourceDateStr,
-        originalAmountMinor: r.original,
-        paidByPaymentMinor: r.paidByPayment,
-        paidByAdvanceMinor: r.paidByAdvance,
-        outstandingMinor: outstanding,
+        originalAmountMinor: r.originalMinor,
+        paidByPaymentMinor: r.paidByPaymentMinor,
+        paidByAdvanceMinor: r.paidByAdvanceMinor,
+        outstandingMinor: r.outstandingMinor,
         currencyCode: r.currencyCode,
         currencyExponent: r.currencyExponent,
         createdAt: r.createdAt,
         openingEffectiveDate: r.openingEffectiveDate,
         openingNote: r.openingNote,
-        // every returned row is OPEN by construction (the CTE's WHERE
-        // clause already excludes outstanding<=0) — ageDays always computes.
         // A future-dated basis (sourceDate > asOfDate) clamps to 0, never a
         // negative "overdue" count (G's Final Hardening §15 — no existing
         // future-age convention exists anywhere else in this codebase, so 0
@@ -585,7 +578,7 @@ export class CustomerAccountReadRepository {
       };
     });
 
-    return { data, nextCursor: hasMore ? (page.at(-1)?.id ?? null) : null };
+    return { data, nextCursor: hasMore ? (page.at(-1)?.customerReceivableId ?? null) : null };
   }
 
   // ═══════════════════════════ G11 — advances list ═════════════════════════
@@ -598,56 +591,39 @@ export class CustomerAccountReadRepository {
     const cursor = input.cursor ?? null;
     if (cursor !== null) assertUuidLike(cursor, 'cursor');
 
-    // G's Absolute Final Freeze Gate (§10) — open advances only: a fully
-    // consumed Advance (availableAmountMinor <= 0) is never returned. Same
-    // CTE-based filter-before-paginate reasoning as `listReceivables` above.
-    const rows = await tx.$queryRaw<
-      {
-        id: string;
-        sourceType: string;
-        sourcePaymentId: string | null;
-        original: bigint;
-        applied: bigint;
-        currencyCode: string;
-        currencyExponent: number;
-        openingEffectiveDate: string | null;
-        createdAt: Date;
-      }[]
-    >`
-      WITH candidate AS (
-        SELECT ca."id" AS "id", ca."sourceType" AS "sourceType", ca."sourcePaymentId" AS "sourcePaymentId",
-               ca."amountMinor" AS "original",
-               COALESCE((SELECT SUM(caa."amountMinor") FROM "customer_advance_application" caa WHERE caa."customerAdvanceId" = ca."id"), 0)::bigint AS "applied",
-               ca."currencyCode" AS "currencyCode", ca."currencyExponent" AS "currencyExponent",
-               to_char(ca."openingEffectiveDate", 'YYYY-MM-DD') AS "openingEffectiveDate",
-               ca."createdAt" AS "createdAt"
-          FROM "customer_advance" ca
-         WHERE ca."tenantId" = ${input.tenantId}::uuid
-           AND ca."companyId" = ${input.companyId}::uuid
-           AND ca."branchId" = ${input.branchId}::uuid
-           AND ca."customerCompanyAccountId" = ${account.customerCompanyAccountId}::uuid
-      )
-      SELECT * FROM candidate
-       WHERE ("original" - "applied") > 0
-         AND (${cursor}::uuid IS NULL OR "id" > ${cursor}::uuid)
-       ORDER BY "id" ASC
-       LIMIT ${limit + 1}`;
-
-    const hasMore = rows.length > limit;
-    const page = rows.slice(0, limit);
-    const data: AdvanceRow[] = page.map((r) => ({
-      customerAdvanceId: r.id,
-      sourceType: r.sourceType as 'PAYMENT' | 'OPENING',
-      sourcePaymentId: r.sourcePaymentId,
-      originalAmountMinor: r.original,
-      appliedAmountMinor: r.applied,
-      availableAmountMinor: r.original - r.applied,
-      currencyCode: r.currencyCode,
-      currencyExponent: r.currencyExponent,
-      openingEffectiveDate: r.openingEffectiveDate,
-      createdAt: r.createdAt,
+    // G's Absolute Final Freeze Gate (§10) — open advances only: an Advance
+    // with nothing available NOW (availableAmountMinor <= 0) is never
+    // returned. Same filter-before-paginate reasoning as `listReceivables`
+    // above. `available` is the canonical figure — principal less
+    // applications, refund applications AND PENDING provider-refund
+    // reservations (task 3b.8 Integration Closure).
+    const all = await loadAdvanceBalances(tx, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      customerCompanyAccountId: account.customerCompanyAccountId,
+      branchId: input.branchId,
+    });
+    const cursorKey = cursor === null ? null : cursor.toLowerCase();
+    const open = all.filter(
+      (a) => a.availableMinor > 0n && (cursorKey === null || a.customerAdvanceId > cursorKey),
+    );
+    const hasMore = open.length > limit;
+    const page = open.slice(0, limit);
+    const data: AdvanceRow[] = page.map((a) => ({
+      customerAdvanceId: a.customerAdvanceId,
+      sourceType: a.sourceType as AdvanceRow['sourceType'],
+      sourcePaymentId: a.sourcePaymentId,
+      originalAmountMinor: a.principalMinor,
+      appliedAmountMinor: a.appliedMinor,
+      refundedAmountMinor: a.refundedMinor,
+      reservedAmountMinor: a.reservedMinor,
+      availableAmountMinor: a.availableMinor,
+      currencyCode: a.currencyCode,
+      currencyExponent: a.currencyExponent,
+      openingEffectiveDate: a.openingEffectiveDate,
+      createdAt: a.createdAt,
     }));
-    return { data, nextCursor: hasMore ? (page.at(-1)?.id ?? null) : null };
+    return { data, nextCursor: hasMore ? (page.at(-1)?.customerAdvanceId ?? null) : null };
   }
 
   // ═══════════════════════════ G12 — unapplied receipts list ═══════════════
@@ -742,6 +718,8 @@ export class CustomerAccountReadRepository {
         refAdvanceId: string | null;
         refAdvanceAppId: string | null;
         refRecvPayAppId: string | null;
+        refCreditNoteId: string | null;
+        refRefundAppId: string | null;
       }[]
     >`
       SELECT
@@ -759,16 +737,31 @@ export class CustomerAccountReadRepository {
             -- application made weeks later must land on its own day.
             WHEN 'PAYMENT_ALLOCATION' THEN (alloc."createdAt" AT TIME ZONE ${tz})::date
             WHEN 'OPENING_RECEIVABLE_PAYMENT_APPLIED' THEN (rpa."createdAt" AT TIME ZONE ${tz})::date
+            WHEN 'CANCELLATION_CHARGE_PAYMENT_APPLIED' THEN (rpa."createdAt" AT TIME ZONE ${tz})::date
             WHEN 'ADVANCE' THEN (ca."createdAt" AT TIME ZONE ${tz})::date
             WHEN 'ADVANCE_APPLIED' THEN (aa."createdAt" AT TIME ZONE ${tz})::date
+            -- task 3b.8 Integration Closure — each new financial document
+            -- carries its OWN frozen civil accounting date (company timezone,
+            -- derived once at issuance); that is the statement date, never a
+            -- re-derivation from a timestamp.
+            WHEN 'CANCELLATION_CHARGE' THEN cc."accountingDate"
+            WHEN 'CREDIT_NOTE' THEN cn."accountingDate"
+            WHEN 'REFUND' THEN rf."accountingDate"
           END, 'YYYY-MM-DD'
         ) AS "financialDate",
-        COALESCE(pay."createdAt", alloc."createdAt", rpa."createdAt", ca."createdAt", aa."createdAt", i."createdAt", e."occurredAt") AS "tieTs",
+        COALESCE(pay."createdAt", alloc."createdAt", rpa."createdAt", ca."createdAt", aa."createdAt", i."createdAt", cc."createdAt", cn."createdAt", rfa."createdAt", e."occurredAt") AS "tieTs",
         CASE e."entryKind"
           WHEN 'INVOICE' THEN i."totalAmountMinor"
           WHEN 'OPENING_RECEIVABLE' THEN cr."openingAmountMinor"
+          -- a charge is a NEW receivable (+charge.total); a CreditNote REDUCES
+          -- receivables by its AR reduction only (the already-paid portion is
+          -- an immutable allocation/application + a CREDIT_NOTE advance, so it
+          -- is not a second receivable movement).
+          WHEN 'CANCELLATION_CHARGE' THEN cc."totalAmountMinor"
+          WHEN 'CREDIT_NOTE' THEN -cn."arReductionMinor"
           WHEN 'PAYMENT_ALLOCATION' THEN -alloc."amountMinor"
           WHEN 'OPENING_RECEIVABLE_PAYMENT_APPLIED' THEN -rpa."amountMinor"
+          WHEN 'CANCELLATION_CHARGE_PAYMENT_APPLIED' THEN -rpa."amountMinor"
           WHEN 'ADVANCE_APPLIED' THEN -aa."amountMinor"
           ELSE 0
         END AS "receivableEffect",
@@ -776,12 +769,15 @@ export class CustomerAccountReadRepository {
           WHEN 'ADVANCE' THEN ca."amountMinor"
           WHEN 'OPENING_ADVANCE' THEN ca."amountMinor"
           WHEN 'ADVANCE_APPLIED' THEN -aa."amountMinor"
+          -- a completed Refund drains the advance (cash leaves the business)
+          WHEN 'REFUND' THEN -rfa."amountMinor"
           ELSE 0
         END AS "advanceEffect",
         CASE e."entryKind"
           WHEN 'PAYMENT' THEN pay."amountMinor"
           WHEN 'PAYMENT_ALLOCATION' THEN -alloc."amountMinor"
           WHEN 'OPENING_RECEIVABLE_PAYMENT_APPLIED' THEN -rpa."amountMinor"
+          WHEN 'CANCELLATION_CHARGE_PAYMENT_APPLIED' THEN -rpa."amountMinor"
           ELSE 0
         END AS "unappliedEffect",
         e."customerReceivableId" AS "refReceivableId",
@@ -789,10 +785,16 @@ export class CustomerAccountReadRepository {
         e."paymentAllocationId" AS "refAllocationId",
         e."customerAdvanceId" AS "refAdvanceId",
         e."customerAdvanceApplicationId" AS "refAdvanceAppId",
-        e."customerReceivablePaymentApplicationId" AS "refRecvPayAppId"
+        e."customerReceivablePaymentApplicationId" AS "refRecvPayAppId",
+        e."creditNoteId" AS "refCreditNoteId",
+        e."customerAdvanceRefundApplicationId" AS "refRefundAppId"
       FROM "customer_account_entry" e
       LEFT JOIN "customer_receivable" cr ON cr."id" = e."customerReceivableId"
       LEFT JOIN "invoice" i ON i."id" = cr."invoiceId"
+      LEFT JOIN "cancellation_charge" cc ON cc."id" = cr."cancellationChargeId"
+      LEFT JOIN "credit_note" cn ON cn."id" = e."creditNoteId"
+      LEFT JOIN "customer_advance_refund_application" rfa ON rfa."id" = e."customerAdvanceRefundApplicationId"
+      LEFT JOIN "refund" rf ON rf."id" = rfa."refundId"
       LEFT JOIN "payment" pay ON pay."id" = e."paymentId"
       LEFT JOIN "payment_allocation" alloc ON alloc."id" = e."paymentAllocationId"
       LEFT JOIN "customer_receivable_payment_application" rpa ON rpa."id" = e."customerReceivablePaymentApplicationId"
@@ -843,6 +845,8 @@ export class CustomerAccountReadRepository {
         customerAdvanceId: r.refAdvanceId,
         customerAdvanceApplicationId: r.refAdvanceAppId,
         customerReceivablePaymentApplicationId: r.refRecvPayAppId,
+        creditNoteId: r.refCreditNoteId,
+        customerAdvanceRefundApplicationId: r.refRefundAppId,
       },
     }));
     const nextCursor = hasMore

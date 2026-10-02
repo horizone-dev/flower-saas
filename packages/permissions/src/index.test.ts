@@ -10,6 +10,9 @@ import {
   PHASE_3_7_TENANT_PERMISSIONS,
   PHASE_3_8_TENANT_PERMISSIONS,
   PHASE_3_9_TENANT_PERMISSIONS,
+  PHASE_3B_3_TENANT_PERMISSIONS,
+  PHASE_3B_8_TENANT_PERMISSIONS,
+  PHASE_3B_8_CHECKPOINT_C_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   MODULE_OF_PERMISSION,
   STEP_UP_PERMISSIONS,
@@ -241,5 +244,87 @@ describe('resolveEffectivePermissions', () => {
       entitledModules: null,
     });
     expect(eff.has('recipe:manage')).toBe(true);
+  });
+});
+
+describe('Task 3b.8 permission model (hard gate HG1)', () => {
+  const MONEY_AUTHORITIES = ['credit_notes:issue', 'refunds:execute', 'cancellation_charges:issue'];
+  const FROZEN_3B8 = [
+    'cancellation_charges:issue',
+    'credit_notes:issue',
+    'credit_notes:view',
+    'orders:cancel',
+    'refunds:execute',
+    'refunds:view',
+  ];
+
+  it('registers exactly the frozen 3b.8 keys — the cancellation COMMAND (orders:cancel) and the three document authorities are DISTINCT keys', () => {
+    for (const k of FROZEN_3B8) expect(isPermissionKey(k), k).toBe(true);
+    expect(PERMISSIONS.creditNotes).toEqual(['credit_notes:view', 'credit_notes:issue']);
+    expect(PERMISSIONS.refunds).toEqual(['refunds:view', 'refunds:execute']);
+    expect(PERMISSIONS.cancellationCharges).toEqual(['cancellation_charges:issue']);
+    expect([...PHASE_3B_8_TENANT_PERMISSIONS]).toEqual([
+      'credit_notes:view',
+      'credit_notes:issue',
+      'refunds:view',
+      'refunds:execute',
+    ]);
+    expect([...PHASE_3B_8_CHECKPOINT_C_TENANT_PERMISSIONS]).toEqual(['cancellation_charges:issue']);
+    expect([...PHASE_3B_3_TENANT_PERMISSIONS]).toContain('orders:cancel');
+    // no key of any 3b.8 family beyond the frozen set exists
+    const family = ALL_PERMISSIONS.filter((k) =>
+      /^(credit_notes|refunds|cancellation_charges):/.test(k),
+    );
+    expect([...family].sort()).toEqual(FROZEN_3B8.filter((k) => k !== 'orders:cancel'));
+  });
+
+  it('never registers the forbidden alternatives — no receivables:credit_note:issue, no payments:refund, no refunds:manage, no cancellation_charge:override', () => {
+    for (const forbidden of [
+      'receivables:credit_note:issue',
+      'receivables:credit_notes:issue',
+      'payments:refund',
+      'refunds:manage',
+      'refunds:issue',
+      'credit_notes:manage',
+      'cancellation_charge:override',
+      'cancellation_charges:manage',
+    ]) {
+      expect(isPermissionKey(forbidden), forbidden).toBe(false);
+    }
+    expect(ALL_PERMISSIONS.filter((k) => /credit_note/.test(k) && /issue/.test(k))).toEqual([
+      'credit_notes:issue',
+    ]);
+  });
+
+  it('step-up gates the three money-moving authorities and NOTHING else of the family (the no-money cancellation and the reserved views stay un-gated)', () => {
+    for (const k of MONEY_AUTHORITIES) expect(requiresStepUp(k), k).toBe(true);
+    for (const k of ['orders:cancel', 'credit_notes:view', 'refunds:view']) {
+      expect(requiresStepUp(k), k).toBe(false);
+    }
+    expect(
+      [...STEP_UP_PERMISSIONS]
+        .filter((k) => /^(credit_notes|refunds|cancellation_charges):/.test(k))
+        .sort(),
+    ).toEqual([...MONEY_AUTHORITIES].sort());
+  });
+
+  it('none of the 3b.8 keys is entitlement-gated — they are core financial authorities, never silently inert', () => {
+    for (const k of FROZEN_3B8) expect(MODULE_OF_PERMISSION[k], k).toBeUndefined();
+  });
+
+  it('a direct DENY wins over a role grant for every 3b.8 key', () => {
+    const eff = resolveEffectivePermissions({
+      rolePermissions: FROZEN_3B8,
+      directGrants: FROZEN_3B8.map((k) => [k, 'DENY'] as const),
+    });
+    for (const k of FROZEN_3B8) expect(eff.has(k), k).toBe(false);
+    // and a DENY of ONE does not disturb the others (independent axes)
+    const one = resolveEffectivePermissions({
+      rolePermissions: FROZEN_3B8,
+      directGrants: [['orders:cancel', 'DENY']],
+    });
+    expect(one.has('orders:cancel')).toBe(false);
+    for (const k of FROZEN_3B8.filter((x) => x !== 'orders:cancel'))
+      expect(one.has(k), k).toBe(true);
   });
 });

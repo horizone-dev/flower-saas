@@ -32,8 +32,24 @@ export interface CustomerReceivableOpeningSource {
   readonly branchId: string;
 }
 
+/**
+ * Task 3b.8 Checkpoint C — a receivable backed by a CancellationCharge
+ * financial document (migration 44's `customer_receivable_source_shape_chk` /
+ * `sourceType='CANCELLATION_CHARGE'`). `cancellationChargeId` present;
+ * principal is NEVER independently authored here — always read from the
+ * immutable `CancellationCharge.totalAmountMinor` by the caller (mirrors
+ * `CustomerReceivableInvoiceSource`'s own `Invoice.totalAmountMinor`
+ * precedent exactly).
+ */
+export interface CustomerReceivableCancellationChargeSource {
+  readonly sourceType: 'CANCELLATION_CHARGE';
+  readonly cancellationChargeId: string;
+}
+
 export type CustomerReceivableSource =
-  CustomerReceivableInvoiceSource | CustomerReceivableOpeningSource;
+  | CustomerReceivableInvoiceSource
+  | CustomerReceivableOpeningSource
+  | CustomerReceivableCancellationChargeSource;
 
 /**
  * Throws a plain `RangeError` for any shape that does not match its own
@@ -75,6 +91,20 @@ export function assertCustomerReceivableSourceShape(source: CustomerReceivableSo
       throw new RangeError(
         'CustomerReceivable(OPENING) requires a branchId — opening balances are branch-scoped, ' +
           'never ambiguous/null (3b.6 architecture-freeze)',
+      );
+    }
+    return;
+  }
+  if (source.sourceType === 'CANCELLATION_CHARGE') {
+    if (!source.cancellationChargeId) {
+      throw new RangeError(
+        'CustomerReceivable(CANCELLATION_CHARGE) requires a non-empty cancellationChargeId',
+      );
+    }
+    if ('invoiceId' in source || 'originalAmountMinor' in source) {
+      throw new RangeError(
+        'CustomerReceivable(CANCELLATION_CHARGE) must never carry an invoiceId or independently ' +
+          'author a principal amount — it is always derived from CancellationCharge.totalAmountMinor',
       );
     }
     return;

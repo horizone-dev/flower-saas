@@ -21,6 +21,8 @@ import {
   PHASE_3B_3_TENANT_PERMISSIONS,
   PHASE_3B_6_TENANT_PERMISSIONS,
   PHASE_3B_7_TENANT_PERMISSIONS,
+  PHASE_3B_8_TENANT_PERMISSIONS,
+  PHASE_3B_8_CHECKPOINT_C_TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
 } from '@flower/permissions';
 import pg from 'pg';
@@ -77,6 +79,13 @@ describe('cross-tenant isolation probe suite', () => {
     settlementCredId: '',
     settlementBatchId: '',
     settlementLineId: '',
+    // task 3b.8 hard gate — genuinely actionable financial targets
+    ccaId: '',
+    cancelOrderId: '',
+    cancelOrderVersion: 0,
+    chargeOrderId: '',
+    chargeOrderVersion: 0,
+    refundAdvanceId: '',
   };
   const B = { tenantId: '', companyId: '', branchId: '', ownerId: '' };
 
@@ -89,6 +98,10 @@ describe('cross-tenant isolation probe suite', () => {
   let ownerBReceivablesTok: string; // tenant B, task 3b.6 receivables:* permissions
   let ownerBSettlementsTok: string; // tenant B, task 3b.7 settlements:* permissions
   let branchUserATok: string; // tenant A, scoped to branch A1 only
+  let ownerA3b8Tok: string; // tenant A, the 3b.8 financial authorities (orders:cancel + credit_notes/charges/refunds)
+  let ownerB3b8Tok: string; // tenant B, the SAME authorities + a fresh step-up
+  let branch2User3b8Tok: string; // tenant A, the same authorities, scoped to branch A2 ONLY
+  let branch2PosUser3b8Tok: string; // …the same, with a POS terminal id bound onto the A2-only session
 
   beforeAll(async () => {
     stack = await startTestStack({ services: ['postgres', 'redis'] });
@@ -318,6 +331,51 @@ describe('cross-tenant isolation probe suite', () => {
       permissions: [...PHASE_3B_7_TENANT_PERMISSIONS],
     });
 
+    // task 3b.8 hard gate — the cancellation COMMAND + the three financial-document authorities, every one a
+    // genuine holder (and `mint()` always issues a fresh step-up), so a denial below is REAL scoping, never a
+    // coincidental missing permission.
+    const FINANCIAL_3B8 = [
+      'orders:view',
+      'orders:manage',
+      ...PHASE_3B_8_TENANT_PERMISSIONS,
+      ...PHASE_3B_8_CHECKPOINT_C_TENANT_PERMISSIONS,
+      'orders:cancel',
+      'receivables:view',
+    ];
+    ownerA3b8Tok = await mint('probe-owner-a-3b8', {
+      realm: 'tenant',
+      tenantId: A.tenantId,
+      userId: A.ownerId,
+      accountType: 'OWNER',
+      permissions: FINANCIAL_3B8,
+    });
+    ownerB3b8Tok = await mint('probe-owner-b-3b8', {
+      realm: 'tenant',
+      tenantId: B.tenantId,
+      userId: B.ownerId,
+      accountType: 'OWNER',
+      permissions: FINANCIAL_3B8,
+    });
+    branch2User3b8Tok = await mint('probe-bu2-3b8', {
+      realm: 'tenant',
+      tenantId: A.tenantId,
+      userId: '00000000-0000-7000-8000-0000000c00aa',
+      accountType: 'USER',
+      permissions: FINANCIAL_3B8,
+      branchScope: [A.branch2Id],
+      companyScope: [A.companyId],
+    });
+    branch2PosUser3b8Tok = await mint('probe-bu2-pos-3b8', {
+      realm: 'tenant',
+      tenantId: A.tenantId,
+      userId: '00000000-0000-7000-8000-0000000c00aa',
+      accountType: 'USER',
+      permissions: FINANCIAL_3B8,
+      branchScope: [A.branch2Id],
+      companyScope: [A.companyId],
+      posTerminalId: '00000000-0000-7000-8000-0000000c0f01',
+    });
+
     // seed a couple of A-owned resources to probe for
     A.roleId = (
       await send('POST', `/v1/platform/tenants/${A.tenantId}/roles`, platformTok, {
@@ -484,6 +542,155 @@ describe('cross-tenant isolation probe suite', () => {
            VALUES (uuidv7(),$1,$2,$3,$4,false,now())`,
           [A.tenantId, A.companyId, A.branchId, A.variantId],
         );
+
+        // ── task 3b.8 hard gate — A-owned, GENUINELY ACTIONABLE financial targets: a posted-ready company
+        //    (period + timezone + fee tax category), two invoiced customer orders (one to cancel, one to cancel
+        //    WITH a charge) and a CREDIT_NOTE advance with its full provenance chain (to refund). Raw inserts —
+        //    these are fixtures, not the code under test. ──────────────────────────────────────────────────
+        await c2.query(
+          `UPDATE company SET "accountingTimezone" = 'Asia/Dubai', "cancellationFeeTaxCategoryKey" = 'STANDARD' WHERE id = $1`,
+          [A.companyId],
+        );
+        await c2.query(
+          `INSERT INTO accounting_period (id,"tenantId","companyId","startDate","endDate",status,version,"updatedAt")
+           VALUES (uuidv7(),$1,$2,'2020-01-01','2029-12-31','OPEN',1,now())`,
+          [A.tenantId, A.companyId],
+        );
+        A.ccaId = (
+          await c2.query(
+            `SELECT id FROM customer_company_account WHERE "customerId" = $1 AND "companyId" = $2`,
+            [A.customerId, A.companyId],
+          )
+        ).rows[0].id;
+        const invoicedOrder = async (
+          num: number,
+        ): Promise<{ orderId: string; version: number; invoiceId: string; lineId: string }> => {
+          const o = (
+            await c2.query(
+              `INSERT INTO "order"
+                 (id,"tenantId","companyId","originBranchId","fulfillingBranchId","customerId",kind,status,
+                  "currencyCode","currencyExponent","commercialSnapshotFingerprint",
+                  "commercialSnapshotFingerprintVersion","taxPriceMode","taxRoundingScope","taxRoundingMode",
+                  "orderNumber","updatedAt")
+               VALUES (uuidv7(),$1,$2,$3,$3,$4,'WALK_IN','CONFIRMED','AED',2,$5,2,'TAX_EXCLUSIVE','LINE','HALF_UP',$6,now())
+               RETURNING id, version`,
+              [
+                A.tenantId,
+                A.companyId,
+                A.branchId,
+                A.customerId,
+                `probe-3b8-fp-${num}`,
+                `ORD-9100${num}`,
+              ],
+            )
+          ).rows[0];
+          const lineId = (
+            await c2.query(
+              `INSERT INTO order_line
+                 (id,"tenantId","companyId","orderId","linePosition","productId","variantId",quantity,
+                  "unitPriceAmountMinor","unitPriceCurrencyCode","unitPriceCurrencyExponent",
+                  "priceTaxMode","roundingScope","roundingMode","lineTaxAmountMinor",
+                  "resolutionSource","selectedUomCode","uomDisplayLabelSnapshot","baseUomCode",
+                  "conversionNumerator","conversionDenominator","productNameEnSnapshot","variantNameEnSnapshot","updatedAt")
+               VALUES (uuidv7(),$1,$2,$3,1,$4,$5,'1.0000',1000,'AED',2,
+                       'TAX_EXCLUSIVE','LINE','HALF_UP',0,
+                       'NONE','piece','Piece','piece',1,1,'Probe Product','Probe Variant',now())
+               RETURNING id`,
+              [A.tenantId, A.companyId, o.id, A.productId, A.variantId],
+            )
+          ).rows[0].id;
+          const invoiceId = (
+            await c2.query(
+              `INSERT INTO invoice
+                 (id,"tenantId","companyId","branchId","orderId","invoiceNumber","issuedAt","invoiceDate",
+                  "currencyCode","currencyExponent","subtotalAmountMinor","documentDiscountAmountMinor",
+                  "taxTotalAmountMinor","totalAmountMinor")
+               VALUES (uuidv7(),$1,$2,$3,$4,$5,now(),CURRENT_DATE,'AED',2,1000,0,0,1000)
+               RETURNING id`,
+              [A.tenantId, A.companyId, A.branchId, o.id, `INV-9100${num}`],
+            )
+          ).rows[0].id;
+          return { orderId: o.id, version: o.version, invoiceId, lineId };
+        };
+        const cancelTarget = await invoicedOrder(1);
+        const chargeTarget = await invoicedOrder(2);
+        for (const t of [cancelTarget, chargeTarget]) {
+          await c2.query(
+            `INSERT INTO customer_receivable (id,"tenantId","companyId","branchId","customerCompanyAccountId","sourceType","invoiceId","creditAuthorized")
+             VALUES (uuidv7(),$1,$2,$3,$4,'INVOICE',$5,true)`,
+            [A.tenantId, A.companyId, A.branchId, A.ccaId, t.invoiceId],
+          );
+        }
+        A.cancelOrderId = cancelTarget.orderId;
+        A.cancelOrderVersion = cancelTarget.version;
+        A.chargeOrderId = chargeTarget.orderId;
+        A.chargeOrderVersion = chargeTarget.version;
+
+        // the refund chain: a PAID invoice -> Payment + allocation -> CreditNote releasing it -> a CREDIT_NOTE advance
+        const paid = await invoicedOrder(3);
+        const attemptId = (
+          await c2.query(
+            `INSERT INTO payment_attempt
+               (id,"tenantId","companyId","branchId","orderId","targetInvoiceId","receiptPurpose",method,"amountMinor",
+                "currencyCode","currencyExponent",state,"orderCommercialSnapshotFingerprintAtCreation",
+                "orderVersionAtCreation","idempotencyKey","updatedAt")
+             VALUES (uuidv7(),$1,$2,$3,$4,$5,'INVOICE_COLLECTION','BANK_TRANSFER',1000,'AED',2,'CAPTURED','fp',1,'probe-3b8-attempt-1',now())
+             RETURNING id`,
+            [A.tenantId, A.companyId, A.branchId, paid.orderId, paid.invoiceId],
+          )
+        ).rows[0].id;
+        const paymentId = (
+          await c2.query(
+            `INSERT INTO payment (id,"tenantId","companyId","branchId","sourceAttemptId",method,"amountMinor","currencyCode","currencyExponent")
+             VALUES (uuidv7(),$1,$2,$3,$4,'BANK_TRANSFER',1000,'AED',2) RETURNING id`,
+            [A.tenantId, A.companyId, A.branchId, attemptId],
+          )
+        ).rows[0].id;
+        const allocationId = (
+          await c2.query(
+            `INSERT INTO payment_allocation (id,"tenantId","companyId","branchId","paymentId","invoiceId","amountMinor","currencyCode","currencyExponent")
+             VALUES (uuidv7(),$1,$2,$3,$4,$5,1000,'AED',2) RETURNING id`,
+            [A.tenantId, A.companyId, A.branchId, paymentId, paid.invoiceId],
+          )
+        ).rows[0].id;
+        A.refundAdvanceId = crypto.randomUUID();
+        const cnId = crypto.randomUUID();
+        await c2.query('BEGIN');
+        await c2.query(
+          `INSERT INTO credit_note
+             (id,"tenantId","companyId","branchId","invoiceId","creditNoteNumber","issuedAt","accountingDate",
+              "currencyCode","currencyExponent","reasonCode","subtotalAmountMinor","taxTotalAmountMinor",
+              "totalAmountMinor","arReductionMinor","advanceExcessMinor")
+           VALUES ($1,$2,$3,$4,$5,'CN-PROBE-1',now(),CURRENT_DATE,'AED',2,'CUSTOMER_REQUEST',1000,0,1000,0,1000)`,
+          [cnId, A.tenantId, A.companyId, A.branchId, paid.invoiceId],
+        );
+        await c2.query(
+          `INSERT INTO credit_note_line
+             (id,"tenantId","companyId","creditNoteId","orderLineId","quantityCredited","grossCreditedMinor",
+              "discountCreditedMinor","documentDiscountShareCreditedMinor","netAfterDocumentDiscountCreditedMinor",
+              "taxCreditedMinor","lineTotalCreditedMinor","currencyCode","currencyExponent")
+           VALUES (uuidv7(),$1,$2,$3,$4,'1.0000',1000,0,0,1000,0,1000,'AED',2)`,
+          [A.tenantId, A.companyId, cnId, paid.lineId],
+        );
+        await c2.query(
+          `INSERT INTO customer_advance (id,"tenantId","companyId","branchId","customerCompanyAccountId","sourceType","amountMinor","currencyCode","currencyExponent")
+           VALUES ($1,$2,$3,$4,$5,'CREDIT_NOTE',1000,'AED',2)`,
+          [A.refundAdvanceId, A.tenantId, A.companyId, A.branchId, A.ccaId],
+        );
+        await c2.query(
+          `INSERT INTO credit_note_coverage_release
+             (id,"tenantId","companyId","branchId","creditNoteId","sourceKind","sourcePaymentAllocationId","sourcePaymentId",
+              "releasedAmountMinor","currencyCode","currencyExponent","customerAdvanceId")
+           VALUES (uuidv7(),$1,$2,$3,$4,'PAYMENT_ALLOCATION',$5,$6,1000,'AED',2,$7)`,
+          [A.tenantId, A.companyId, A.branchId, cnId, allocationId, paymentId, A.refundAdvanceId],
+        );
+        await c2.query('COMMIT');
+        // the maintained projections the real flows would have written: two UNPAID 1000 invoices owed,
+        // 1000 of CREDIT_NOTE advance held
+        await c2.query(
+          `UPDATE customer_company_account SET "currentOutstandingMinor" = 2000, "advanceBalanceMinor" = 1000 WHERE id = $1`,
+          [A.ccaId],
+        );
       } finally {
         await c2.end();
       }
@@ -557,6 +764,35 @@ describe('cross-tenant isolation probe suite', () => {
     });
     expect(res.statusCode).toBe(201);
     return res.json().tenantId as string;
+  }
+
+  /** a snapshot of everything the 3b.8 financial routes could change for tenant A's probe targets */
+  async function threeB8State(): Promise<Record<string, unknown>> {
+    const c = new pg.Client({ connectionString: stack.postgres.url });
+    await c.connect();
+    try {
+      const orders = (
+        await c.query(
+          `SELECT id, status, version FROM "order" WHERE id = ANY($1::uuid[]) ORDER BY id`,
+          [[A.cancelOrderId, A.chargeOrderId]],
+        )
+      ).rows;
+      const counts = (
+        await c.query(
+          `SELECT (SELECT count(*) FROM credit_note WHERE "tenantId" = $1)::text AS cn,
+                  (SELECT count(*) FROM cancellation_charge WHERE "tenantId" = $1)::text AS cc,
+                  (SELECT count(*) FROM refund WHERE "tenantId" = $1)::text AS refunds,
+                  (SELECT count(*) FROM customer_advance_refund_application WHERE "tenantId" = $1)::text AS apps,
+                  (SELECT count(*) FROM customer_advance WHERE "tenantId" = $1)::text AS advances,
+                  (SELECT count(*) FROM journal_entry WHERE "tenantId" = $1)::text AS journals,
+                  (SELECT count(*) FROM audit_log WHERE "tenantId" = $1)::text AS audits`,
+          [A.tenantId],
+        )
+      ).rows[0];
+      return { orders, counts };
+    } finally {
+      await c.end();
+    }
   }
 
   const send = (
@@ -1787,8 +2023,67 @@ describe('cross-tenant isolation probe suite', () => {
           { 'if-match': '1' },
         ),
       },
+
+      // ── task 3b.8 hard gate — the financial routes. ownerB holds EVERY authority (+ a fresh step-up) and
+      //    attacks A's REAL, actionable invoiced orders / CREDIT_NOTE advance: denied (403/404), never acted on. ──
+      {
+        name: "POST cancel (post-invoice) A's invoiced order as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.cancelOrderId}/cancel`,
+          ownerB3b8Tok,
+          { reason: 'cross-tenant probe' },
+          { 'if-match': String(A.cancelOrderVersion) },
+        ),
+      },
+      {
+        name: "POST cancel WITH a charge on A's invoiced order as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.chargeOrderId}/cancel`,
+          ownerB3b8Tok,
+          {
+            reason: 'cross-tenant probe',
+            cancellationCharge: { requestedAmountMinor: '1000', reasonCode: 'CUSTOMER_REQUEST' },
+          },
+          { 'if-match': String(A.chargeOrderVersion) },
+        ),
+      },
+      {
+        name: "POST CASH refund of A's CREDIT_NOTE advance as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/advances/${A.refundAdvanceId}/refunds`,
+          ownerB3b8Tok,
+          { requestedAmountMinor: '100', method: 'CASH', reasonCode: 'CUSTOMER_REQUEST' },
+          { 'idempotency-key': 'probe-3b8-refund-cash-0001' },
+        ),
+      },
+      {
+        name: "POST BANK_TRANSFER refund of A's CREDIT_NOTE advance as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'POST',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/advances/${A.refundAdvanceId}/refunds`,
+          ownerB3b8Tok,
+          { requestedAmountMinor: '100', method: 'BANK_TRANSFER', reasonCode: 'CUSTOMER_REQUEST' },
+          { 'idempotency-key': 'probe-3b8-refund-bank-0001' },
+        ),
+      },
     ];
+    const before3b8 = await threeB8State();
     assertNoLeaks(await runIsolationProbes(cases));
+    // …and the 3b.8 attacks above changed NOTHING of A's: orders, credit notes, charges, refunds
+    expect(await threeB8State(), 'tenant B mutated tenant A 3b.8 financial state').toEqual(
+      before3b8,
+    );
 
     // positive control — the cross-tenant 403/404 above is real scoping, not a
     // route that denies everyone: ownerA resolves A's own company profile
@@ -1950,6 +2245,115 @@ describe('cross-tenant isolation probe suite', () => {
     assertNoLeaks(await runIsolationProbes(cases));
   });
 
+  // ══════════ task 3b.8 hard gate — a branch-scoped holder of EVERY financial authority cannot cross branch ══════════
+  it('3b.8 branch axis: an A2-only user holding every cancel / credit-note / charge / refund authority cannot act on A1 resources — through A1 URLs, through its OWN branch URL carrying A1 ids, or with a POS terminal id bound', async () => {
+    const CANCEL_BODY = { reason: 'cross-branch probe' };
+    const CHARGE_BODY = {
+      reason: 'cross-branch probe',
+      cancellationCharge: { requestedAmountMinor: '1000', reasonCode: 'CUSTOMER_REQUEST' },
+    };
+    const refundBody = (method: 'CASH' | 'BANK_TRANSFER') => ({
+      requestedAmountMinor: '100',
+      method,
+      reasonCode: 'CUSTOMER_REQUEST',
+    });
+    const cases: IsolationProbeCase[] = [];
+    let n = 0;
+    for (const [who, tok] of [
+      ['A2-only user', branch2User3b8Tok],
+      ['A2-only user with a POS terminal id bound', branch2PosUser3b8Tok],
+    ] as const) {
+      for (const [where, branch] of [
+        ['A1 URL (the victim branch)', A.branchId],
+        ['its OWN A2 URL carrying A1 ids', A.branch2Id],
+      ] as const) {
+        const base = `/v1/companies/${A.companyId}/branches/${branch}`;
+        cases.push(
+          {
+            name: `cancel A1 order as ${who} via ${where}`,
+            axis: 'branch',
+            expectDenied: [403, 404],
+            attempt: asStatus(
+              'POST',
+              `${base}/orders/${A.cancelOrderId}/cancel`,
+              tok,
+              CANCEL_BODY,
+              {
+                'if-match': String(A.cancelOrderVersion),
+              },
+            ),
+          },
+          {
+            name: `cancel+charge A1 order as ${who} via ${where}`,
+            axis: 'branch',
+            expectDenied: [403, 404],
+            attempt: asStatus(
+              'POST',
+              `${base}/orders/${A.chargeOrderId}/cancel`,
+              tok,
+              CHARGE_BODY,
+              {
+                'if-match': String(A.chargeOrderVersion),
+              },
+            ),
+          },
+          ...(['CASH', 'BANK_TRANSFER'] as const).map((method) => ({
+            name: `${method} refund of A1 advance as ${who} via ${where}`,
+            axis: 'branch' as const,
+            expectDenied: [403, 404],
+            attempt: asStatus(
+              'POST',
+              `${base}/customers/${A.customerId}/advances/${A.refundAdvanceId}/refunds`,
+              tok,
+              refundBody(method),
+              { 'idempotency-key': `probe-3b8-branch-${++n}` },
+            ),
+          })),
+        );
+      }
+    }
+    const before = await threeB8State();
+    assertNoLeaks(await runIsolationProbes(cases));
+    expect(await threeB8State(), 'a sibling-branch user mutated branch A1 financial state').toEqual(
+      before,
+    );
+  });
+
+  it("3b.8 positive control — the probe targets are GENUINELY actionable: the owning tenant's owner cancels, cancels with a charge, and refunds (CASH + BANK) them end to end", async () => {
+    const cancel = await send(
+      'POST',
+      `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.cancelOrderId}/cancel`,
+      ownerA3b8Tok,
+      { reason: 'positive control' },
+      { 'if-match': String(A.cancelOrderVersion) },
+    );
+    expect(cancel.statusCode, cancel.payload).toBe(200);
+    const charge = await send(
+      'POST',
+      `/v1/companies/${A.companyId}/branches/${A.branchId}/orders/${A.chargeOrderId}/cancel`,
+      ownerA3b8Tok,
+      {
+        reason: 'positive control',
+        cancellationCharge: { requestedAmountMinor: '1000', reasonCode: 'CUSTOMER_REQUEST' },
+      },
+      { 'if-match': String(A.chargeOrderVersion) },
+    );
+    expect(charge.statusCode, charge.payload).toBe(200);
+    for (const [method, key] of [
+      ['CASH', 'probe-3b8-pc-cash'],
+      ['BANK_TRANSFER', 'probe-3b8-pc-bank'],
+    ] as const) {
+      const refund = await send(
+        'POST',
+        `/v1/companies/${A.companyId}/branches/${A.branchId}/customers/${A.customerId}/advances/${A.refundAdvanceId}/refunds`,
+        ownerA3b8Tok,
+        { requestedAmountMinor: '100', method, reasonCode: 'CUSTOMER_REQUEST' },
+        { 'idempotency-key': key },
+      );
+      expect(refund.statusCode, refund.payload).toBe(201);
+    }
+  });
+
   // ══════════════════ POS is NOT an isolation boundary (G4) ═══════════════════
   it('a POS-bound session reads its branch exactly as the same-branch non-POS session', async () => {
     const posTok = await mint('probe-pos-a1', {
@@ -2020,6 +2424,9 @@ describe('cross-tenant isolation probe suite', () => {
       '/v1/customers',
       // task 3b.3 — probed above (tenant B cannot create/read/patch/hold/
       // resume tenant A's WALK_IN order, branch-nested company+branch scope).
+      // task 3b.8 hard gate — the cancel route is now ALSO probed explicitly
+      // (post-invoice cancel, cancel WITH a charge: tenant axis + branch axis,
+      // against real actionable invoiced orders, with a positive control).
       '/v1/companies/:companyId/branches/:branchId/orders',
       // task 3b.3 Checkpoint C — probed above (tenant B cannot read tenant
       // A's issued Invoice, same branch-nested scope rules).
@@ -2031,6 +2438,9 @@ describe('cross-tenant isolation probe suite', () => {
       // receivables/advances/unapplied-receipts/statement — all against a
       // REAL existing A-owned customer, never a coincidental 404).
       '/v1/companies/:companyId/branches/:branchId/customers',
+      // task 3b.8 hard gate — `…/advances/:advanceId/refunds` (CASH + BANK_TRANSFER)
+      // is probed explicitly on the tenant axis AND the branch axis against a real
+      // CREDIT_NOTE advance, with a positive control.
       // task 3b.7 — probed above (tenant B, holding the full settlements:*
       // owner permission tier with a fresh step-up, cannot create/read/edit/
       // add-line/import/match/unmatch/finalize tenant A's real DRAFT

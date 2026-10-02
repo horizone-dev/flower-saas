@@ -52,8 +52,16 @@ export interface ApplyOpeningApplicationEffectsInput {
   amountMinor: bigint;
   currencyCode: string;
   currencyExponent: number;
+  /** Task 3b.8 Integration Closure — which NON-INVOICE receivable this
+   *  application settles. Defaults to `OPENING` (every pre-3b.8 caller). */
+  receivableSourceType?: NonInvoiceReceivableSourceType;
   actorUserId?: string | null;
 }
+
+/** The receivable source types a `CustomerReceivablePaymentApplication` may
+ *  target (DB-enforced, migration `20261007120000`): an INVOICE receivable is
+ *  settled through `PaymentAllocation`, never this table. */
+export type NonInvoiceReceivableSourceType = 'OPENING' | 'CANCELLATION_CHARGE';
 
 export interface ApplyOpeningApplicationEffectsResult {
   applicationId: string;
@@ -222,12 +230,24 @@ export class CustomerReceiptEffectsRepository {
   }
 
   /**
-   * The Opening-Receivable-origin leg (D6/D24) — the new source-of-truth
-   * addition. Creates the `CustomerReceivablePaymentApplication` row itself
+   * The NON-INVOICE-receivable-origin leg (D6/D24) — the source-of-truth
+   * addition for a Payment applied directly to a receivable that has no
+   * Invoice. Creates the `CustomerReceivablePaymentApplication` row itself
    * (no existing producer ever creates one), then the matching chronology
    * entry, projection reduction, and GL journal. No CustomerAdvance is ever
    * created on this path (frozen: a direct AR collection is never
    * misclassified as a customer liability).
+   *
+   * Task 3b.8 Integration Closure — generalized from OPENING-only to OPENING +
+   * CANCELLATION_CHARGE (`input.receivableSourceType`, default `OPENING`): a
+   * cancellation-charge receivable is an ordinary AR receivable, settled by
+   * the SAME application row / projection decrement / GL shape — there is
+   * deliberately NO separate "charge payment" subsystem. The chronology entry
+   * kind carries the truthful target: `CANCELLATION_CHARGE_PAYMENT_APPLIED` for
+   * a charge, while the legacy `OPENING_RECEIVABLE_PAYMENT_APPLIED` stays
+   * FROZEN, unchanged, for opening-receivable history (the DB trigger rejects
+   * either kind against the wrong target). The GL `sourceKind` and the audit
+   * action are likewise source-specific.
    */
   async applyOpeningApplicationEffectsInTx(
     tx: ScopedTx,
@@ -250,7 +270,11 @@ export class CustomerReceiptEffectsRepository {
       },
     });
 
-    assertCustomerAccountEntryReferenceShape('OPENING_RECEIVABLE_PAYMENT_APPLIED', {
+    const isCharge = input.receivableSourceType === 'CANCELLATION_CHARGE';
+    const entryKind = isCharge
+      ? 'CANCELLATION_CHARGE_PAYMENT_APPLIED'
+      : 'OPENING_RECEIVABLE_PAYMENT_APPLIED';
+    assertCustomerAccountEntryReferenceShape(entryKind, {
       customerReceivablePaymentApplicationId: application.id,
     });
     await tx.customerAccountEntry.create({
@@ -259,7 +283,7 @@ export class CustomerReceiptEffectsRepository {
         companyId: input.companyId,
         branchId: input.branchId,
         customerCompanyAccountId: input.customerCompanyAccountId,
-        entryKind: 'OPENING_RECEIVABLE_PAYMENT_APPLIED',
+        entryKind,
         customerReceivablePaymentApplicationId: application.id,
       },
     });
@@ -273,7 +297,9 @@ export class CustomerReceiptEffectsRepository {
       tenantId: input.tenantId,
       companyId: input.companyId,
       branchId: input.branchId,
-      sourceKind: 'opening_receivable_payment_application',
+      sourceKind: isCharge
+        ? 'cancellation_charge_payment_application'
+        : 'opening_receivable_payment_application',
       sourceId: application.id,
       lines: [
         {
@@ -291,7 +317,9 @@ export class CustomerReceiptEffectsRepository {
     });
 
     await this.audit.record(tx, {
-      action: 'receivable.opening_payment_applied',
+      action: isCharge
+        ? 'receivable.cancellation_charge_payment_applied'
+        : 'receivable.opening_payment_applied',
       resourceType: 'customer_receivable_payment_application',
       resourceId: application.id,
       tenantId: input.tenantId,

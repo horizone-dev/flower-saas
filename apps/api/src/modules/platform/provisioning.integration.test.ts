@@ -239,6 +239,89 @@ describe('tenant provisioning + lifecycle + impersonation (integration)', () => 
     }
   });
 
+  // Task 3b.8 Checkpoint C — a fresh tenant must receive the EXACT SAME
+  // `orders:*` role matrix an EXISTING tenant already has via migration
+  // `20260920130000_orders_permissions`'s own frozen backfill (discovered
+  // missing from `SYSTEM_ROLE_TEMPLATES` and corrected in this checkpoint —
+  // provisioning reads that same array directly), plus the `3b.8 Checkpoint
+  // C` `cancellation_charges:issue` matrix from
+  // `20261006120000_phase_3b8_cancellation_charge_permission`. Reuses the
+  // SAME `tenantId` the prior test just provisioned — no second provision
+  // call, no new fixture needed.
+  it('a freshly provisioned tenant receives the exact orders:* and cancellation_charges:issue role matrix, with no duplicate role_permission rows', async () => {
+    const c = new pg.Client({ connectionString: stack.postgres.url });
+    await c.connect();
+    try {
+      const q = (sql: string, params: unknown[] = []) => c.query(sql, params).then((r) => r.rows);
+
+      const rows: { key: string; permissionKey: string }[] = await q(
+        `SELECT r."key", rp."permissionKey"
+           FROM role r
+           JOIN role_permission rp ON rp."roleId" = r."id"
+          WHERE r."tenantId" = $1
+            AND rp."permissionKey" IN ('orders:view', 'orders:manage', 'orders:cancel', 'cancellation_charges:issue')`,
+        [tenantId],
+      );
+      const byRole = new Map<string, Set<string>>();
+      for (const r of rows) {
+        if (!byRole.has(r.key)) byRole.set(r.key, new Set());
+        byRole.get(r.key)!.add(r.permissionKey);
+      }
+      const keysFor = (roleKey: string): string[] => [...(byRole.get(roleKey) ?? [])].sort();
+
+      // orders:view + orders:manage + orders:cancel — owner/admin/manager
+      for (const roleKey of ['owner', 'admin', 'manager']) {
+        expect(keysFor(roleKey)).toEqual(
+          expect.arrayContaining(['orders:cancel', 'orders:manage', 'orders:view']),
+        );
+      }
+      // orders:view + orders:manage ONLY — cashier/sales (never orders:cancel)
+      for (const roleKey of ['cashier', 'sales']) {
+        const keys = keysFor(roleKey);
+        expect(keys).toEqual(expect.arrayContaining(['orders:manage', 'orders:view']));
+        expect(keys).not.toContain('orders:cancel');
+      }
+      // no other role gets any orders:* key
+      for (const roleKey of [
+        'supervisor',
+        'florist',
+        'storekeeper',
+        'purchase_staff',
+        'accountant',
+        'dispatcher',
+        'driver',
+        'receptionist',
+      ]) {
+        const keys = keysFor(roleKey).filter((k) => k.startsWith('orders:'));
+        expect(keys).toEqual([]);
+      }
+
+      // cancellation_charges:issue — owner/admin/accountant/manager
+      for (const roleKey of ['owner', 'admin', 'accountant', 'manager']) {
+        expect(keysFor(roleKey)).toContain('cancellation_charges:issue');
+      }
+      // never cashier/sales
+      for (const roleKey of ['cashier', 'sales']) {
+        expect(keysFor(roleKey)).not.toContain('cancellation_charges:issue');
+      }
+
+      // no duplicate (roleId, permissionKey) rows for any of the 4 keys checked here
+      const dupes: { key: string; permissionKey: string; count: string }[] = await q(
+        `SELECT r."key", rp."permissionKey", count(*)::text AS count
+           FROM role r
+           JOIN role_permission rp ON rp."roleId" = r."id"
+          WHERE r."tenantId" = $1
+            AND rp."permissionKey" IN ('orders:view', 'orders:manage', 'orders:cancel', 'cancellation_charges:issue')
+          GROUP BY r."key", rp."permissionKey"
+         HAVING count(*) > 1`,
+        [tenantId],
+      );
+      expect(dupes).toEqual([]);
+    } finally {
+      await c.end();
+    }
+  });
+
   it('requires a Business Type — no key -> 422 BUSINESS_TYPE_REQUIRED, creates nothing (owner §1)', async () => {
     const token = await platformToken();
     const res = await post(

@@ -3256,13 +3256,14 @@ model CustomerAdvanceApplication {
 
 /// Task 3b.6 Checkpoint D (pre-D architecture-review correction) — the
 /// append-only application of a canonical `Payment` DIRECTLY against exactly
-/// one `CustomerReceivable`(sourceType='OPENING') — never an Invoice-sourced
-/// receivable (that path is `PaymentAllocation`'s alone, unchanged) and never
-/// routed through a `CustomerAdvance` (that would misclassify a direct AR
-/// collection as a customer liability before clearing AR). Participates in
-/// the SAME shared payment-consumption capacity backstop as
-/// `PaymentAllocation`/`CustomerAdvance`, and in the SAME opening-receivable
-/// coverage backstop as `CustomerAdvanceApplication` (migration SQL).
+/// one NON-INVOICE `CustomerReceivable` (sourceType='OPENING', or — task 3b.8
+/// Integration Closure, migration `20261007120000` — 'CANCELLATION_CHARGE') —
+/// never an Invoice-sourced receivable (that path is `PaymentAllocation`'s
+/// alone, unchanged) and never routed through a `CustomerAdvance` (that would
+/// misclassify a direct AR collection as a customer liability before clearing
+/// AR). Participates in the SAME shared payment-consumption capacity backstop
+/// as `PaymentAllocation`/`CustomerAdvance`, and in the SAME non-invoice
+/// receivable coverage backstop as `CustomerAdvanceApplication` (migration SQL).
 model CustomerReceivablePaymentApplication {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
@@ -3278,9 +3279,9 @@ model CustomerReceivablePaymentApplication {
   paymentId String  @db.Uuid
   payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
 
-  /// must be a CustomerReceivable whose OWN sourceType is OPENING — DB-enforced
-  /// (trigger, migration SQL); an INVOICE-sourced target is unconditionally
-  /// rejected at insert time.
+  /// must be a CustomerReceivable whose OWN sourceType is OPENING or
+  /// CANCELLATION_CHARGE — DB-enforced (trigger, migration SQL); an
+  /// INVOICE-sourced target is unconditionally rejected at insert time.
   customerReceivableId String             @db.Uuid
   customerReceivable   CustomerReceivable @relation(fields: [customerReceivableId], references: [id], onDelete: Restrict)
 
@@ -3325,15 +3326,21 @@ model CustomerAccountEntry {
 
   /// INVOICE | PAYMENT | PAYMENT_ALLOCATION | OPENING_RECEIVABLE_PAYMENT_APPLIED
   /// | ADVANCE | ADVANCE_APPLIED | OPENING_RECEIVABLE | OPENING_ADVANCE |
-  /// CREDIT_NOTE | CANCELLATION_CHARGE | REFUND (CHECK). Task 3b.6 Checkpoint D
-  /// added OPENING_RECEIVABLE_PAYMENT_APPLIED (additive — never overloads
-  /// PAYMENT_ALLOCATION's own exact meaning). Task 3b.8 Checkpoint B adds the
-  /// final 3 kinds — names this module's own doc comment already reserved
-  /// (`customer-account-entry.ts`: "3b.8's CREDIT_NOTE/REFUND/WRITE_OFF").
-  /// `WRITE_OFF` is NOT added — no 3b.8 concept requires it. `ADVANCE`/
-  /// `ADVANCE_APPLIED` are REUSED UNCHANGED for a CREDIT_NOTE-sourced Advance
-  /// / its application to a CancellationCharge receivable (both already
-  /// target-agnostic — no new kind needed for either).
+  /// CREDIT_NOTE | CANCELLATION_CHARGE | REFUND | CANCELLATION_CHARGE_PAYMENT_APPLIED
+  /// (CHECK). Task 3b.6 Checkpoint D added OPENING_RECEIVABLE_PAYMENT_APPLIED
+  /// (additive — never overloads PAYMENT_ALLOCATION's own exact meaning). Task
+  /// 3b.8 Checkpoint B adds 3 kinds — names this module's own doc comment
+  /// already reserved (`customer-account-entry.ts`: "3b.8's
+  /// CREDIT_NOTE/REFUND/WRITE_OFF"). `WRITE_OFF` is NOT added — no 3b.8 concept
+  /// requires it. `ADVANCE`/`ADVANCE_APPLIED` are REUSED UNCHANGED for a
+  /// CREDIT_NOTE-sourced Advance / its application to a CancellationCharge
+  /// receivable (both already target-agnostic — no new kind needed for either).
+  /// Task 3b.8 Integration Closure (migration `20261007120000`) adds the 12th
+  /// kind, CANCELLATION_CHARGE_PAYMENT_APPLIED, for a Payment applied to a
+  /// CancellationCharge receivable — the legacy OPENING_RECEIVABLE_PAYMENT_APPLIED
+  /// stays FROZEN, unchanged and unrenamed, for opening-balance history; the DB
+  /// trigger keeps the two apart (each may only reference an application whose
+  /// target receivable has the matching `sourceType`).
   entryKind String
 
   customerReceivableId                   String?                               @unique @db.Uuid
@@ -3346,7 +3353,8 @@ model CustomerAccountEntry {
   customerAdvance                        CustomerAdvance?                      @relation(fields: [customerAdvanceId], references: [id], onDelete: Restrict)
   customerAdvanceApplicationId           String?                               @unique @db.Uuid
   customerAdvanceApplication             CustomerAdvanceApplication?           @relation(fields: [customerAdvanceApplicationId], references: [id], onDelete: Restrict)
-  /// Task 3b.6 Checkpoint D — the sole reference for OPENING_RECEIVABLE_PAYMENT_APPLIED.
+  /// Task 3b.6 Checkpoint D — the sole reference for OPENING_RECEIVABLE_PAYMENT_APPLIED
+  /// (and, task 3b.8 Integration Closure, CANCELLATION_CHARGE_PAYMENT_APPLIED).
   customerReceivablePaymentApplicationId String?                               @unique @db.Uuid
   customerReceivablePaymentApplication   CustomerReceivablePaymentApplication? @relation(fields: [customerReceivablePaymentApplicationId], references: [id], onDelete: Restrict)
   /// Task 3b.8 Checkpoint B — the sole reference for CREDIT_NOTE. Written
@@ -3765,10 +3773,20 @@ model CreditNoteCoverageRelease {
   ///   PAYMENT_ALLOCATION:  sourcePaymentAllocationId NOT NULL, sourceAdvanceApplicationId NULL,
   ///                        sourcePaymentId NOT NULL (= that PaymentAllocation's own paymentId).
   ///   ADVANCE_APPLICATION: sourcePaymentAllocationId NULL, sourceAdvanceApplicationId NOT NULL,
-  ///                        underlying CustomerAdvance.sourceType = 'PAYMENT',
-  ///                        sourcePaymentId NOT NULL (= that Advance's own sourcePaymentId).
+  ///                        sourcePaymentId NOT NULL = the ULTIMATE Payment of the covering advance:
+  ///                        underlying CustomerAdvance.sourceType = 'PAYMENT' -> that Advance's own
+  ///                        sourcePaymentId; underlying sourceType = 'CREDIT_NOTE' (migration 47) -> the
+  ///                        sourcePaymentId carried by the ONE release that funded that Advance.
   ///   OPENING_ADVANCE:     sourcePaymentAllocationId NULL, sourceAdvanceApplicationId NOT NULL,
-  ///                        underlying CustomerAdvance.sourceType = 'OPENING', sourcePaymentId NULL.
+  ///                        sourcePaymentId NULL — the chain ends in an OPENING advance: underlying
+  ///                        sourceType = 'OPENING', or (migration 47) a 'CREDIT_NOTE' advance whose
+  ///                        funding release is itself OPENING_ADVANCE.
+  /// TASK 3B.8 F3 (MIGRATION 47) — nested provenance. Cancelling an invoice covered by an application of a
+  /// CREDIT_NOTE-sourced advance releases that coverage AGAIN into a new CREDIT_NOTE advance; the new release
+  /// reproduces, exactly and only, what the funding release of the underlying advance already carries (the
+  /// trigger reads that DIRECT parent release — no recursion; by induction every release carries the ultimate
+  /// provenance forward). Nothing is derived from the request; a missing / ambiguous / inconsistent funding
+  /// release fails closed. NO new kind or column: the frozen shape above already represents every case.
   /// CHECKPOINT B CORRECTIVE PASS — OPENING_ADVANCE now RETAINS its exact
   /// `CustomerAdvanceApplication` provenance (previously incorrectly
   /// populated neither reference column, losing the link to the Invoice
@@ -3803,9 +3821,11 @@ model CreditNoteCoverageRelease {
   sourceAdvanceApplication   CustomerAdvanceApplication? @relation(fields: [sourceAdvanceApplicationId], references: [id], onDelete: Restrict)
 
   /// REQUIRED for PAYMENT_ALLOCATION and ADVANCE_APPLICATION (both ultimately
-  /// trace to a real Payment); NULL for OPENING_ADVANCE (no Payment
-  /// provenance exists to satisfy the Refund entitlement rule — an
-  /// OPENING-Advance-funded release can never fund a cash Refund).
+  /// trace to a real Payment — for a nested release of a CREDIT_NOTE-sourced
+  /// advance, the SAME ultimate Payment its funding release carries); NULL for
+  /// OPENING_ADVANCE (no Payment provenance exists to satisfy the Refund
+  /// entitlement rule — an OPENING-Advance-funded release can never fund a
+  /// cash Refund).
   sourcePaymentId String?  @db.Uuid
   sourcePayment   Payment? @relation(fields: [sourcePaymentId], references: [id], onDelete: Restrict)
 
@@ -3931,6 +3951,11 @@ model CancellationCharge {
 /// provider success (see `RefundAttempt`'s own doc comment for the exact
 /// conversion transaction). Never mutates the original `Payment` (still
 /// fully immutable, unchanged). No UPDATE, no DELETE, ever.
+/// Migration 48 (hard-gate DB integrity closure): the source Payment must
+/// exist and share this row's tenant / company / branch (trigger
+/// `fn_check_refund_scope_and_capacity`) — every FK here is a simple
+/// single-column one, so the database itself would otherwise accept a refund
+/// stamped with another scope.
 model Refund {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
@@ -3983,6 +4008,9 @@ model Refund {
 /// exactly, inverted direction) — narrow set-once, trigger-verified to equal
 /// the real `Refund.id` whose OWN `sourceRefundAttemptId` points back at
 /// this row; never independently trusted.
+/// Migration 48: the source Payment must also exist and share this row's
+/// tenant / company / branch (trigger `fn_check_refund_attempt_scope_and_capacity`,
+/// next to the provider-credential scope checks it already made).
 model RefundAttempt {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
@@ -4051,6 +4079,9 @@ model RefundAttempt {
 /// trace to that SAME `sourcePaymentId` (trigger-enforced). Immutable
 /// forever (no UPDATE, no DELETE) — a FAILED attempt's reservation rows
 /// remain as immutable historical evidence, never deleted.
+/// Migration 48: the reserved CustomerAdvance must share this row's tenant /
+/// company / branch and its customer account must live in the same tenant /
+/// company (trigger `fn_check_refund_attempt_reservation_integrity`).
 model RefundAttemptEntitlementReservation {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
@@ -4089,6 +4120,13 @@ model RefundAttemptEntitlementReservation {
 /// is always a `CustomerReceivable`; this table's target is always a
 /// `Refund`). Supports MANY rows per Refund (one row per consumed Advance).
 /// No UPDATE, no DELETE, ever.
+/// Migration 48 (trigger `fn_check_customer_advance_refund_application_integrity`):
+/// the consumed CustomerAdvance must share this row's tenant / company /
+/// branch, its customer account must live in the same tenant / company, and
+/// it must trace to the Refund's source Payment — a CREDIT_NOTE advance
+/// through its ONE funding release, a PAYMENT advance through its own
+/// `sourcePaymentId`. An advance with no Payment provenance (OPENING, or a
+/// credit-note chain that ends in an opening advance) can never fund a Refund.
 model CustomerAdvanceRefundApplication {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
@@ -4128,6 +4166,11 @@ model CustomerAdvanceRefundApplication {
 /// claimed-not-FK (same F7 rationale as `ProviderPaymentEvent.paymentAttemptId`
 /// — a signature-valid event referencing an unknown/wrong-scope attempt is
 /// still durably recorded as EXCEPTION evidence, never rejected at INSERT).
+/// Migration 48 gives it the same four database guarantees as
+/// `ProviderPaymentEvent`: credential scope (the credential must be
+/// branch-scoped and carry EXACTLY this row's tenant / company / branch),
+/// initial status RECEIVED, the transition guard (already in migration 44),
+/// and never DELETEd.
 model ProviderRefundEvent {
   id        String  @id @default(dbgenerated("uuidv7()")) @db.Uuid
   tenantId  String  @db.Uuid
