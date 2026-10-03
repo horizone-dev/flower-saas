@@ -8,10 +8,12 @@ import { checkForbiddenImports, extractImportSpecifiers } from '@flower/testing'
  *   - it never imports from any `apps/*` runtime
  *   - it carries no HTTP / Fastify / transport code (that stays in `apps/api`)
  *
- * `eslint-plugin-boundaries` cannot see across package directories the way this
- * repo runs lint (`turbo run lint` runs one `eslint .` per package, each with
- * its own cwd — a glob like `apps/api/**` never resolves from inside
- * `packages/backend/`). This test instead scans the real compiled source tree
+ * The dependency-boundary lint rule is not enabled on workspace sources (every
+ * workspace config passes `enableBoundaries: false`), and the plugin it replaced
+ * could not see across package directories the way this repo runs lint
+ * (`turbo run lint` runs one `eslint .` per package, each with its own cwd — a
+ * glob like `apps/api/**` never resolved from inside `packages/backend/`). This
+ * test instead scans the real compiled source tree
  * directly (`@flower/testing`'s `checkForbiddenImports`), so it proves the
  * actual boundary rather than a synthetic reproduction of it.
  */

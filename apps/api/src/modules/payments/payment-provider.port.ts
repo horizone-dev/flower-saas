@@ -194,9 +194,9 @@ export interface PaymentProvider {
    *
    * NOTE (forward-looking, not a Checkpoint F blocker — owner §F6): this
    * port interface currently lives in `apps/api/src/modules/payments/`, a
-   * `domain-module` under this repository's `eslint-plugin-boundaries`
-   * policy, which forbids one domain-module importing another's files
-   * directly. A future concrete adapter that needs `SecretsService`
+   * `domain-module` under this repository's dependency-boundary model
+   * (`flower/dependency-boundaries`, `@flower/config`), which forbids one
+   * domain-module importing another's files directly. A future concrete adapter that needs `SecretsService`
    * (itself inside the separate `modules/secrets` domain-module) to verify
    * a signature cannot be a plain sibling file inside `modules/payments/`
    * AND import `SecretsService` directly — the two domain-modules cannot

@@ -1,28 +1,26 @@
 // Isolated ESLint flat config for the negative-test fixture.
 // Reproduces the monorepo's boundary model at small scale so the fixture files
-// trigger real errors — proving `pnpm lint` has teeth. Uses the v7 API.
+// trigger real errors — proving `pnpm lint` has teeth.
 import tseslint from 'typescript-eslint';
-import boundaries from 'eslint-plugin-boundaries';
 import flower from '../../src/eslint/plugin.js';
 
 export default [
   ...tseslint.configs.recommended,
   {
     files: ['**/*.ts'],
-    plugins: { boundaries, flower },
+    plugins: { flower },
     languageOptions: { parserOptions: { projectService: false } },
-    settings: {
-      'import/resolver': { typescript: { project: './tsconfig.json' } },
-      'boundaries/elements': [
-        { type: 'pure', pattern: 'src/pure/**' },
-        { type: 'app', pattern: 'src/app/**' },
-      ],
-    },
     rules: {
-      'boundaries/dependencies': [
+      'flower/dependency-boundaries': [
         'error',
         {
           default: 'disallow',
+          // the fixture is its own tiny workspace: element paths are relative to this directory
+          rootDir: import.meta.dirname,
+          elements: [
+            { type: 'pure', pattern: 'src/pure/**' },
+            { type: 'app', pattern: 'src/app/**' },
+          ],
           policies: [
             {
               from: { element: { type: 'pure' } },

@@ -17,7 +17,7 @@
 - Authoritative business logic lives **only in `apps/api`** (imported by `worker` /
   `scheduler`). `packages/*` hold contracts, constants and **pure** utilities only.
 - A domain module never imports another module's repository/Prisma models — only its
-  **exported service interface** or a **domain event**. (`eslint-plugin-boundaries`.)
+  **exported service interface** or a **domain event**. (`flower/dependency-boundaries`.)
 - **`no-raw-prisma-in-scoped-modules`** — scoped modules access data only through
   `ScopedRepository`.
 - **`route-must-declare-permission`** — every controller route has

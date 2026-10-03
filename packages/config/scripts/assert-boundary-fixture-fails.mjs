@@ -2,7 +2,7 @@
 /**
  * Negative test (Phase 0 Task 0.2 checklist item):
  * Runs ESLint on `fixtures/boundary-violation/` and asserts that BOTH
- *   - `boundaries/element-types`  (a pure package importing an app), and
+ *   - `flower/dependency-boundaries` (a pure package importing an app), and
  *   - `flower/no-scope-from-request` (reading tenantId from req.body)
  * produce errors. If lint comes back clean, the guardrails have no teeth → exit 1.
  */
@@ -29,7 +29,7 @@ for (const r of results) {
   }
 }
 
-const expected = ['boundaries/dependencies', 'flower/no-scope-from-request'];
+const expected = ['flower/dependency-boundaries', 'flower/no-scope-from-request'];
 const missing = expected.filter((id) => !ruleIds.has(id));
 
 console.log(

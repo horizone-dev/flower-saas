@@ -16,7 +16,6 @@
 import js from '@eslint/js';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
-import boundaries from 'eslint-plugin-boundaries';
 import prettier from 'eslint-config-prettier';
 import flower from './plugin.js';
 
@@ -32,7 +31,7 @@ const IGNORES = [
 ];
 
 /**
- * eslint-plugin-boundaries v7 element model for the monorepo.
+ * Architecture element model for the monorepo (consumed by `flower/dependency-boundaries`).
  * `domain-module` is nested inside `app`, so it must be listed first (more specific).
  */
 const BOUNDARY_ELEMENTS = [
@@ -50,7 +49,7 @@ const BOUNDARY_ELEMENTS = [
 ];
 
 /**
- * Allowed import edges (v7 `policies`). Everything not listed is denied.
+ * Allowed import edges (`policies`). Everything not listed is denied.
  * Note: a domain module may not import another domain module directly — only via
  * its exported service interface / a domain event (that finer rule lands in Phase 1
  * once modules exist; here we forbid cross-module imports outright).
@@ -107,6 +106,30 @@ const BOUNDARY_POLICIES = [
     },
   },
 ];
+
+/**
+ * The architecture dependency-direction block (rule `flower/dependency-boundaries`) over the model above.
+ * Exported separately so the rule can be exercised against the exact configuration the factory ships.
+ *
+ * @returns {import('eslint').Linter.Config}
+ */
+export function boundaryConfigBlock() {
+  return {
+    files: ['apps/**/*.{ts,tsx}', 'packages/**/*.{ts,tsx}'],
+    plugins: { flower },
+    rules: {
+      'flower/dependency-boundaries': [
+        'error',
+        {
+          default: 'disallow',
+          include: ['apps/**/*', 'packages/**/*'],
+          elements: BOUNDARY_ELEMENTS,
+          policies: BOUNDARY_POLICIES,
+        },
+      ],
+    },
+  };
+}
 
 export function flowerConfig(options = {}) {
   const {
@@ -205,21 +228,7 @@ export function flowerConfig(options = {}) {
     });
   }
 
-  if (enableBoundaries) {
-    config.push({
-      files: ['apps/**/*.{ts,tsx}', 'packages/**/*.{ts,tsx}'],
-      plugins: { boundaries },
-      settings: {
-        'boundaries/include': ['apps/**/*', 'packages/**/*'],
-        'boundaries/elements': BOUNDARY_ELEMENTS,
-      },
-      rules: {
-        'boundaries/dependencies': ['error', { default: 'disallow', policies: BOUNDARY_POLICIES }],
-        'boundaries/no-unknown': 'off',
-        'boundaries/no-private': 'off',
-      },
-    });
-  }
+  if (enableBoundaries) config.push(boundaryConfigBlock());
 
   config.push(prettier);
   return config;
