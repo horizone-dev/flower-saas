@@ -3,10 +3,12 @@ import { join } from 'node:path';
 
 /**
  * A dependency-free source-import scanner for architecture-boundary tests
- * (FC-3 / HG-BOUNDARY). `eslint-plugin-boundaries` cannot see across package
- * directories the way this repo runs lint (`turbo run lint` = one `eslint .`
- * per package, each with its own cwd) — cross-package glob patterns like
- * `apps/api/**` simply do not resolve from inside `packages/backend/`. This
+ * (FC-3 / HG-BOUNDARY). The dependency-boundary lint rule is not enabled on
+ * workspace sources (every workspace config passes `enableBoundaries: false`),
+ * and the plugin it replaced could not see across package directories the way
+ * this repo runs lint (`turbo run lint` = one `eslint .` per package, each with
+ * its own cwd) — cross-package glob patterns like `apps/api/**` never resolved
+ * from inside `packages/backend/`. This
  * scanner instead walks a real source tree directly off disk and inspects every
  * `import … from '…'` / `export … from '…'` / `require('…')` specifier, so a
  * package can assert facts about its own compiled boundary regardless of which

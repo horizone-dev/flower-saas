@@ -13,7 +13,7 @@ import { checkForbiddenImports, extractImportSpecifiers } from '@flower/testing'
  * `@flower/service-runtime`.
  *
  * See `packages/backend/src/boundary.test.ts` for why this is a direct disk
- * scan rather than an `eslint-plugin-boundaries` rule.
+ * scan rather than a lint rule.
  */
 const HERE = dirname(fileURLToPath(import.meta.url));
 
