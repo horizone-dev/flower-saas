@@ -34,8 +34,9 @@ describe('@flower/config exports', () => {
     }
   });
 
-  it('the flower plugin exposes exactly the three rules', () => {
+  it('the flower plugin exposes exactly the four rules', () => {
     expect(Object.keys(plugin.rules).sort()).toEqual([
+      'dependency-boundaries',
       'no-raw-prisma-in-scoped-modules',
       'no-scope-from-request',
       'route-must-declare-permission',
