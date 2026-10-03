@@ -11,6 +11,7 @@ import type { WebhookVerifiedTargetState } from './payment-provider.port.js';
 import type { PaymentEventType, ProviderEventExceptionReason } from './payment-events.js';
 import { PaymentCustomerAttributionRepository } from '../receivables/payment-customer-attribution.repository.js';
 import { CustomerReceiptEffectsRepository } from '../receivables/customer-receipt-effects.repository.js';
+import { loadInvoiceBalance } from '../receivables/receivable-balance.repository.js';
 import type { TenderMethod } from './tender.js';
 
 export interface ProcessVerifiedInboxEventInput {
@@ -61,7 +62,11 @@ interface FinalizeContext {
  * row itself (also row-locked) is still RECEIVED — Invoice+Attempt locking
  * already serializes every concurrent path that could touch this same
  * money (owner §F26), so no separate inbox-row lock ordering concern
- * exists ahead of them.
+ * exists ahead of them. Task 3b.8 Integration Closure F4: this path only
+ * READS the order (a plain SELECT, no lock) and inserts no row that
+ * references it, so it never waits on the post-invoice cancellation's ORDER
+ * lock and can never close a cycle with it — see the lock graph in
+ * `payment-target-lock.repository.ts` (guarded by a test).
  *
  * Checkpoint G additions, all co-committed with the mutation they describe:
  * `payment_attempt.state_changed` + `payments.attempt_state_changed` for
@@ -148,8 +153,8 @@ export class WebhookEventProcessorRepository {
     }
 
     // ── 3. lock Invoice FIRST. ──────────────────────────────────────────
-    const invoiceRows = await tx.$queryRaw<{ id: string; totalAmountMinor: bigint }[]>`
-      SELECT "id", "totalAmountMinor"
+    const invoiceRows = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id"
         FROM "invoice"
        WHERE "id" = ${attemptPeek.targetInvoiceId}::uuid
          AND "tenantId" = ${input.tenantId}::uuid
@@ -275,7 +280,6 @@ export class WebhookEventProcessorRepository {
     if (targetState === 'CAPTURED') {
       return this.applyCapture(tx, {
         invoiceId: invoice.id,
-        invoiceTotalMinor: invoice.totalAmountMinor,
         attempt: { ...attempt, state: fromState },
         ctx,
         inboxProviderReference: inbox.providerReference,
@@ -357,7 +361,6 @@ export class WebhookEventProcessorRepository {
     tx: ScopedTx,
     p: {
       invoiceId: string;
-      invoiceTotalMinor: bigint;
       attempt: {
         id: string;
         state: PaymentAttemptState;
@@ -400,13 +403,18 @@ export class WebhookEventProcessorRepository {
       return this.finalize(tx, p.ctx, 'EXCEPTION', 'ILLEGAL_TRANSITION');
     }
 
-    // ── F18 — financial invariant, THIS attempt's own reservation
-    //      excluded from "other" active reservations. ──────────────────
-    const confirmedRows = await tx.$queryRaw<{ total: bigint }[]>`
-      SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total
-        FROM "payment_allocation"
-       WHERE "invoiceId" = ${p.invoiceId}::uuid`;
-    const confirmed = confirmedRows[0]!.total;
+    // ── F18 — financial invariant over the CANONICAL remaining receivable
+    //      balance (invoice total − allocations − advance applications −
+    //      CreditNote AR reduction; task 3b.8 Integration Closure F1 — the
+    //      figure the DB coverage backstop enforces, so an attempt reserved
+    //      BEFORE a CreditNote can never reach that backstop as a raw error
+    //      that would roll back this whole transaction and leave the inbox
+    //      row RECEIVED for endless retries), THIS attempt's own reservation
+    //      excluded from "other" active reservations. ─────────────────────
+    const balance = await loadInvoiceBalance(tx, {
+      tenantId: p.ctx.tenantId,
+      invoiceId: p.invoiceId,
+    });
 
     const otherActiveRows = await tx.$queryRaw<{ total: bigint }[]>`
       SELECT COALESCE(SUM(pa."amountMinor"), 0)::bigint AS total
@@ -418,7 +426,7 @@ export class WebhookEventProcessorRepository {
          AND NOT EXISTS (SELECT 1 FROM "payment" p WHERE p."sourceAttemptId" = pa."id")`;
     const otherActive = otherActiveRows[0]!.total;
 
-    if (confirmed + otherActive + attempt.amountMinor > p.invoiceTotalMinor) {
+    if (otherActive + attempt.amountMinor > balance.outstandingMinor) {
       // fail closed — never silently repair financial state (owner §F23-C).
       return this.finalize(tx, p.ctx, 'EXCEPTION', 'FINANCIAL_INVARIANT_VIOLATION');
     }

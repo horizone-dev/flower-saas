@@ -557,6 +557,250 @@ describe('PaymentCollectionRepository (task 3b.5 Checkpoint C+D, integration)', 
     });
   });
 
+  // ═══════ task 3b.8 Integration Closure (F1) — the CANONICAL receivable balance ═══════
+  // A CreditNote reduces an invoice's receivable WITHOUT any allocation, so the
+  // direct-payment "available to collect" must be derived from the SAME canonical
+  // remaining balance every other receivables consumer uses (total - allocations -
+  // advance applications - CreditNote AR reduction) — never `total - allocations`
+  // alone, which let the request through to a raw DB trigger error.
+  describe('F1 — a CreditNote AR reduction is part of the remaining balance', () => {
+    /** a pure-AR-reduction CreditNote crediting `amountMinor` of the fixture
+     *  invoice (one line, quantity 1, unit price = total, no tax). Header + line
+     *  in ONE transaction — the completeness triggers are deferred. */
+    async function creditNoteInvoice(invoiceId: string, amountMinor: bigint): Promise<void> {
+      const { rows } = await pool.query<{ branchId: string; lineId: string }>(
+        `SELECT i."branchId", (SELECT ol.id FROM order_line ol WHERE ol."orderId" = i."orderId" LIMIT 1) AS "lineId"
+           FROM invoice i WHERE i.id = $1`,
+        [invoiceId],
+      );
+      const { branchId, lineId } = rows[0]!;
+      const cnId = uid();
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query(
+          `INSERT INTO credit_note
+             (id,"tenantId","companyId","branchId","invoiceId","creditNoteNumber","issuedAt","accountingDate",
+              "currencyCode","currencyExponent","reasonCode","subtotalAmountMinor","taxTotalAmountMinor",
+              "totalAmountMinor","arReductionMinor","advanceExcessMinor")
+           VALUES ($1,$2,$3,$4,$5,$6,now(),CURRENT_DATE,'AED',2,'CUSTOMER_REQUEST',$7,0,$7,$7,0)`,
+          [cnId, TENANT, COMPANY, branchId, invoiceId, `CN-F-${cnId.slice(0, 8)}`, amountMinor],
+        );
+        await c.query(
+          `INSERT INTO credit_note_line
+             (id,"tenantId","companyId","creditNoteId","orderLineId","quantityCredited","grossCreditedMinor",
+              "discountCreditedMinor","documentDiscountShareCreditedMinor","netAfterDocumentDiscountCreditedMinor",
+              "taxCreditedMinor","lineTotalCreditedMinor","currencyCode","currencyExponent")
+           VALUES ($1,$2,$3,$4,$5,'1.0000',$6,0,0,$6,0,$6,'AED',2)`,
+          [uid(), TENANT, COMPANY, cnId, lineId, amountMinor],
+        );
+        await c.query('COMMIT');
+      } catch (err) {
+        await c.query('ROLLBACK');
+        throw err;
+      } finally {
+        c.release();
+      }
+    }
+
+    const rowCounts = async (
+      invoiceId: string,
+    ): Promise<{ attempts: number; payments: number; allocations: number }> => {
+      const one = async (text: string): Promise<number> =>
+        (await pool.query<{ n: number }>(text, [invoiceId])).rows[0]!.n;
+      return {
+        attempts: await one(
+          `SELECT COUNT(*)::int AS n FROM payment_attempt WHERE "targetInvoiceId" = $1`,
+        ),
+        payments: await one(
+          `SELECT COUNT(*)::int AS n FROM payment p JOIN payment_allocation pa ON pa."paymentId" = p.id WHERE pa."invoiceId" = $1`,
+        ),
+        allocations: await one(
+          `SELECT COUNT(*)::int AS n FROM payment_allocation WHERE "invoiceId" = $1`,
+        ),
+      };
+    };
+
+    it('a FULLY credit-noted invoice: any capture is the clean INVOICE_INSUFFICIENT_AVAILABLE_BALANCE (409) — zero attempt / payment / allocation rows', async () => {
+      const invoiceId = await freshInvoice(100n);
+      await creditNoteInvoice(invoiceId, 100n);
+      await expect(capture({ invoiceId, amountMinor: 1n })).rejects.toMatchObject({
+        code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE',
+        status: 409,
+      });
+      expect(await rowCounts(invoiceId)).toEqual({ attempts: 0, payments: 0, allocations: 0 });
+    });
+
+    it('a PARTIALLY credit-noted invoice is capped at the remaining AR: remaining + 1 rejected, exactly the remainder accepted, then nothing more', async () => {
+      const invoiceId = await freshInvoice(100n);
+      await creditNoteInvoice(invoiceId, 40n); // remaining AR = 60
+      await expect(capture({ invoiceId, amountMinor: 61n })).rejects.toMatchObject({
+        code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE',
+      });
+      expect(await rowCounts(invoiceId)).toEqual({ attempts: 0, payments: 0, allocations: 0 });
+      const ok = await capture({ invoiceId, amountMinor: 60n });
+      expect(ok.remainingAvailableToCollectMinor).toBe(0n);
+      await expect(capture({ invoiceId, amountMinor: 1n })).rejects.toMatchObject({
+        code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE',
+      });
+      expect((await rowCounts(invoiceId)).allocations).toBe(1);
+    });
+
+    it('the response reports the CANONICAL remainder: 100 total, 40 credited, capture 20 -> 40 still available', async () => {
+      const invoiceId = await freshInvoice(100n);
+      await creditNoteInvoice(invoiceId, 40n);
+      const ok = await capture({ invoiceId, amountMinor: 20n });
+      expect(ok.remainingAvailableToCollectMinor).toBe(40n);
+    });
+
+    it('a partially-paid invoice that is then credit-noted: allocation 30 + CreditNote 70 closes it exactly', async () => {
+      const invoiceId = await freshInvoice(100n);
+      await capture({ invoiceId, amountMinor: 30n });
+      await creditNoteInvoice(invoiceId, 70n);
+      await expect(capture({ invoiceId, amountMinor: 1n })).rejects.toMatchObject({
+        code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE',
+      });
+      expect((await rowCounts(invoiceId)).allocations).toBe(1);
+    });
+
+    it('a provider reservation made BEFORE the CreditNote may now exceed the outstanding: availability floors at 0 (a clean 409, never a RangeError / raw error)', async () => {
+      const orderId = await insertOrder();
+      const invoiceId = await insertInvoice(orderId, 100n);
+      await seedAttempt({ invoiceId, orderId, amountMinor: 60n, state: 'PENDING' });
+      await creditNoteInvoice(invoiceId, 60n); // outstanding 40 < reserved 60
+      await expect(capture({ invoiceId, amountMinor: 1n })).rejects.toMatchObject({
+        code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE',
+      });
+    });
+
+    it('the Multi Payment (N tenders) primitive honours the same remaining balance', async () => {
+      const invoiceId = await freshInvoice(100n);
+      await creditNoteInvoice(invoiceId, 40n); // remaining AR = 60
+      await expect(
+        captureMulti({
+          invoiceId,
+          amountMinor: 61n,
+          tenders: [
+            { method: 'CASH', amountMinor: 30n },
+            { method: 'BANK_TRANSFER', amountMinor: 31n },
+          ],
+        }),
+      ).rejects.toMatchObject({ code: 'INVOICE_INSUFFICIENT_AVAILABLE_BALANCE' });
+      expect(await rowCounts(invoiceId)).toEqual({ attempts: 0, payments: 0, allocations: 0 });
+      const ok = await captureMulti({
+        invoiceId,
+        amountMinor: 60n,
+        tenders: [
+          { method: 'CASH', amountMinor: 30n },
+          { method: 'BANK_TRANSFER', amountMinor: 30n },
+        ],
+      });
+      expect(ok.remainingAvailableToCollectMinor).toBe(0n);
+    });
+
+    it('a CreditNote on ANOTHER invoice never reduces this invoice (the balance is keyed by invoice)', async () => {
+      const credited = await freshInvoice(100n);
+      const other = await freshInvoice(100n);
+      await creditNoteInvoice(credited, 100n);
+      const ok = await capture({ invoiceId: other, amountMinor: 100n });
+      expect(ok.remainingAvailableToCollectMinor).toBe(0n);
+    });
+  });
+
+  // ═══════ task 3b.8 Integration Closure (F4) — the canonical lock hierarchy ═══════
+  // The post-invoice cancellation locks ORDER (FOR UPDATE) -> INVOICE (FOR UPDATE). The direct
+  // payment used to lock INVOICE first and only THEN touch the order — through the foreign
+  // key of the `payment_attempt` row it inserts (an implicit FOR KEY SHARE on the order row,
+  // which conflicts with the cancellation's FOR UPDATE). Two independent transactions in that
+  // opposite order are a textbook deadlock: PostgreSQL aborts one with 40P01 and the client sees
+  // a 500. The payment path now takes the ORDER lock first, like every other writer of the pair.
+  //
+  // These tests drive REAL independent PostgreSQL transactions at the exact interleaving that
+  // deadlocked — no timing luck: the canceller holds the order lock, the payment is observed
+  // BLOCKED on it (pg_blocking_pids), and only then does the canceller ask for the invoice.
+  describe('F4 — a direct payment locks ORDER before INVOICE (no deadlock with a cancellation)', () => {
+    /** the pg backends currently blocked, directly, by `blockerPid` */
+    const blockedBy = async (blockerPid: number): Promise<number[]> =>
+      (
+        await pool.query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`,
+          [blockerPid],
+        )
+      ).rows.map((r) => r.pid);
+
+    async function waitUntilBlockedBy(blockerPid: number, timeoutMs = 20_000): Promise<void> {
+      const deadline = Date.now() + timeoutMs;
+      while ((await blockedBy(blockerPid)).length === 0) {
+        if (Date.now() > deadline) throw new Error('the payment never blocked on the order lock');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+
+    it('while a canceller holds the ORDER row, the payment waits AT the order holding NO invoice lock; the canceller then takes the invoice at once (no 40P01) and the payment completes after it', async () => {
+      const orderId = await insertOrder();
+      const invoiceId = await insertInvoice(orderId, 100n);
+
+      const canceller = await pool.connect(); // the cancellation's independent transaction
+      const watcher = await pool.connect(); // a third connection, only to probe lock state
+      let payment: Promise<{ ok: true } | { ok: false; error: unknown }> | null = null;
+      try {
+        await canceller.query('BEGIN');
+        // the cancellation path's FIRST lock: the Order row, FOR UPDATE
+        await canceller.query(`SELECT "id" FROM "order" WHERE "id" = $1 FOR UPDATE`, [orderId]);
+        const cancellerPid = (
+          await canceller.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+        ).rows[0]!.pid;
+
+        // the payment, through the REAL production primitive, on its own connection
+        payment = capture({ invoiceId, amountMinor: 10n }).then(
+          () => ({ ok: true as const }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        await waitUntilBlockedBy(cancellerPid);
+
+        // HIERARCHY PROOF — the blocked payment must hold NO lock on the invoice. (The old order
+        // had already locked the invoice FOR UPDATE here, so this NOWAIT fails with 55P03.)
+        await watcher.query('BEGIN');
+        await expect(
+          watcher.query(`SELECT "id" FROM "invoice" WHERE "id" = $1 FOR UPDATE NOWAIT`, [
+            invoiceId,
+          ]),
+        ).resolves.toBeTruthy();
+        await watcher.query('ROLLBACK');
+
+        // the cancellation's SECOND lock — immediate; under the old order this is the deadlock.
+        await canceller.query(`SELECT "id" FROM "invoice" WHERE "id" = $1 FOR UPDATE`, [invoiceId]);
+        await canceller.query('COMMIT');
+
+        const outcome = await payment;
+        expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+        const { rows } = await pool.query<{ n: number }>(
+          `SELECT COUNT(*)::int AS n FROM payment_allocation WHERE "invoiceId" = $1`,
+          [invoiceId],
+        );
+        expect(rows[0]!.n).toBe(1);
+      } finally {
+        await watcher.query('ROLLBACK').catch(() => undefined);
+        await canceller.query('ROLLBACK').catch(() => undefined);
+        watcher.release();
+        canceller.release();
+        if (payment) await payment; // never leave the payment transaction dangling
+      }
+    });
+
+    it('two payments for the same order do not serialize on the ORDER row (shared lock) — only on the invoice', async () => {
+      const orderId = await insertOrder();
+      const invoiceId = await insertInvoice(orderId, 100n);
+      const settled = await inParallel(2, () => capture({ invoiceId, amountMinor: 50n }));
+      expect(settled.every((s) => s.status === 'fulfilled')).toBe(true);
+      const { rows } = await pool.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM payment_allocation WHERE "invoiceId" = $1`,
+        [invoiceId],
+      );
+      expect(rows[0]!.n).toBe(2);
+    });
+  });
+
   // ═══════════════════════════ CONCURRENT FINAL BALANCE (C18) ════════════
   it('two concurrent captures for the last 100 — exactly one succeeds, proven by the Invoice row lock', async () => {
     const invoiceId = await freshInvoice(100n);

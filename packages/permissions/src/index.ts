@@ -185,6 +185,28 @@ export const PERMISSIONS = {
   // since finalizing is what will eventually create the SettlementApplication/
   // journal/Invoice-SETTLED effect.
   settlements: ['settlements:view', 'settlements:manage', 'settlements:finalize'],
+  // Task 3b.8 Checkpoint B — Cancellation / Refund / Credit Note. Two brand
+  // new groups mirroring `payments`/`receivables`/`settlements`'s own
+  // precedent. Pre-invoice no-charge CANCELLATION COMMAND authority
+  // registers NO new permission here — OWNER-RESOLVED (Checkpoint B
+  // corrective gate): it uses the existing, already-registered
+  // `orders:cancel` key (task 3b.3), never bare `orders:manage`. Default
+  // system-role grant remains Owner/Admin/Manager only (Cashier/Sales
+  // excluded, least-privilege) via the existing task 3b.3 backfill.
+  creditNotes: ['credit_notes:view', 'credit_notes:issue'],
+  refunds: ['refunds:view', 'refunds:execute'],
+  // Task 3b.8 Checkpoint C — the CancellationCharge FINANCIAL DOCUMENT
+  // authority, OWNER-RESOLVED and distinct from `orders:cancel` (the
+  // cancellation COMMAND authority, unchanged above): CancellationCharge is
+  // its own financial document/authority, never implicitly coupled to
+  // Credit Note or Refund — `credit_notes:issue`/`refunds:execute` are
+  // DELIBERATELY NEVER reused for it, nor is bare `orders:manage`, nor the
+  // never-implemented `cancellation_charge:override` name from the
+  // pre-implementation Phase 3b planning doc. Issuing a CancellationCharge
+  // requires BOTH `orders:cancel` AND `cancellation_charges:issue`, PLUS
+  // step-up (`STEP_UP_PERMISSIONS` below) — no-charge cancellation needs
+  // only `orders:cancel`.
+  cancellationCharges: ['cancellation_charges:issue'],
 } as const satisfies Record<string, readonly string[]>;
 
 export type PermissionGroup = keyof typeof PERMISSIONS;
@@ -468,6 +490,51 @@ export const PHASE_3B_7_TENANT_PERMISSIONS = [
 export type Phase3b7TenantPermission = (typeof PHASE_3B_7_TENANT_PERMISSIONS)[number];
 
 /**
+ * Task 3b.8 Checkpoint B — Cancellation / Refund / Credit Note. The frozen
+ * 4-key contract (§27/§30 of the 3b.8-A architecture). `owner`/`admin`/
+ * `accountant`/`manager` gain all four — Credit Note/Refund VIEW is
+ * ungated, ISSUE/EXECUTE are step-up gated (STEP_UP_PERMISSIONS below).
+ * `cashier`/`sales` gain neither key — issuing a Credit Note or moving cash
+ * back out is a back-office function (mirrors `settlements:*`'s own
+ * precedent). Manager's inclusion in the step-up-gated ISSUE/EXECUTE tier is
+ * an explicit, owner-accepted departure from `settlements:finalize`'s
+ * narrower Owner/Admin/Accountant-only precedent — flagged, not silent.
+ * Existing tenants get the identical backfill in the task 3b.8 permissions
+ * migration.
+ */
+export const PHASE_3B_8_TENANT_PERMISSIONS = [
+  'credit_notes:view',
+  'credit_notes:issue',
+  'refunds:view',
+  'refunds:execute',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b8TenantPermission = (typeof PHASE_3B_8_TENANT_PERMISSIONS)[number];
+
+/**
+ * Task 3b.8 Checkpoint C — the CancellationCharge financial-document
+ * authority (owner decision, Checkpoint C blocker-resolution gate). A
+ * dedicated, single-key contract — deliberately NOT added to the already-
+ * frozen `PHASE_3B_8_TENANT_PERMISSIONS` array above (Checkpoint B is a
+ * separate, permanently frozen, already-committed unit; this is new
+ * Checkpoint C work, kept as its own export exactly like every other
+ * task/checkpoint's own `PHASE_3B_X_TENANT_PERMISSIONS` constant).
+ * `owner`/`admin`/`accountant`/`manager` gain it; `cashier`/`sales` do not
+ * (owner-frozen matrix). Step-up gated (STEP_UP_PERMISSIONS below).
+ * Issuing a CancellationCharge requires BOTH `orders:cancel` (the
+ * cancellation COMMAND authority, task 3b.3, unchanged) AND this key (the
+ * financial DOCUMENT authority) — never either alone. Existing tenants get
+ * the identical backfill in migration
+ * `20261006120000_phase_3b8_cancellation_charge_permission`.
+ */
+export const PHASE_3B_8_CHECKPOINT_C_TENANT_PERMISSIONS = [
+  'cancellation_charges:issue',
+] as const satisfies readonly PermissionKey[];
+
+export type Phase3b8CheckpointCTenantPermission =
+  (typeof PHASE_3B_8_CHECKPOINT_C_TENANT_PERMISSIONS)[number];
+
+/**
  * Platform Super Admin realm permissions. **Wholly separate** from the tenant
  * catalogue and never grantable to a tenant user (SECURITY.md "identity realms").
  * This is the ONLY place a secret-management capability exists anywhere — the
@@ -542,6 +609,23 @@ export const STEP_UP_PERMISSIONS: ReadonlySet<string> = new Set<string>([
   // `settlements:manage` are NOT step-up gated (ordinary DRAFT-lifecycle
   // operational actions, no money-moving effect exists yet).
   'settlements:finalize',
+  // Task 3b.8 Checkpoint C — issuing a CancellationCharge creates a real
+  // Accounts-Receivable/GL effect (same "money/financial-integrity action"
+  // tier as `settlements:finalize`/`accounting:period:manage` above).
+  // `orders:cancel` itself stays NOT step-up gated (the no-charge path has
+  // no money-moving effect) — only this key gates the financial-document
+  // creation specifically.
+  'cancellation_charges:issue',
+  // Task 3b.8 Checkpoint D — closes a gap left open by Checkpoint B:
+  // `PHASE_3B_8_TENANT_PERMISSIONS`'s own doc comment already stated
+  // "Credit Note/Refund VIEW is ungated, ISSUE/EXECUTE are step-up gated
+  // (STEP_UP_PERMISSIONS below)" at the time these two keys were registered
+  // and migrated, but neither was actually added to this set until now.
+  // Issuing a CreditNote and executing a Refund each create a real GL/money
+  // effect (same tier as `cancellation_charges:issue` above); `credit_notes:
+  // view`/`refunds:view` stay NOT step-up gated (ordinary read actions).
+  'credit_notes:issue',
+  'refunds:execute',
   ...PLATFORM_PERMISSIONS.filter(
     (k) =>
       k === 'platform:tenants:manage' ||

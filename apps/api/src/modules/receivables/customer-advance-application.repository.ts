@@ -8,6 +8,7 @@ import { OutboxWriter } from '../../common/audit/outbox.writer.js';
 import { PostingEngineService } from '../accounting/posting-engine.service.js';
 import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { applyAdvance } from './advance-application.js';
+import { loadAdvanceBalances, loadReceivableBalances } from './receivable-balance.repository.js';
 import { assertCustomerAccountEntryReferenceShape } from './customer-account-entry.js';
 import { CustomerReceiptEffectsRepository } from './customer-receipt-effects.repository.js';
 import type { ReceivablesEventType } from './receivables-events.js';
@@ -35,12 +36,13 @@ export interface ApplyCustomerAdvanceResult {
 
 /**
  * Task 3b.6 Checkpoint E (E11-E19) — the explicit, user-directed
- * CustomerAdvance -> CustomerReceivable application primitive. Supports
- * BOTH an INVOICE-sourced and an OPENING-sourced target receivable
- * generically (E12/E30) — this code never branches on the Advance's OWN
- * `sourceType` (PAYMENT or OPENING), only on the TARGET receivable's. No
- * FIFO, no auto-selection — the caller names the exact receivable (E11).
- * Creates NO PaymentAllocation — no new money is being received (E12).
+ * CustomerAdvance -> CustomerReceivable application primitive. Supports an
+ * INVOICE-sourced, an OPENING-sourced and (task 3b.8 Integration Closure) a
+ * CANCELLATION_CHARGE-sourced target receivable generically (E12/E30) — this
+ * code never branches on the Advance's OWN `sourceType` (PAYMENT / OPENING /
+ * CREDIT_NOTE), only on the TARGET receivable's. No FIFO, no auto-selection —
+ * the caller names the exact receivable (E11). Creates NO PaymentAllocation —
+ * no new money is being received (E12).
  *
  * Canonical lock order (B15, reused verbatim): coverage-anchor (the
  * underlying Invoice row for an INVOICE-sourced target, the
@@ -143,57 +145,66 @@ export class CustomerAdvanceApplicationRepository {
     //      CustomerCompanyAccount, THEN CustomerAdvance — recomputing every
     //      figure from authoritative, now-locked facts (E13/E14/E15, never
     //      the pre-lock peek). ──────────────────────────────────────────
-    let invoiceTotalMinor: bigint | null = null;
-    let openingAmountMinor: bigint | null = null;
+    // The coverage anchor is the underlying `invoice` row for an INVOICE target
+    // and the `customer_receivable` row itself for every NON-invoice target
+    // (OPENING / CANCELLATION_CHARGE — the same anchor the DB coverage backstop
+    // locks).
     if (receivablePeek.sourceType === 'INVOICE') {
-      const invRows = await tx.$queryRaw<{ id: string; totalAmountMinor: bigint }[]>`
-        SELECT "id", "totalAmountMinor" FROM "invoice" WHERE "id" = ${receivablePeek.invoiceId}::uuid FOR UPDATE`;
-      invoiceTotalMinor = invRows[0]!.totalAmountMinor;
+      await tx.$queryRaw`SELECT "id" FROM "invoice" WHERE "id" = ${receivablePeek.invoiceId}::uuid FOR UPDATE`;
     } else {
-      const recvRows = await tx.$queryRaw<{ openingAmountMinor: bigint }[]>`
-        SELECT "openingAmountMinor" FROM "customer_receivable" WHERE "id" = ${receivablePeek.id}::uuid FOR UPDATE`;
-      openingAmountMinor = recvRows[0]!.openingAmountMinor;
+      await tx.$queryRaw`SELECT "id" FROM "customer_receivable" WHERE "id" = ${receivablePeek.id}::uuid FOR UPDATE`;
     }
 
     await tx.$queryRaw`SELECT "id" FROM "customer_company_account" WHERE "id" = ${advancePeek.customerCompanyAccountId}::uuid FOR UPDATE`;
 
     const advanceRows = await tx.$queryRaw<
-      { id: string; amountMinor: bigint; currencyCode: string; currencyExponent: number }[]
+      { id: string; currencyCode: string; currencyExponent: number }[]
     >`
-      SELECT "id", "amountMinor", "currencyCode", "currencyExponent" FROM "customer_advance"
+      SELECT "id", "currencyCode", "currencyExponent" FROM "customer_advance"
        WHERE "id" = ${input.advanceId}::uuid FOR UPDATE`;
     const advance = advanceRows[0]!;
 
     // ── 3. recompute Advance-available and receivable-outstanding under
-    //      lock (E14/E15 — the frozen A/D read logic, never re-implemented). ─
-    const advanceAppliedRows = await tx.$queryRaw<{ total: bigint }[]>`
-      SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "customer_advance_application" WHERE "customerAdvanceId" = ${input.advanceId}::uuid`;
-    const appliedSoFarMinor = advanceAppliedRows[0]!.total;
-
-    let receivableOutstandingMinor: bigint;
-    if (receivablePeek.sourceType === 'INVOICE') {
-      const allocRows = await tx.$queryRaw<{ total: bigint }[]>`
-        SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "payment_allocation" WHERE "invoiceId" = ${receivablePeek.invoiceId}::uuid`;
-      const advAppOnReceivableRows = await tx.$queryRaw<{ total: bigint }[]>`
-        SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "customer_advance_application" WHERE "customerReceivableId" = ${receivablePeek.id}::uuid`;
-      receivableOutstandingMinor =
-        invoiceTotalMinor! - allocRows[0]!.total - advAppOnReceivableRows[0]!.total;
-    } else {
-      const payAppRows = await tx.$queryRaw<{ total: bigint }[]>`
-        SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "customer_receivable_payment_application" WHERE "customerReceivableId" = ${receivablePeek.id}::uuid`;
-      const advAppOnReceivableRows2 = await tx.$queryRaw<{ total: bigint }[]>`
-        SELECT COALESCE(SUM("amountMinor"), 0)::bigint AS total FROM "customer_advance_application" WHERE "customerReceivableId" = ${receivablePeek.id}::uuid`;
-      receivableOutstandingMinor =
-        openingAmountMinor! - payAppRows[0]!.total - advAppOnReceivableRows2[0]!.total;
+    //      lock (E14/E15) — through the ONE canonical balance loader (task
+    //      3b.8 Integration Closure). The receivable formula is by source type
+    //      (INVOICE incl. a CreditNote's AR reduction / OPENING /
+    //      CANCELLATION_CHARGE — never an "else OPENING" fallthrough); the
+    //      advance's `consumed` is applications + refund applications + PENDING
+    //      provider-refund reservations, exactly what the DB capacity backstop
+    //      enforces, so an over-ask is a clean 409 here and never a raw DB
+    //      exception. ──────────────────────────────────────────────────────
+    const [receivableBalance] = await loadReceivableBalances(tx, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      customerCompanyAccountId: advancePeek.customerCompanyAccountId,
+      receivableId: receivablePeek.id,
+    });
+    const [advanceBalance] = await loadAdvanceBalances(tx, {
+      tenantId: input.tenantId,
+      companyId: input.companyId,
+      customerCompanyAccountId: advancePeek.customerCompanyAccountId,
+      advanceId: input.advanceId,
+    });
+    if (!receivableBalance) {
+      throw new NotFoundError('customer_receivable', 'CUSTOMER_RECEIVABLE_NOT_FOUND');
     }
+    if (!advanceBalance) {
+      throw new NotFoundError('customer_advance', 'CUSTOMER_ADVANCE_NOT_FOUND');
+    }
+    const receivableOutstandingMinor = receivableBalance.outstandingMinor;
 
     // ── E14 — Checkpoint A's own frozen, pure validation/arithmetic; never
-    //      re-implemented here. Throws a plain RangeError for any invalid
-    //      proposal, mapped to a bounded DomainError below. ──────────────
+    //      re-implemented here (`appliedSoFarMinor` is, for this purpose,
+    //      everything already CONSUMED from the advance). Throws a plain
+    //      RangeError for any invalid proposal, mapped to a bounded DomainError
+    //      below. ────────────────────────────────────────────────────────
     let applied: ReturnType<typeof applyAdvance>;
     try {
       applied = applyAdvance({
-        advance: { advancePrincipalMinor: advance.amountMinor, appliedSoFarMinor },
+        advance: {
+          advancePrincipalMinor: advanceBalance.principalMinor,
+          appliedSoFarMinor: advanceBalance.consumedMinor,
+        },
         targetReceivableOutstandingMinor: receivableOutstandingMinor,
         proposedApplicationAmountMinor: input.amountMinor,
       });

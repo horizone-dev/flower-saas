@@ -5,8 +5,8 @@ import {
   type CustomerAccountEntryKind,
 } from './customer-account-entry.js';
 
-describe('CUSTOMER_ACCOUNT_ENTRY_KINDS (3b.6 Checkpoint A + Checkpoint D additive extension)', () => {
-  it("is exactly the frozen 7-kind vocabulary plus Checkpoint D's additive 8th kind, no more, no less", () => {
+describe('CUSTOMER_ACCOUNT_ENTRY_KINDS (3b.6 Checkpoint A + D additive extension + task 3b.8 additive kinds)', () => {
+  it("is exactly the 8-kind 3b.6 vocabulary (7 frozen + Checkpoint D's additive 8th) plus task 3b.8's additive kinds, no more, no less", () => {
     expect(CUSTOMER_ACCOUNT_ENTRY_KINDS).toEqual([
       'INVOICE',
       'PAYMENT',
@@ -16,13 +16,25 @@ describe('CUSTOMER_ACCOUNT_ENTRY_KINDS (3b.6 Checkpoint A + Checkpoint D additiv
       'ADVANCE_APPLIED',
       'OPENING_RECEIVABLE',
       'OPENING_ADVANCE',
+      // task 3b.8 (migration 44's `customer_account_entry_kind_chk` reserved exactly these 3)
+      'CANCELLATION_CHARGE',
+      'CREDIT_NOTE',
+      'REFUND',
+      // task 3b.8 Integration Closure (migration 46) — a Payment applied to a
+      // CANCELLATION_CHARGE receivable; the legacy
+      // `OPENING_RECEIVABLE_PAYMENT_APPLIED` stays frozen for opening-balance history
+      'CANCELLATION_CHARGE_PAYMENT_APPLIED',
     ]);
   });
 
-  it('never includes a later-task kind (SETTLEMENT_DISCOUNT/CREDIT_NOTE/REFUND/WRITE_OFF)', () => {
+  it('keeps the legacy opening-receivable payment kind AND the new charge payment kind as two DISTINCT kinds', () => {
+    expect(CUSTOMER_ACCOUNT_ENTRY_KINDS).toContain('OPENING_RECEIVABLE_PAYMENT_APPLIED');
+    expect(CUSTOMER_ACCOUNT_ENTRY_KINDS).toContain('CANCELLATION_CHARGE_PAYMENT_APPLIED');
+    expect('OPENING_RECEIVABLE_PAYMENT_APPLIED').not.toBe('CANCELLATION_CHARGE_PAYMENT_APPLIED');
+  });
+
+  it('never includes a kind no task has added (SETTLEMENT_DISCOUNT / WRITE_OFF — no 3b.8 concept requires either)', () => {
     expect(CUSTOMER_ACCOUNT_ENTRY_KINDS).not.toContain('SETTLEMENT_DISCOUNT');
-    expect(CUSTOMER_ACCOUNT_ENTRY_KINDS).not.toContain('CREDIT_NOTE');
-    expect(CUSTOMER_ACCOUNT_ENTRY_KINDS).not.toContain('REFUND');
     expect(CUSTOMER_ACCOUNT_ENTRY_KINDS).not.toContain('WRITE_OFF');
   });
 });
@@ -39,6 +51,13 @@ describe('assertCustomerAccountEntryReferenceShape (3b.6 Checkpoint A)', () => {
     ['ADVANCE', 'customerAdvanceId'],
     ['OPENING_ADVANCE', 'customerAdvanceId'],
     ['ADVANCE_APPLIED', 'customerAdvanceApplicationId'],
+    // task 3b.8 additive kinds
+    ['CANCELLATION_CHARGE', 'customerReceivableId'],
+    ['CREDIT_NOTE', 'creditNoteId'],
+    ['REFUND', 'customerAdvanceRefundApplicationId'],
+    // task 3b.8 Integration Closure — same sole reference column as the legacy
+    // opening-receivable payment kind, but its own kind
+    ['CANCELLATION_CHARGE_PAYMENT_APPLIED', 'customerReceivablePaymentApplicationId'],
   ];
 
   for (const [kind, column] of exactlyOneReferenceCase) {

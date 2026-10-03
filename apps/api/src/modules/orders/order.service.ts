@@ -75,4 +75,20 @@ export class OrderService {
   }): Promise<OrderRow> {
     return this.repo.resumeForBranchScoped(input);
   }
+
+  /** Task 3b.8 Checkpoint C — no-charge and with-charge paths (see `OrderRepository`). */
+  cancel(input: {
+    companyId: string;
+    branchId: string;
+    orderId: string;
+    expectedVersion: number;
+    reason: string;
+    cancellationCharge?: {
+      requestedAmountMinor: bigint;
+      reasonCode: string;
+      accountingDate?: string;
+    };
+  }): Promise<OrderRow> {
+    return this.repo.cancelForBranchScoped(input);
+  }
 }

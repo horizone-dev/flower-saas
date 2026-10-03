@@ -10,7 +10,7 @@
  *
  * This function does NOT check overpayment against the Invoice's
  * outstanding balance — that requires the locked Invoice state
- * (`computeAvailableToCollect`, checked by the caller under the lock) and
+ * (`computeAvailableToCollectFromOutstanding`, checked by the caller under the lock) and
  * is out of scope for this pure pairwise assertion. Future 3b.6+
  * multi-invoice fan-out changes how many Allocation rows exist per Payment,
  * not this pairwise equality contract.

@@ -1162,6 +1162,151 @@ describe('Checkpoint F — verified provider webhook / durable inbox / async cap
       const row = await inboxStatus(credentialId, eventId);
       expect(row!.status).toBe('EXCEPTION');
     });
+
+    /** task 3b.8 Integration Closure (F1) — a FULL pure-AR-reduction
+     *  CreditNote for a `freshInvoice`-shaped invoice (one line, qty 1, unit
+     *  price = total, no tax), header + line in ONE transaction (the
+     *  completeness triggers are deferred). */
+    async function creditNoteInvoiceFully(invoiceId: string, totalMinor: bigint): Promise<void> {
+      const { rows } = await pool.query<{ branchId: string; lineId: string }>(
+        `SELECT i."branchId", (SELECT ol.id FROM order_line ol WHERE ol."orderId" = i."orderId" LIMIT 1) AS "lineId"
+           FROM invoice i WHERE i.id = $1`,
+        [invoiceId],
+      );
+      const { branchId, lineId } = rows[0]!;
+      const cnId = uid();
+      const c = await pool.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query(
+          `INSERT INTO credit_note
+             (id,"tenantId","companyId","branchId","invoiceId","creditNoteNumber","issuedAt","accountingDate",
+              "currencyCode","currencyExponent","reasonCode","subtotalAmountMinor","taxTotalAmountMinor",
+              "totalAmountMinor","arReductionMinor","advanceExcessMinor")
+           VALUES ($1,$2,$3,$4,$5,$6,now(),CURRENT_DATE,'AED',2,'CUSTOMER_REQUEST',$7,0,$7,$7,0)`,
+          [cnId, TENANT, COMPANY, branchId, invoiceId, `CN-F-${cnId.slice(0, 8)}`, totalMinor],
+        );
+        await c.query(
+          `INSERT INTO credit_note_line
+             (id,"tenantId","companyId","creditNoteId","orderLineId","quantityCredited","grossCreditedMinor",
+              "discountCreditedMinor","documentDiscountShareCreditedMinor","netAfterDocumentDiscountCreditedMinor",
+              "taxCreditedMinor","lineTotalCreditedMinor","currencyCode","currencyExponent")
+           VALUES ($1,$2,$3,$4,$5,'1.0000',$6,0,0,$6,0,$6,'AED',2)`,
+          [uid(), TENANT, COMPANY, cnId, lineId, totalMinor],
+        );
+        await c.query('COMMIT');
+      } catch (err) {
+        await c.query('ROLLBACK');
+        throw err;
+      } finally {
+        c.release();
+      }
+    }
+
+    it('D (F1): an attempt reserved BEFORE a CreditNote closed the invoice, then a verified CAPTURED -> fails closed: EXCEPTION, no Payment/Allocation, attempt untouched (never a raw DB error / poison retry)', async () => {
+      const providerKey = `tap-int-d-${uid()}`;
+      const { credentialId, endpointId } = await createCredentialAndEndpoint(providerKey);
+      const invoiceId = await freshInvoice(100n);
+      const attemptId = await createAttempt({
+        invoiceId,
+        amountMinor: 60n,
+        providerKey,
+        providerCredentialId: credentialId,
+      });
+      await creditNoteInvoiceFully(invoiceId, 100n);
+
+      const registry = new PaymentProviderRegistry();
+      const eventId = `evt-${uid()}`;
+      registry.register(
+        providerKey,
+        fakeWebhookAdapter({
+          kind: 'verifies',
+          event: {
+            providerEventId: eventId,
+            eventType: 'x',
+            paymentAttemptId: attemptId,
+            targetState: 'CAPTURED',
+          },
+        }),
+      );
+      await makeWebhookRepo(registry).handle({
+        endpointId,
+        rawBody: Buffer.from('{}'),
+        headers: {},
+      });
+
+      expect(await attemptState(attemptId)).toBe('PENDING');
+      expect(await paymentCount(attemptId)).toBe(0);
+      const { rows } = await pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM payment_allocation WHERE "invoiceId" = $1`,
+        [invoiceId],
+      );
+      expect(rows[0]!.n).toBe('0');
+      // terminal, reason-coded EXCEPTION — NOT left RECEIVED for endless retries
+      const row = await inboxStatus(credentialId, eventId);
+      expect(row!.status).toBe('EXCEPTION');
+    });
+
+    // task 3b.8 Integration Closure (F4) — lock graph guard. The post-invoice cancellation locks
+    // ORDER -> INVOICE. A webhook capture locks INVOICE -> ATTEMPT -> inbox row and only READS the
+    // order (a plain SELECT) — it inserts no row that references it. So it must never WAIT on the
+    // order row: proven here by letting a canceller hold the ORDER lock (FOR UPDATE) for the whole
+    // capture. If the capture ever started touching the order with a lock it would hang here, and
+    // become one half of the deadlock the payment paths used to be.
+    it('F4 (lock graph): a verified CAPTURED completes WHILE a canceller holds the ORDER row lock — the capture never waits on the order, so it can never close a cycle with a cancellation', async () => {
+      const providerKey = `tap-int-f4-${uid()}`;
+      const { credentialId, endpointId } = await createCredentialAndEndpoint(providerKey);
+      const invoiceId = await freshInvoice(100n);
+      const attemptId = await createAttempt({
+        invoiceId,
+        amountMinor: 60n,
+        providerKey,
+        providerCredentialId: credentialId,
+      });
+      const orderId = (
+        await pool.query<{ orderId: string }>(`SELECT "orderId" FROM invoice WHERE id = $1`, [
+          invoiceId,
+        ])
+      ).rows[0]!.orderId;
+
+      const registry = new PaymentProviderRegistry();
+      const eventId = `evt-${uid()}`;
+      registry.register(
+        providerKey,
+        fakeWebhookAdapter({
+          kind: 'verifies',
+          event: {
+            providerEventId: eventId,
+            eventType: 'x',
+            paymentAttemptId: attemptId,
+            targetState: 'CAPTURED',
+          },
+        }),
+      );
+
+      const canceller = await pool.connect();
+      try {
+        await canceller.query('BEGIN');
+        await canceller.query(`SELECT "id" FROM "order" WHERE "id" = $1 FOR UPDATE`, [orderId]);
+
+        const outcome = await Promise.race([
+          makeWebhookRepo(registry)
+            .handle({ endpointId, rawBody: Buffer.from('{}'), headers: {} })
+            .then(() => 'done' as const),
+          new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 15_000)),
+        ]);
+        expect(outcome, 'the webhook capture waited on the ORDER row').toBe('done');
+        expect(await attemptState(attemptId)).toBe('CAPTURED');
+        expect(await paymentCount(attemptId)).toBe(1);
+
+        // and the canceller can still take the invoice afterwards — no cycle
+        await canceller.query(`SELECT "id" FROM "invoice" WHERE "id" = $1 FOR UPDATE`, [invoiceId]);
+        await canceller.query('COMMIT');
+      } finally {
+        await canceller.query('ROLLBACK').catch(() => undefined);
+        canceller.release();
+      }
+    });
   });
 
   // ══════════════ §F24 — FAILED/CANCELED release, later local collection ═

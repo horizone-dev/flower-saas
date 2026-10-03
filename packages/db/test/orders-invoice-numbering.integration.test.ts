@@ -1423,10 +1423,15 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
        VALUES ($1,$2,'INVOICE',5)`,
       [TENANT, COMPANY],
     );
+    // 'CREDIT_NOTE' is a real, valid documentType as of Task 3b.8 Checkpoint B
+    // (migration `20261005120000_phase_3b8_credit_refund_core` widened this
+    // CHECK to add it, alongside 'CANCELLATION_CHARGE') — a genuinely bogus
+    // value is used here instead to keep proving the CHECK still rejects
+    // anything outside the closed vocabulary.
     await expect(
       pool.query(
         `INSERT INTO document_number_counter ("tenantId","companyId","documentType","nextNumber")
-         VALUES ($1,$2,'CREDIT_NOTE',1)`,
+         VALUES ($1,$2,'BOGUS_DOCUMENT_TYPE',1)`,
         [TENANT, COMPANY_2],
       ),
     ).rejects.toThrow(/document_number_counter_document_type_chk|violates check constraint/i);
@@ -1567,13 +1572,17 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
     expect(rows).toHaveLength(0);
   });
 
-  it('no AR/Advance/Settlement/Cancellation/Refund/CreditNote/Inventory table exists', async () => {
+  it('no AR/Advance/Settlement/Inventory table exists (Cancellation/Refund/CreditNote are now Task 3b.8)', async () => {
     // `payment` / `payment_attempt` / `payment_allocation` are task 3b.5
     // (Phase 3b, approved and implemented) and legitimately exist now —
     // `payment_method_config` was the ORIGINAL plan's proposed name, never
-    // actually built (the real implementation has no such table); every
-    // other name here remains a later, unimplemented task (3b.6-3b.8 /
-    // Phase 5).
+    // actually built (the real implementation has no such table). `refund`
+    // and `credit_note` are Task 3b.8 Checkpoint B (migration
+    // `20261005120000_phase_3b8_credit_refund_core`) and now legitimately
+    // exist too — removed from this guard list accordingly. Every other name
+    // here remains a later, unimplemented task (3b.6 AR/Advance naming never
+    // matched these literal names either — see `customer_receivable`/
+    // `customer_advance` — or Phase 5 inventory).
     const { rows } = await pool.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables
         WHERE table_name = ANY($1)`,
@@ -1584,8 +1593,6 @@ describe('packages/db — Task 3b.3 Checkpoint A orders/invoice/numbering schema
           'advance_transaction',
           'settlement',
           'cancellation',
-          'refund',
-          'credit_note',
           'inventory_movement',
           'branch_inventory_balance',
           'stock_reservation',
