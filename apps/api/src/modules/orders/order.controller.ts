@@ -143,8 +143,14 @@ export class OrderController {
     assertUuid(companyId, 'company');
     assertUuid(branchId, 'branch');
     assertUuid(id, 'order');
-    const { order, lines } = await this.orders.get({ companyId, branchId, orderId: id });
-    return { order: serializeOrder(order), lines: lines.map(serializeLine) };
+    const { order, lines, issuedInvoice } = await this.orders.get({
+      companyId,
+      branchId,
+      orderId: id,
+    });
+    // `issuedInvoice` (task 3b.9, OD-13): the frozen five-field summary of the ISSUED invoice,
+    // or null — read from the invoice row itself, never rebuilt from anything else
+    return { order: serializeOrder(order), lines: lines.map(serializeLine), issuedInvoice };
   }
 
   @Patch(':id')

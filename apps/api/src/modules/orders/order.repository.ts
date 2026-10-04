@@ -28,6 +28,9 @@ import {
   type CommercialSnapshotLine,
 } from './commercial-snapshot.js';
 import { computeLineTaxAmountMinor, inclusiveNetAmountMinor } from './tax-arithmetic.js';
+// 3b.9-order-invoice:begin
+import { toOrderInvoiceSummary, type OrderInvoiceSummary } from './order-invoice-summary.js';
+// 3b.9-order-invoice:end
 import {
   CancellationChargeRepository,
   type ResolvedCancellationChargeTax,
@@ -434,6 +437,68 @@ export class OrderRepository extends ScopedRepository {
     });
   }
 
+  // 3b.9-order-invoice:begin
+  /**
+   * Task 3b.9 Checkpoint E (OD-13) — the Order read WITH the additive, read-only
+   * `issuedInvoice` recovery summary, in ONE scoped transaction (so the order and its invoice
+   * are one consistent view). A client that lost the `complete-sale` response — or the
+   * idempotency cache's knowledge of it — recovers the invoice id / number / date / total /
+   * payment status from here, using the existing `orders:view` authority.
+   *
+   * The invoice row is the ONLY source (`invoice.orderId` is UNIQUE): nothing is rebuilt from
+   * payments, the customer account or the mutable order, and the mapping is the frozen pure
+   * `toOrderInvoiceSummary` — exactly its five fields. `null` while the order has no invoice.
+   * Added beside the frozen `getForBranchScoped` (left byte-identical) rather than changing it.
+   */
+  async getWithIssuedInvoiceForBranchScoped(input: {
+    companyId: string;
+    branchId: string;
+    orderId: string;
+  }): Promise<{
+    order: OrderRow;
+    lines: OrderLineRow[];
+    issuedInvoice: OrderInvoiceSummary | null;
+  }> {
+    const { tenantId } = requireTenantContext();
+    return this.scoped(async (tx) => {
+      const order = await tx.order.findFirst({
+        where: {
+          id: input.orderId,
+          tenantId,
+          companyId: input.companyId,
+          originBranchId: input.branchId,
+        },
+      });
+      if (!order) throw new NotFoundError('order', 'ORDER_NOT_FOUND');
+      const lines = await tx.orderLine.findMany({
+        where: { orderId: order.id, tenantId, companyId: input.companyId },
+        orderBy: { linePosition: 'asc' },
+      });
+      const invoices = await tx.$queryRaw<
+        {
+          id: string;
+          invoiceNumber: string;
+          invoiceDate: string;
+          totalAmountMinor: bigint;
+          invoicePaymentStatus: string;
+        }[]
+      >`
+        SELECT "id", "invoiceNumber", "invoiceDate"::text AS "invoiceDate",
+               "totalAmountMinor", "invoicePaymentStatus"
+          FROM "invoice"
+         WHERE "orderId" = ${order.id}::uuid
+           AND "tenantId" = ${tenantId}::uuid
+           AND "companyId" = ${input.companyId}::uuid
+           AND "branchId" = ${input.branchId}::uuid`;
+      return {
+        order: mapOrderRow(order),
+        lines: lines.map(mapOrderLineRow),
+        issuedInvoice: toOrderInvoiceSummary(invoices[0] ?? null),
+      };
+    });
+  }
+
+  // 3b.9-order-invoice:end
   async listForBranchScoped(input: {
     companyId: string;
     branchId: string;

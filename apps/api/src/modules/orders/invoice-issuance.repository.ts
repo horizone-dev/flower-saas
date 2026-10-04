@@ -65,6 +65,21 @@ export interface IssueFinalInvoiceInput {
    * by this primitive's caller directly.
    */
   creditOverride?: AuthorizedCreditOverride;
+  // 3b.9-credit-exposure:begin
+  /**
+   * Task 3b.9 (owner ruling: the credit limit applies to the RESULTING receivable exposure, not the
+   * gross invoice total, for atomic customer sales) — an OPTIONAL, INTERNAL, TRUSTED amount: the
+   * receivable exposure this sale will actually ADD (invoice total − same-sale tenders − same-sale
+   * advances). When present, the credit-limit gate evaluates it INSTEAD of the invoice total; when
+   * omitted (every other caller) the gate keeps the frozen invoice-total basis, unchanged. It only
+   * changes the gate's basis — the receivable is still booked for the FULL invoice total.
+   *
+   * It is computed by the 3b.9 atomic-sale orchestrator, which then PROVES the committed receivable
+   * equals it (and rolls the whole sale back otherwise). It is not on any DTO and must never be
+   * derived from a request; it must be 0 ≤ value ≤ the invoice total.
+   */
+  finalSaleOutstandingMinor?: bigint;
+  // 3b.9-credit-exposure:end
   actorUserId?: string | null;
 }
 
@@ -438,13 +453,29 @@ export class InvoiceIssuanceRepository {
     //       credit sale burns no gapless number. Walk-in (`customerId === null`)
     //       skips this entirely — `creditResult` stays `null`, and every
     //       downstream 3b.6 branch below is gated on that same null check. ──
+    // 3b.9-credit-exposure:begin
+    const finalSaleOutstandingMinor =
+      input.finalSaleOutstandingMinor ?? input.totals.totalAmountMinor;
+    if (
+      input.finalSaleOutstandingMinor !== undefined &&
+      (typeof input.finalSaleOutstandingMinor !== 'bigint' ||
+        input.finalSaleOutstandingMinor < 0n ||
+        input.finalSaleOutstandingMinor > input.totals.totalAmountMinor)
+    ) {
+      throw new DomainError(
+        'ORDER_CREDIT_EXPOSURE_INVALID',
+        'the credit exposure must be an exact amount between 0 and the invoice total',
+        422,
+      );
+    }
+    // 3b.9-credit-exposure:end
     const creditResult = order.customerId
       ? await this.customerInvoiceAr.lockAndAuthorizeCredit(tx, {
           tenantId: input.tenantId,
           companyId: input.companyId,
           customerId: order.customerId,
           paymentIntent: input.paymentIntent,
-          proposedAmountMinor: input.totals.totalAmountMinor,
+          proposedAmountMinor: finalSaleOutstandingMinor,
           ...(input.creditOverride !== undefined ? { creditOverride: input.creditOverride } : {}),
         })
       : null;

@@ -538,31 +538,32 @@ before locking exact strings, exactly mirroring how Task 3.10 fixed its 5
 
 ## G. Hard-gate matrix (Phase 3b — build-blocking at the task that introduces each)
 
-| Gate                          | Proof required                                                                                                                                                                         |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| HG3b-COA                      | DB backstop rejects an unbalanced insert; account-key immutability                                                                                                                     |
-| HG3b-PERIOD-INTEGRITY         | no overlap, no silent creation, `CLOSED` rejects posting, close-only (no reopen)                                                                                                       |
-| HG3b-POSTING-DATE             | Company-timezone-derived, never branch/POS/client; immutable after later config change                                                                                                 |
-| HG3b-CREDIT-CONCURRENCY       | parallel credit sales never both exceed the limit                                                                                                                                      |
-| HG3b-ORDER-INVOICE-SPLIT      | a posted invoice's referenced order-line fields never drift                                                                                                                            |
-| HG3b-TAX-MODE                 | both EXCLUSIVE/INCLUSIVE paths; line vs. document rounding                                                                                                                             |
-| HG3b-PRE-PAYMENT-SNAPSHOT     | finalization uses the attempt-bound snapshot even if catalog price/tax later changes                                                                                                   |
-| HG3b-PAYMENT-ATTEMPT          | provider-success/local-failure recovers without re-charging; crash-before-response-persisted still recoverable                                                                         |
-| HG3b-MULTI-PAYMENT            | every named combination + failed/pending component + retry-after-partial-success, no duplicate effects                                                                                 |
-| HG3b-WEBHOOK-DEDUP            | `(provider, provider_event_key)` uniqueness; concurrent duplicate delivery never double-finalizes                                                                                      |
-| HG3b-PCI                      | structural guard — no card-secret-shaped field anywhere in DB/audit/outbox/logs                                                                                                        |
-| HG3b-AR                       | all invoice states + reconciliation invariant                                                                                                                                          |
-| HG3b-ADVANCE-CONCURRENCY      | no double-spend of an advance balance                                                                                                                                                  |
-| HG3b-SETTLEMENT               | AUTO-FIFO determinism, manual, discount, approval, reversal                                                                                                                            |
-| HG3b-CANCEL-REFUND-CREDITNOTE | every ADR-0019 Part B scenario + full reconstructible chains for Cancellation/Refund/Credit Note                                                                                       |
-| HG3b-GL                       | every posting template (unallocated cash/provider receipt, allocate-to-invoice, convert-to-advance, apply-advance, credit-sale, write-off) balances, is source-idempotent, append-only |
-| HG3b-ATOMIC-SALE              | one successful commit / failure rollback / retry / concurrent request / outbox-audit-journal consistency                                                                               |
-| HG3b-CURRENCY-LOCK            | mismatch fails safe; post-history currency change blocked                                                                                                                              |
-| HG3b-SECURITY                 | cross-tenant/company/branch denial; POS origin never an isolation axis; RLS                                                                                                            |
-| HG3b-REALTIME                 | scoping, resume/replay, narrowing, cursor — reusing the proven 3a suite pattern                                                                                                        |
-| HG3b-NO-BT-BRANCH             | structural gate extended to every new Phase 3b file                                                                                                                                    |
-| HG3b-REGRESSION               | the full Phase 0 → 3a suite stays green after every Phase 3b task                                                                                                                      |
-| HG3b-CI                       | `verify`/`security`/`e2e`/`realtime` green on every Phase 3b PR                                                                                                                        |
+| Gate                          | Proof required                                                                                                                                                                                                                                                                        |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HG3b-COA                      | DB backstop rejects an unbalanced insert; account-key immutability                                                                                                                                                                                                                    |
+| HG3b-PERIOD-INTEGRITY         | no overlap, no silent creation, `CLOSED` rejects posting, close-only (no reopen)                                                                                                                                                                                                      |
+| HG3b-POSTING-DATE             | Company-timezone-derived, never branch/POS/client; immutable after later config change                                                                                                                                                                                                |
+| HG3b-CREDIT-CONCURRENCY       | parallel credit sales never both exceed the limit                                                                                                                                                                                                                                     |
+| HG3b-ORDER-INVOICE-SPLIT      | a posted invoice's referenced order-line fields never drift                                                                                                                                                                                                                           |
+| HG3b-TAX-MODE                 | both EXCLUSIVE/INCLUSIVE paths; line vs. document rounding                                                                                                                                                                                                                            |
+| HG3b-PRE-PAYMENT-SNAPSHOT     | finalization uses the attempt-bound snapshot even if catalog price/tax later changes                                                                                                                                                                                                  |
+| HG3b-PAYMENT-ATTEMPT          | provider-success/local-failure recovers without re-charging; crash-before-response-persisted still recoverable                                                                                                                                                                        |
+| HG3b-MULTI-PAYMENT            | every named combination + failed/pending component + retry-after-partial-success, no duplicate effects                                                                                                                                                                                |
+| HG3b-WEBHOOK-DEDUP            | `(provider, provider_event_key)` uniqueness; concurrent duplicate delivery never double-finalizes                                                                                                                                                                                     |
+| HG3b-PCI                      | structural guard — no card-secret-shaped field anywhere in DB/audit/outbox/logs                                                                                                                                                                                                       |
+| HG3b-AR                       | all invoice states + reconciliation invariant                                                                                                                                                                                                                                         |
+| HG3b-ADVANCE-CONCURRENCY      | no double-spend of an advance balance                                                                                                                                                                                                                                                 |
+| HG3b-SETTLEMENT               | AUTO-FIFO determinism, manual, discount, approval, reversal                                                                                                                                                                                                                           |
+| HG3b-CANCEL-REFUND-CREDITNOTE | every ADR-0019 Part B scenario + full reconstructible chains for Cancellation/Refund/Credit Note                                                                                                                                                                                      |
+| HG3b-GL                       | every posting template (unallocated cash/provider receipt, allocate-to-invoice, convert-to-advance, apply-advance, credit-sale, write-off) balances, is source-idempotent, append-only                                                                                                |
+| HG3b-ATOMIC-SALE              | one successful commit / failure rollback / retry / concurrent request / outbox-audit-journal consistency                                                                                                                                                                              |
+| HG3b-SALE-LATENCY             | Phase-3 FINAL hard gate: re-measure the atomic-sale transaction and company document-counter latency under a representative environment. The Task 3b.9 Checkpoint C figure (7–11 sales/s/company) is a non-production benchmark from a local test container, NOT a capacity guarantee |
+| HG3b-CURRENCY-LOCK            | mismatch fails safe; post-history currency change blocked                                                                                                                                                                                                                             |
+| HG3b-SECURITY                 | cross-tenant/company/branch denial; POS origin never an isolation axis; RLS                                                                                                                                                                                                           |
+| HG3b-REALTIME                 | scoping, resume/replay, narrowing, cursor — reusing the proven 3a suite pattern                                                                                                                                                                                                       |
+| HG3b-NO-BT-BRANCH             | structural gate extended to every new Phase 3b file                                                                                                                                                                                                                                   |
+| HG3b-REGRESSION               | the full Phase 0 → 3a suite stays green after every Phase 3b task                                                                                                                                                                                                                     |
+| HG3b-CI                       | `verify`/`security`/`e2e`/`realtime` green on every Phase 3b PR                                                                                                                                                                                                                       |
 
 ---
 
@@ -651,3 +652,16 @@ written. `DECISION-LOG.md` is unchanged — it records only the original 23
 approved architecture decisions (Z-1…Z-14, ZF-1…ZF-9); phase-level decisions
 have always lived in each phase's own plan document, not there (matching
 every prior Phase 1/2/3a plan's own precedent).
+
+---
+
+## L. Release blockers (owner-recorded)
+
+Items that do not block a development task but **must** be resolved before a production / MVP release that
+enables the feature. Recorded here so they cannot be lost; detail in
+[`TASK-3B9-PLAN.md`](TASK-3B9-PLAN.md) §6 and decision-log row `3b.9-OD`.
+
+- **RB-1 — anonymous issued-sale void / refund resolution** (Task 3b.9, owner ruling OD-8). An issued
+  anonymous walk-in sale cannot use the existing CreditNote / refund path (Task 3b.8 requires a
+  customer-linked order). It must be designed and completed before any production / MVP release that
+  enables anonymous sales.

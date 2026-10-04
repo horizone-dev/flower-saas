@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OrderRepository, type OrderRow, type OrderLineRow } from './order.repository.js';
 import type { OrderLineInputDto } from './dto/order-line-input.dto.js';
+import type { OrderInvoiceSummary } from './order-invoice-summary.js';
 
 /**
  * Task 3b.3 Checkpoint B — thin pass-through over `OrderRepository`'s scoped
@@ -28,8 +29,9 @@ export class OrderService {
   get(input: { companyId: string; branchId: string; orderId: string }): Promise<{
     order: OrderRow;
     lines: OrderLineRow[];
+    issuedInvoice: OrderInvoiceSummary | null;
   }> {
-    return this.repo.getForBranchScoped(input);
+    return this.repo.getWithIssuedInvoiceForBranchScoped(input);
   }
 
   list(input: {

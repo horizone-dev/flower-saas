@@ -142,6 +142,9 @@ import { RefundController } from './refund.controller.js';
     PaymentCustomerAttributionRepository,
     CustomerReceiptEffectsRepository,
     OpeningBalanceRepository,
+    // task 3b.9 Checkpoint E — additive: `SalesModule` reuses THIS instance of the frozen
+    // CustomerAdvance application primitive (never a second provider).
+    CustomerAdvanceApplicationRepository,
   ],
 })
 export class ReceivablesModule {}

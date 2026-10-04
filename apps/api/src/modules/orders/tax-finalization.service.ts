@@ -8,19 +8,33 @@ import { Injectable } from '@nestjs/common';
 // supplied, already-scoped `tx`.
 // eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
 import type { ScopedTx } from '@flower/db';
-import { Money, type RoundingMode } from '@flower/money';
-import { Quantity } from '@flower/uom';
 import { NotFoundError } from '../../common/errors/domain-error.js';
 import {
   InvoiceIssuanceRepository,
   type IssueFinalInvoiceResult,
-  type FinalizedLineTax,
-  type FinalizedTotals,
 } from './invoice-issuance.repository.js';
-import { allocateDocumentDiscount } from './document-discount-allocation.js';
-import { exactLineTax, roundExact, reconcileDocumentTax } from './tax-arithmetic.js';
+import {
+  computeCanonicalTotals,
+  type CanonicalLineTax,
+  type CanonicalTotals,
+} from './canonical-totals.js';
 import type { AuthorizedCreditOverride } from '../receivables/credit-override-authorization.service.js';
 import type { PaymentIntent } from '../receivables/payment-intent.js';
+
+/** the trusted scope + order identity {@link TaxFinalizationService.prepareFinalization} needs */
+export interface PrepareFinalizationInput {
+  tenantId: string;
+  companyId: string;
+  branchId: string;
+  orderId: string;
+}
+
+/** the output of the ONE canonical computation over the locked order + lines */
+export interface PreparedFinalization {
+  orderId: string;
+  lines: CanonicalLineTax[];
+  totals: CanonicalTotals;
+}
 
 export interface FinalizeAndIssueInvoiceInput {
   tenantId: string;
@@ -37,6 +51,11 @@ export interface FinalizeAndIssueInvoiceInput {
    *  inference). */
   paymentIntent: PaymentIntent;
   creditOverride?: AuthorizedCreditOverride;
+  // 3b.9-credit-exposure:begin
+  /** Task 3b.9 — passed through verbatim to `issueFinalInvoice`; see its doc comment (internal,
+   *  trusted, optional; omitted = the frozen invoice-total gate basis). */
+  finalSaleOutstandingMinor?: bigint;
+  // 3b.9-credit-exposure:end
   actorUserId?: string | null;
 }
 
@@ -65,10 +84,33 @@ export interface FinalizeAndIssueInvoiceInput {
 export class TaxFinalizationService {
   constructor(private readonly issuance: InvoiceIssuanceRepository) {}
 
+  /**
+   * The one-shot finalization: {@link prepareFinalization} then
+   * {@link issuePrepared}, in this order, on the caller's `tx`. Behaviour is
+   * unchanged from before the split (task 3b.9 Checkpoint C) — the two halves
+   * exist so an orchestrator can validate a payment plan against the FINAL total
+   * BEFORE any invoice / order number is allocated, while still using exactly
+   * the same computation and the same issuance call.
+   */
   async finalizeAndIssueInvoice(
     tx: ScopedTx,
     input: FinalizeAndIssueInvoiceInput,
   ): Promise<IssueFinalInvoiceResult> {
+    const prepared = await this.prepareFinalization(tx, input);
+    return this.issuePrepared(tx, prepared, input);
+  }
+
+  /**
+   * Steps 1-9 of the finalization: lock the authoritative Order + its lines and
+   * run the ONE canonical computation over the locked, persisted rows. Writes
+   * NOTHING and allocates NO number — it is safe to call, inspect the totals,
+   * and then fail or proceed to {@link issuePrepared} inside the same
+   * transaction (re-locking an already-held row is a no-op).
+   */
+  async prepareFinalization(
+    tx: ScopedTx,
+    input: PrepareFinalizationInput,
+  ): Promise<PreparedFinalization> {
     // ── 1. lock the authoritative Order (same tenant/company/branch scope
     //      `issueFinalInvoice` itself uses) — its OWN frozen fiscal policy is
     //      the sole source for every line's priceTaxMode/roundingScope/
@@ -111,105 +153,48 @@ export class TaxFinalizationService {
       },
     });
 
-    // ── 3. commercial reconstruction (§D4) — the IDENTICAL frozen formula
-    //      Task 3b.3 uses at create/PATCH time and
-    //      `InvoiceIssuanceRepository`'s own subtotal-recomputation reuses:
-    //      gross = unitPrice × quantity (exact BigInt via `Money.mulRatio`),
-    //      net-of-line-discount = gross − lineDiscountAmountMinor. Never
-    //      re-priced from live Catalog, never re-resolved UOM. ─────────────
-    const afterLineDiscount = lineRows.map((l) => {
-      const gross = Money.ofMinor(l.unitPriceAmountMinor, l.unitPriceCurrencyCode).mulRatio(
-        Quantity.parse(l.quantity.toFixed(4)).scaled,
-        10_000n,
-      );
-      return {
+    // ── 3-9. the ONE canonical, pure computation (task 3b.9 Checkpoint A —
+    //        extracted verbatim from this method's former inline steps 3-9:
+    //        commercial reconstruction, document-discount allocation, tax
+    //        reference handling + LINE/DOCUMENT rounding, finalized line-tax
+    //        snapshot, mode-conditional totals). The read-only totals preview
+    //        calls the SAME function; no tax formula lives in this file. The
+    //        inputs are exactly the locked, persisted rows read above — the
+    //        Order's own frozen fiscal policy and each line's own frozen
+    //        tax-reference snapshot, never live configuration. ──────────────
+    const { lines: finalizedLines, totals } = computeCanonicalTotals(
+      order,
+      lineRows.map((l) => ({
         id: l.id,
         linePosition: l.linePosition,
+        quantity: l.quantity.toFixed(4),
+        unitPriceAmountMinor: l.unitPriceAmountMinor,
+        unitPriceCurrencyCode: l.unitPriceCurrencyCode,
+        discountAmountMinor: l.discountAmountMinor,
         rateBps: l.rateBps,
-        amountMinor: gross.subtract(Money.ofMinor(l.discountAmountMinor, l.unitPriceCurrencyCode))
-          .amountMinor,
-      };
-    });
-
-    // ── 4. document-discount allocation (§D5) — the frozen Checkpoint B
-    //      helper, ALL lines participate identically regardless of tax
-    //      status; no allocation is persisted separately. ──────────────────
-    const allocation = allocateDocumentDiscount(
-      afterLineDiscount.map((l) => ({
-        linePosition: l.linePosition,
-        commercialAmountAfterLineDiscountMinor: l.amountMinor,
       })),
-      order.documentDiscountAmountMinor,
-      order.currencyCode,
-    );
-    const afterDocumentDiscountByPosition = new Map(
-      allocation.lines.map((l) => [l.linePosition, l.commercialAmountAfterDocumentDiscountMinor]),
     );
 
-    // ── 5/6/7. tax reference handling + LINE/DOCUMENT rounding (§D6-D9) ────
-    const priceTaxMode = order.taxPriceMode as 'TAX_EXCLUSIVE' | 'TAX_INCLUSIVE';
-    const roundingMode = order.taxRoundingMode as RoundingMode;
-    const ratedLines = afterLineDiscount.filter((l) => l.rateBps !== null);
+    return { orderId: order.id, lines: finalizedLines, totals };
+  }
 
-    const lineTaxByPosition = new Map<number, bigint>();
-    for (const l of afterLineDiscount) {
-      if (l.rateBps === null) lineTaxByPosition.set(l.linePosition, 0n); // §D6 no-rate
+  /**
+   * Step 10 of the finalization: delegate to the existing internal issuance
+   * primitive, SAME tx — it independently revalidates status / version /
+   * fingerprint / line coverage / policy-uniformity / totals against the locked
+   * rows before writing anything. `prepared` must be the result of
+   * {@link prepareFinalization} for THIS order (anything else fails closed).
+   */
+  async issuePrepared(
+    tx: ScopedTx,
+    prepared: PreparedFinalization,
+    input: FinalizeAndIssueInvoiceInput,
+  ): Promise<IssueFinalInvoiceResult> {
+    if (prepared.orderId !== input.orderId) {
+      throw new RangeError(
+        `issuePrepared: the prepared finalization is for order ${prepared.orderId}, not ${input.orderId}`,
+      );
     }
-
-    if (order.taxRoundingScope === 'LINE') {
-      for (const l of ratedLines) {
-        const amount = afterDocumentDiscountByPosition.get(l.linePosition)!;
-        const rational = exactLineTax(amount, l.rateBps!, priceTaxMode);
-        lineTaxByPosition.set(l.linePosition, roundExact(rational, roundingMode));
-      }
-    } else {
-      // DOCUMENT scope (§D9) — exact rationals for every rated line
-      // (including a resolved zero-rate — its rational is simply value 0,
-      // never distinguished here from any other rate), reconciled once via
-      // the frozen Checkpoint A helper, mapped back by linePosition.
-      const documentInputs = ratedLines.map((l) => ({
-        linePosition: l.linePosition,
-        rational: exactLineTax(
-          afterDocumentDiscountByPosition.get(l.linePosition)!,
-          l.rateBps!,
-          priceTaxMode,
-        ),
-      }));
-      const reconciled = reconcileDocumentTax(documentInputs, roundingMode);
-      for (const r of reconciled.lines) {
-        lineTaxByPosition.set(r.linePosition, r.lineTaxAmountMinor);
-      }
-    }
-
-    // ── 8. finalized line-tax snapshot (§D10) — exactly one entry per
-    //      persisted OrderLine, no duplicate/missing ids, no caller policy. ─
-    const finalizedLines: FinalizedLineTax[] = afterLineDiscount.map((l) => ({
-      orderLineId: l.id,
-      priceTaxMode: order.taxPriceMode,
-      roundingScope: order.taxRoundingScope,
-      roundingMode: order.taxRoundingMode,
-      lineTaxAmountMinor: lineTaxByPosition.get(l.linePosition)!,
-    }));
-
-    // ── 9. finalized totals (§D11) — frozen semantics, mode-conditional. ───
-    const subtotalAmountMinor = afterLineDiscount.reduce((acc, l) => acc + l.amountMinor, 0n);
-    const taxTotalAmountMinor = finalizedLines.reduce((acc, l) => acc + l.lineTaxAmountMinor, 0n);
-    const totalAmountMinor =
-      priceTaxMode === 'TAX_EXCLUSIVE'
-        ? subtotalAmountMinor - order.documentDiscountAmountMinor + taxTotalAmountMinor
-        : subtotalAmountMinor - order.documentDiscountAmountMinor;
-    const totals: FinalizedTotals = {
-      subtotalAmountMinor,
-      documentDiscountAmountMinor: order.documentDiscountAmountMinor,
-      taxTotalAmountMinor,
-      totalAmountMinor,
-      currencyCode: order.currencyCode,
-      currencyExponent: order.currencyExponent,
-    };
-
-    // ── 10. delegate to the existing internal issuance primitive, SAME tx —
-    //       it independently revalidates status/version/fingerprint/line
-    //       coverage/policy-uniformity/totals before writing anything. ─────
     return this.issuance.issueFinalInvoice(tx, {
       tenantId: input.tenantId,
       companyId: input.companyId,
@@ -217,10 +202,15 @@ export class TaxFinalizationService {
       orderId: input.orderId,
       expectedVersion: input.expectedVersion,
       commercialSnapshotFingerprint: input.commercialSnapshotFingerprint,
-      lines: finalizedLines,
-      totals,
+      lines: prepared.lines,
+      totals: prepared.totals,
       paymentIntent: input.paymentIntent,
       ...(input.creditOverride !== undefined ? { creditOverride: input.creditOverride } : {}),
+      // 3b.9-credit-exposure:begin
+      ...(input.finalSaleOutstandingMinor !== undefined
+        ? { finalSaleOutstandingMinor: input.finalSaleOutstandingMinor }
+        : {}),
+      // 3b.9-credit-exposure:end
       actorUserId: input.actorUserId ?? null,
     });
   }
