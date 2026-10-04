@@ -93,3 +93,35 @@ describe('ENVELOPE_FIELD', () => {
     expect(ENVELOPE_FIELD).toBe('event');
   });
 });
+
+// ── task 3b.9 Checkpoint E — `orders.sale_completed` ─────────────────────────────────────
+// The dispatcher relays ANY event type generically (there is no event-type allow-list). This
+// pins that a row shaped exactly as the sale facade writes it — tenant + company + branch,
+// aggregate `order`, the post-issuance version — builds the right envelope, and that the
+// bounded business payload (orderId / invoiceId) is never copied into the realtime envelope.
+describe('buildEnvelope — an orders.sale_completed row', () => {
+  it('carries the scope, the order resource and its version, and never the payload', () => {
+    const row = {
+      ...baseRow({
+        companyId: 'cccccccc-cccc-7ccc-8ccc-cccccccccccc',
+        branchId: 'bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb',
+        aggregateType: 'order',
+        aggregateId: '01930000-0000-7000-8000-0000000000aa',
+        eventType: 'orders.sale_completed',
+        resourceVersion: 2n,
+      }),
+      payload: { orderId: 'o-1', invoiceId: 'inv-should-not-be-relayed' },
+    };
+    const env = buildEnvelope(row as OutboxRow);
+    expect(env).toMatchObject({
+      tenant_id: 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa',
+      company_id: 'cccccccc-cccc-7ccc-8ccc-cccccccccccc',
+      branch_id: 'bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb',
+      type: 'orders.sale_completed',
+      resource_type: 'order',
+      resource_id: '01930000-0000-7000-8000-0000000000aa',
+      resource_version: '2',
+    });
+    expect(JSON.stringify(env)).not.toContain('inv-should-not-be-relayed');
+  });
+});

@@ -78,5 +78,8 @@ import { WebhookRecoveryProcessor } from './webhook-recovery.repository.js';
     PaymentWebhookService,
     WebhookRecoveryProcessor,
   ],
+  // task 3b.9 Checkpoint E — additive: `SalesModule` reuses THIS instance of the frozen
+  // synchronous-capture primitive (never a second provider). Nothing else is exported.
+  exports: [PaymentCollectionRepository],
 })
 export class PaymentModule {}

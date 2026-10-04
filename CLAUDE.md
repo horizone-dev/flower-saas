@@ -86,7 +86,11 @@ apps, PostgreSQL + Redis + object storage.
     per register. Never recomputed from mutable order data. Post-close corrections
     are **reversing entries + an adjustment note**; the original Z is untouched.
 20. Discounts and returns are booked as **contra-revenue** (gross / discount / net
-    all visible). COGS uses **perpetual weighted-average**. A drawer difference is
+    all visible) — **except Phase 3B sale-time discounts, which keep the shipped
+    net-of-discount convention in every posting** (`REVENUE.SALES` = total − tax;
+    owner decision `3b.9-ACC`, DECISION-LOG; gross and discount stay visible on the
+    immutable `order_line` / `invoice` records, and a gross + contra GL presentation
+    is a separately approved future change). COGS uses **perpetual weighted-average**. A drawer difference is
     never silently absorbed — recorded, reasoned, approved, posted to Cash Over/Short.
 21. A figure is labelled "profit" **only** when the formula supports it (Gross Profit
     = Net Revenue − COGS, real from Phase 5; Net Profit for a closed period).

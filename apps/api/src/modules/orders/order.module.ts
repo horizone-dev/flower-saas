@@ -94,5 +94,8 @@ import { CreditNoteRepository } from './credit-note.repository.js';
     CancellationChargeRepository,
     CreditNoteRepository,
   ],
+  // task 3b.9 Checkpoint E — additive: `SalesModule` reuses THIS instance of the internal-only
+  // tax-finalization primitive (never a second provider). Nothing else is exported.
+  exports: [TaxFinalizationService],
 })
 export class OrderModule {}

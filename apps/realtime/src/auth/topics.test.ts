@@ -125,3 +125,56 @@ describe('isAuthorized', () => {
     expect(isAuthorized(scoped('ALL', ['branch-a']), evt)).toBe(true);
   });
 });
+
+// ── task 3b.9 Checkpoint E — `orders.sale_completed` ─────────────────────────────────────
+// The gateway has NO event-type allow-list: it authorises purely by the envelope's tenant /
+// company / branch scope (cumulative). So the new sale event needs no registry change — it
+// must simply carry the right scope, which the sale facade writes (tenant + company +
+// branch). These cases pin that an envelope shaped exactly like the sale event is delivered
+// ONLY to sessions authorised for its tenant AND company AND branch.
+describe('isAuthorized — an orders.sale_completed envelope (tenant + company + branch)', () => {
+  const sale = {
+    tenant_id: 'tenant-a',
+    company_id: 'company-1',
+    branch_id: 'branch-1',
+    type: 'orders.sale_completed',
+    resource_type: 'order',
+  } as const;
+  const sessionWith = (companyScope: 'ALL' | string[], branchScope: 'ALL' | string[]) =>
+    session({
+      tenantId: 'tenant-a',
+      access: {
+        effectivePermissions: [],
+        companyScope,
+        branchScope,
+        perBranchOverlay: {},
+        entitledModules: [],
+        planKey: null,
+      },
+    });
+
+  it('is delivered to an authorised consumer of that exact branch (and to ALL-scoped sessions)', () => {
+    expect(isAuthorized(sessionWith('ALL', 'ALL'), sale)).toBe(true);
+    expect(isAuthorized(sessionWith(['company-1'], ['branch-1']), sale)).toBe(true);
+    expect(isAuthorized(sessionWith('ALL', ['branch-1', 'branch-2']), sale)).toBe(true);
+  });
+
+  it('is NOT delivered to a SIBLING branch consumer', () => {
+    expect(isAuthorized(sessionWith('ALL', ['branch-2']), sale)).toBe(false);
+    expect(isAuthorized(sessionWith(['company-1'], ['branch-2']), sale)).toBe(false);
+  });
+
+  it('is NOT delivered to a consumer of another company, even with the branch id in scope (cumulative)', () => {
+    expect(isAuthorized(sessionWith(['company-2'], ['branch-1']), sale)).toBe(false);
+    expect(isAuthorized(sessionWith(['company-2'], 'ALL'), sale)).toBe(false);
+  });
+
+  it('is NOT delivered to another tenant', () => {
+    const other = session({ tenantId: 'tenant-b' });
+    expect(isAuthorized(other, sale)).toBe(false);
+  });
+
+  it('a session with no resolved scope receives nothing', () => {
+    expect(isAuthorized(session({ tenantId: 'tenant-a', access: null }), sale)).toBe(false);
+  });
+});
