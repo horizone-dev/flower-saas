@@ -2449,6 +2449,11 @@ describe('cross-tenant isolation probe suite', () => {
       // binary denied/leaked probe shape — it is proven separately by
       // Checkpoint C's own dedicated cross-scope tests).
       '/v1/companies/:companyId/branches/:branchId/settlements',
+      // task 3b.10 Checkpoint F — the nine READ-ONLY report routes. Probed (tenant axis, company axis, branch axis, with
+      // positive controls, against real companies / branches / a real customer, and "no report query ran for a denied caller")
+      // in the reporting controller integration test (`reporting.controller.integration.test.ts`), which also pins that EXACTLY these nine routes exist.
+      '/v1/companies/:companyId/reports',
+      '/v1/companies/:companyId/branches/:branchId/reports',
     ];
     const unprobed = nonPublic.filter((r) => {
       const key = `${r.httpMethod} ${r.path}`;

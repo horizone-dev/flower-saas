@@ -6,7 +6,11 @@ import { getContext } from '../context/index.js';
 import { DomainError, ForbiddenError, NotFoundError } from '../errors/domain-error.js';
 import { PolicyEngine } from '../../modules/access/policy-engine.js';
 import { IS_PUBLIC_KEY } from './public.decorator.js';
-import { REQUIRED_PERMISSION_KEY } from './require-permission.decorator.js';
+import {
+  REQUIRED_PERMISSION_KEY,
+  REQUIRED_ALL_PERMISSIONS_KEY,
+  REQUIRES_ALL_BRANCHES_KEY,
+} from './require-permission.decorator.js';
 import { NO_STEP_UP_KEY, SCOPED_PARAM_KEY, type ScopedParamConfig } from './pipeline.decorators.js';
 
 /**
@@ -48,9 +52,13 @@ export class PermissionGuard implements CanActivate {
     const ctx = getContext();
     if (!ctx) throw new UnauthorizedException('no request context');
 
+    // additive extra keys (`@RequireAllPermissions`): ALL of them must hold on top of the primary key
+    const extra = this.meta<string[]>(execCtx, REQUIRED_ALL_PERMISSIONS_KEY) ?? [];
+    const allRequired = [required, ...extra.filter((k) => k !== required)];
+
     // OD7 — impersonation is read-only: reject every non-allowlisted action while
     // an impersonated session is active, whatever the underlying permission says.
-    if (ctx.isImpersonating && !IMPERSONATION_READ_ALLOWLIST.has(required)) {
+    if (ctx.isImpersonating && allRequired.some((k) => !IMPERSONATION_READ_ALLOWLIST.has(k))) {
       throw new DomainError(
         'IMPERSONATION_READ_ONLY',
         'this action is not permitted during an impersonated session',
@@ -73,7 +81,15 @@ export class PermissionGuard implements CanActivate {
     const req = execCtx.switchToHttp().getRequest<FastifyRequest>();
     const target = this.resolveTarget(execCtx, req);
     const stepUpExempt = this.meta<boolean>(execCtx, NO_STEP_UP_KEY) === true;
-    const decision = this.engine.can(ctx, required, target, { stepUpExempt });
+    // every required key is decided by the same engine with the same target; the FIRST denial decides (deny by default)
+    let decision = this.engine.can(ctx, required, target, { stepUpExempt });
+    for (const key of allRequired) {
+      if (!decision.allowed) break;
+      if (isPlatformPermissionKey(key)) {
+        throw new ForbiddenError('route declares no permission', 'ROUTE_MISCONFIGURED');
+      }
+      decision = this.engine.can(ctx, key, target, { stepUpExempt });
+    }
     if (decision.allowed) return true;
 
     switch (decision.reason) {
@@ -103,16 +119,24 @@ export class PermissionGuard implements CanActivate {
   private resolveTarget(
     execCtx: ExecutionContext,
     req: FastifyRequest,
-  ): { companyId?: string | null; branchId?: string | null } {
+  ): { companyId?: string | null; branchId?: string | null; allBranches?: boolean } {
     const cfg = this.meta<ScopedParamConfig>(execCtx, SCOPED_PARAM_KEY);
-    if (!cfg) return {};
+    if (!cfg)
+      return this.meta<boolean>(execCtx, REQUIRES_ALL_BRANCHES_KEY) === true
+        ? { allBranches: true }
+        : {};
     const source =
       cfg.from === 'query'
         ? ((req.query as Record<string, unknown>) ?? {})
         : ((req.params as Record<string, unknown>) ?? {});
     const pick = (name?: string): string | null =>
       name && typeof source[name] === 'string' ? (source[name] as string) : null;
-    return { companyId: pick(cfg.company), branchId: pick(cfg.branch) };
+    const allBranches = this.meta<boolean>(execCtx, REQUIRES_ALL_BRANCHES_KEY) === true;
+    return {
+      companyId: pick(cfg.company),
+      branchId: pick(cfg.branch),
+      ...(allBranches ? { allBranches } : {}),
+    };
   }
 
   private meta<T>(execCtx: ExecutionContext, key: string): T | undefined {

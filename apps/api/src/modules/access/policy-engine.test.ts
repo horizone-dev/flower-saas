@@ -108,3 +108,63 @@ describe('PolicyEngine.can — truth table', () => {
     });
   });
 });
+
+describe('PolicyEngine.can — company-wide targets (allBranches), task 3b.10 Checkpoint F', () => {
+  const held = ['orders:view'];
+  const wide = { companyId: 'c1', allBranches: true };
+
+  it('ALLOW: unrestricted branch scope and no overlay', () => {
+    const c = ctx({ effectivePermissions: held, companyScope: 'ALL', branchScope: 'ALL' });
+    expect(engine.can(c, 'orders:view', wide)).toEqual({ allowed: true });
+  });
+
+  it('DENY BRANCH_OUT_OF_SCOPE: one branch, several branches, or none', () => {
+    for (const branchScope of [['b1'], ['b1', 'b2'], []]) {
+      const c = ctx({ effectivePermissions: held, companyScope: 'ALL', branchScope });
+      expect(engine.can(c, 'orders:view', wide), JSON.stringify(branchScope)).toMatchObject({
+        allowed: false,
+        reason: 'BRANCH_OUT_OF_SCOPE',
+      });
+    }
+  });
+
+  it('DENY BRANCH_OUT_OF_SCOPE: "all" branches narrowed by an overlay that withholds the key', () => {
+    const c = ctx({
+      effectivePermissions: held,
+      companyScope: 'ALL',
+      branchScope: 'ALL',
+      perBranchOverlay: new Map([['b1', new Set(['users:view'])]]),
+    });
+    expect(engine.can(c, 'orders:view', wide)).toMatchObject({
+      allowed: false,
+      reason: 'BRANCH_OUT_OF_SCOPE',
+    });
+    const ok = ctx({
+      effectivePermissions: held,
+      companyScope: 'ALL',
+      branchScope: 'ALL',
+      perBranchOverlay: new Map([['b1', new Set(['orders:view'])]]),
+    });
+    expect(engine.can(ok, 'orders:view', wide)).toEqual({ allowed: true });
+  });
+
+  it('the permission and company checks still come first; without allBranches nothing changes', () => {
+    const restricted = ctx({
+      effectivePermissions: held,
+      companyScope: 'ALL',
+      branchScope: ['b1'],
+    });
+    expect(engine.can(restricted, 'roles:manage', wide)).toMatchObject({
+      reason: 'MISSING_PERMISSION',
+    });
+    const otherCompany = ctx({
+      effectivePermissions: held,
+      companyScope: ['c9'],
+      branchScope: 'ALL',
+    });
+    expect(engine.can(otherCompany, 'orders:view', wide)).toMatchObject({
+      reason: 'COMPANY_OUT_OF_SCOPE',
+    });
+    expect(engine.can(restricted, 'orders:view', { companyId: 'c1' })).toEqual({ allowed: true });
+  });
+});
