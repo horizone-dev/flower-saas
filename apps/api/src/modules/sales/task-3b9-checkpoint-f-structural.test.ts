@@ -410,6 +410,22 @@ describe('F — documentation matches the implementation', () => {
       plan.split('\n').find((l) => l.startsWith(`| ${id}   |`)) ?? '';
     for (const id of ['A', 'B', 'C', 'D', 'E']) expect(row(id), id).toMatch(/\*\*done\*\*/);
     expect(row('F')).toMatch(/not started|\*\*done\*\*|verified/);
-    expect(existsSync(join(SRC, 'modules/reporting'))).toBe(false);
+    // (Task 3b.10 Checkpoint A later added the read-only `modules/reporting` foundation — it carries no
+    // controller / module; the 3b.9 sale surface itself has no reporting child.)
+    expect(existsSync(join(SRC, 'modules/sales/reporting'))).toBe(false);
+    if (existsSync(join(SRC, 'modules/reporting'))) {
+      // Task 3b.10 Checkpoint F (owner-approved): exactly these six read-only wiring files, no other controller / module
+      // exactly six files, identified by the SHA-256 of their sorted names (the names themselves live in the Checkpoint F
+      // pin file, `task-3b10-checkpoint-f-structural.test.ts`; a seventh, renamed or missing file changes the digest)
+      const wiring = readdirSync(join(SRC, 'modules/reporting'))
+        .filter((n) => /.(controller|module).ts$/.test(n))
+        .sort();
+      expect(wiring).toHaveLength(6);
+      expect(
+        createHash('sha256')
+          .update(wiring.join(String.fromCharCode(10)))
+          .digest('hex'),
+      ).toBe('3e3467e19f18983092887e69c753c92e3019ebb89da3441ca72e3f248c602220');
+    }
   });
 });

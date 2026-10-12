@@ -1,5 +1,12 @@
 export { Public, IS_PUBLIC_KEY } from './public.decorator.js';
-export { RequirePermission, REQUIRED_PERMISSION_KEY } from './require-permission.decorator.js';
+export {
+  RequirePermission,
+  REQUIRED_PERMISSION_KEY,
+  RequireAllPermissions,
+  REQUIRED_ALL_PERMISSIONS_KEY,
+  RequireAllBranches,
+  REQUIRES_ALL_BRANCHES_KEY,
+} from './require-permission.decorator.js';
 export {
   PlatformRealm,
   ScopedParam,

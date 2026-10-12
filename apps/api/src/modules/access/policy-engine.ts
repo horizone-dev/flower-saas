@@ -45,6 +45,20 @@ export class PolicyEngine {
       return deny('COMPANY_OUT_OF_SCOPE', target.companyId);
     }
 
+    // 8b — a COMPANY-WIDE route spans every branch: a caller restricted to some branches (or narrowed by a per-branch
+    // overlay) must not read the aggregate — otherwise a company route would disclose other branches' data. Denied as
+    // out-of-scope so the guard answers with the same non-disclosing 404.
+    if (target.allBranches === true) {
+      if (ctx.branchScope !== 'ALL') {
+        return deny('BRANCH_OUT_OF_SCOPE', 'unrestricted branch authority required');
+      }
+      for (const keys of ctx.perBranchOverlay.values()) {
+        if (!keys.has(permissionKey)) {
+          return deny('BRANCH_OUT_OF_SCOPE', 'unrestricted branch authority required');
+        }
+      }
+    }
+
     // 9 — branch scope (+ per-branch overlay: the key must also be allowed there)
     if (target.branchId != null) {
       if (!inScope(ctx.branchScope, target.branchId)) {

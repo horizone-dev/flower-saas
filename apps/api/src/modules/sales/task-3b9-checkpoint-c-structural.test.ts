@@ -357,8 +357,13 @@ describe('C — no migration 50, no Task 3b.10, RB-1 still open', () => {
   });
 
   it('no Task 3b.10 artifact: no reporting / trial-balance file and no /reports route', () => {
+    // Task 3b.10 (approved after the 3b.9 merge) owns `modules/reporting/`; this 3b.9 pin keeps guarding
+    // everything else — no reporting / trial-balance artifact OUTSIDE that read-only module.
     expect(
-      productionFiles(SRC).filter((f) => /reporting|trial-?balance|3b-?10/i.test(rel(f))),
+      productionFiles(SRC).filter(
+        (f) =>
+          !/^modules\/reporting\//.test(rel(f)) && /reporting|trial-?balance|3b-?10/i.test(rel(f)),
+      ),
     ).toEqual([]);
     for (const f of productionFiles(SRC).filter((x) => x.endsWith('.controller.ts'))) {
       expect(read(f), rel(f)).not.toMatch(/@Controller\([^)]*reports?\b/i);

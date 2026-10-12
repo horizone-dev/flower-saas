@@ -106,13 +106,9 @@ describe('E — every surface Checkpoint E must NOT change is byte-identical (co
       'ff7fb019aa9620513eea91652965fd6421b645a1b697f9217c7e8c6b521e2288',
     'common/idempotency/snapshot.ts':
       '33431e963e89998f6020d4e2a658d0a0e91f50e4e671bf00419c5811723f3ef7',
-    // the global guard pipeline and the policy engine — never weakened for an idempotent replay
-    'common/auth/permission.guard.ts':
-      '55eef3431078efc1c6837960cbd1034d4928a5b06ab815cdc67e9d69052c80b8',
+    // (the guard and the policy engine are pinned in the dedicated Checkpoint F amendment block below)
     'common/auth/pipeline.module.ts':
       '701574108256c585e3fa5c01b9002a88652c5a62543d24ded4b0bc48ca5855f3',
-    'modules/access/policy-engine.ts':
-      'c9f9da28608233496bcccb40e558f2b77883810e81dff0a1c11fe5abb241a8d7',
     // the outbox writer and the frozen payments.* event vocabulary
     'common/audit/outbox.writer.ts':
       'a1a20ad2fba4bfb1cf5ab386239fa900ae920f78d640a530bde8c6c67187007c',
@@ -130,6 +126,79 @@ describe('E — every surface Checkpoint E must NOT change is byte-identical (co
   for (const [file, hash] of Object.entries(FROZEN)) {
     it(`${file} is unchanged`, () => {
       expect(sha256(join(SRC, file))).toBe(hash);
+    });
+  }
+
+  // ── Task 3b.10 Checkpoint F amendment (owner-approved additive security change) ───────────────────────────────────────
+  // Historical freeze evidence is KEPT: the pre-F bytes of the two files are still pinned below, and the post-F file must
+  // equal the pre-F file plus EXACTLY the listed additive blocks (reverting them reproduces the pre-F hash byte for byte).
+  // Any other edit to either file — a weakened check, a reordered step, an extra relaxation — fails both pins.
+  const PRE_F: Record<string, string> = {
+    'common/auth/permission.guard.ts':
+      '55eef3431078efc1c6837960cbd1034d4928a5b06ab815cdc67e9d69052c80b8',
+    'modules/access/policy-engine.ts':
+      'c9f9da28608233496bcccb40e558f2b77883810e81dff0a1c11fe5abb241a8d7',
+  };
+  const POST_F: Record<string, string> = {
+    'common/auth/permission.guard.ts':
+      '4ac82090bba97ff704d5c0832d7a852b0ff648d691657c1319995bd506444bad',
+    'modules/access/policy-engine.ts':
+      '7e09ff11223da0464797ce610026da3f3e15de1621b69eb33157ae0e9f5391ad',
+  };
+  /** [post-F text, pre-F text] — the COMPLETE additive F delta (multi-permission + all-branches), nothing else */
+  const F_DELTA: Record<string, Array<[string, string]>> = {
+    'common/auth/permission.guard.ts': [
+      [
+        "import {\n  REQUIRED_PERMISSION_KEY,\n  REQUIRED_ALL_PERMISSIONS_KEY,\n  REQUIRES_ALL_BRANCHES_KEY,\n} from './require-permission.decorator.js';",
+        "import { REQUIRED_PERMISSION_KEY } from './require-permission.decorator.js';",
+      ],
+      [
+        '    // additive extra keys (`@RequireAllPermissions`): ALL of them must hold on top of the primary key\n    const extra = this.meta<string[]>(execCtx, REQUIRED_ALL_PERMISSIONS_KEY) ?? [];\n    const allRequired = [required, ...extra.filter((k) => k !== required)];\n\n',
+        '',
+      ],
+      [
+        'if (ctx.isImpersonating && allRequired.some((k) => !IMPERSONATION_READ_ALLOWLIST.has(k))) {',
+        'if (ctx.isImpersonating && !IMPERSONATION_READ_ALLOWLIST.has(required)) {',
+      ],
+      [
+        "    // every required key is decided by the same engine with the same target; the FIRST denial decides (deny by default)\n    let decision = this.engine.can(ctx, required, target, { stepUpExempt });\n    for (const key of allRequired) {\n      if (!decision.allowed) break;\n      if (isPlatformPermissionKey(key)) {\n        throw new ForbiddenError('route declares no permission', 'ROUTE_MISCONFIGURED');\n      }\n      decision = this.engine.can(ctx, key, target, { stepUpExempt });\n    }\n",
+        '    const decision = this.engine.can(ctx, required, target, { stepUpExempt });\n',
+      ],
+      [
+        '  ): { companyId?: string | null; branchId?: string | null; allBranches?: boolean } {',
+        '  ): { companyId?: string | null; branchId?: string | null } {',
+      ],
+      [
+        '    if (!cfg)\n      return this.meta<boolean>(execCtx, REQUIRES_ALL_BRANCHES_KEY) === true\n        ? { allBranches: true }\n        : {};',
+        '    if (!cfg) return {};',
+      ],
+      [
+        '    const allBranches = this.meta<boolean>(execCtx, REQUIRES_ALL_BRANCHES_KEY) === true;\n    return {\n      companyId: pick(cfg.company),\n      branchId: pick(cfg.branch),\n      ...(allBranches ? { allBranches } : {}),\n    };',
+        '    return { companyId: pick(cfg.company), branchId: pick(cfg.branch) };',
+      ],
+    ] as Array<[string, string]>,
+    'modules/access/policy-engine.ts': [
+      [
+        "    // 8b — a COMPANY-WIDE route spans every branch: a caller restricted to some branches (or narrowed by a per-branch\n    // overlay) must not read the aggregate — otherwise a company route would disclose other branches' data. Denied as\n    // out-of-scope so the guard answers with the same non-disclosing 404.\n    if (target.allBranches === true) {\n      if (ctx.branchScope !== 'ALL') {\n        return deny('BRANCH_OUT_OF_SCOPE', 'unrestricted branch authority required');\n      }\n      for (const keys of ctx.perBranchOverlay.values()) {\n        if (!keys.has(permissionKey)) {\n          return deny('BRANCH_OUT_OF_SCOPE', 'unrestricted branch authority required');\n        }\n      }\n    }\n\n",
+        '',
+      ],
+    ] as Array<[string, string]>,
+  };
+  const revertF = (file: string): string => {
+    let text = read(join(SRC, file)).replace(/\r\n/g, '\n');
+    for (const [post, pre] of F_DELTA[file] ?? []) text = text.split(post).join(pre);
+    return text;
+  };
+  for (const file of Object.keys(PRE_F)) {
+    it(`${file} is exactly the approved post-F file (Checkpoint F additive change)`, () => {
+      expect(sha256(join(SRC, file))).toBe(POST_F[file]);
+    });
+    it(`${file} minus the approved additive F blocks is byte-identical to the frozen pre-F file`, () => {
+      expect(sha(revertF(file))).toBe(PRE_F[file]);
+    });
+    it(`${file}: every approved additive F block is present exactly once`, () => {
+      const text = read(join(SRC, file)).replace(/\r\n/g, '\n');
+      for (const [post] of F_DELTA[file] ?? []) expect(text.split(post).length - 1, post).toBe(1);
     });
   }
 
@@ -764,8 +833,25 @@ describe('E — still forbidden: provider execution, inventory, a new app, anony
   });
 
   it('no Task 3b.10 / Checkpoint F artifact exists', () => {
-    expect(existsSync(join(SRC, 'modules/reporting'))).toBe(false);
+    // Task 3b.10 Checkpoint A (approved after the 3b.9 merge) added the READ-ONLY `modules/reporting`
+    // foundation. It is not a 3b.9 artifact; what stays pinned here is that the SALE surface has no
+    // reporting child and that `modules/reporting` carries no HTTP surface (controller / module).
     expect(existsSync(join(SRC, 'modules/sales/reporting'))).toBe(false);
+    if (existsSync(join(SRC, 'modules/reporting'))) {
+      // Task 3b.10 Checkpoint F (owner-approved) wires the nine READ-ONLY report routes: the ONLY controller / module files
+      // allowed are these six exact names — any other controller / module file, or any extra one, still fails.
+      // exactly six files, identified by the SHA-256 of their sorted names (the names themselves live in the Checkpoint F
+      // pin file, `task-3b10-checkpoint-f-structural.test.ts`; a seventh, renamed or missing file changes the digest)
+      const wiring = readdirSync(join(SRC, 'modules/reporting'))
+        .filter((n) => /.(controller|module).ts$/.test(n))
+        .sort();
+      expect(wiring).toHaveLength(6);
+      expect(
+        createHash('sha256')
+          .update(wiring.join(String.fromCharCode(10)))
+          .digest('hex'),
+      ).toBe('3e3467e19f18983092887e69c753c92e3019ebb89da3441ca72e3f248c602220');
+    }
     const plan = read(join(ROOT, 'docs/phase-3/TASK-3B9-PLAN.md'));
     expect(plan).not.toMatch(/Checkpoint F[^\n]*\*\*done\*\*/);
   });

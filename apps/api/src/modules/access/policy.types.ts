@@ -4,6 +4,12 @@ import type { ScopeSet } from '../../common/context/index.js';
 export interface AccessTarget {
   companyId?: string | null;
   branchId?: string | null;
+  /**
+   * The route is COMPANY-WIDE (it spans every branch of the company): the caller must hold UNRESTRICTED branch
+   * authority — `branchScope === 'ALL'` and no per-branch overlay that withholds the permission. Set from the route's
+   * `@RequireAllBranches()` metadata only, never from a request value.
+   */
+  allBranches?: boolean;
 }
 
 export type Decision =
