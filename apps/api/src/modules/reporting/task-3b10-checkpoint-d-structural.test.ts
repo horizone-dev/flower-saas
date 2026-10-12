@@ -1197,8 +1197,9 @@ describe('D — documentation: the plan and the decision log record Checkpoint D
         .filter((l) => new RegExp(`^\\| ${letter}\\s+\\|`).test(l));
       expect(row, letter).toHaveLength(1);
       expect(row[0], letter).toMatch(
-        /local verification run [(]2026-10-10[)].*FREEZE CANDIDATE — OWNER APPROVED [(]2026-10-12[)]/,
+        /local verification run [(]2026-10-10[)]; FROZEN — OWNER APPROVED [(]2026-10-12[)].*ad78f56/,
       );
+      expect(row[0], letter).not.toMatch(/FREEZE CANDIDATE|NOT frozen/);
     }
     const rowF = plan()
       .split('\n')

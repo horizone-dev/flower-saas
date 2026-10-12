@@ -1334,8 +1334,9 @@ describe('E — documentation: the plan (§14) and the decision log record the f
     expect(rows('F')[0]).toMatch(/FROZEN — OWNER APPROVED \(2026-10-10\)/);
     expect(rows('G')[0]).toMatch(/Final hard gates/);
     expect(rows('G')[0]).toMatch(
-      /local verification run [(]2026-10-10[)].*FREEZE CANDIDATE — OWNER APPROVED [(]2026-10-12[)]/,
+      /local verification run [(]2026-10-10[)]; FROZEN — OWNER APPROVED [(]2026-10-12[)].*ad78f56/,
     );
+    expect(rows('G')[0]).not.toMatch(/FREEZE CANDIDATE|NOT frozen/);
   });
 
   it('§14 states the scope: internal only, no controller / route / permission / migration, the letter shift, A–D frozen', () => {
@@ -2090,8 +2091,9 @@ describe('E — FROZEN, OWNER APPROVED (2026-10-10): the four production files a
     // (at the freeze F was "proposed, not started"; it has since been implemented and FROZEN — see §15)
     expect(rows('F')[0]).toMatch(/FROZEN — OWNER APPROVED \(2026-10-10\)/);
     expect(rows('G')[0]).toMatch(
-      /local verification run [(]2026-10-10[)].*FREEZE CANDIDATE — OWNER APPROVED [(]2026-10-12[)]/,
+      /local verification run [(]2026-10-10[)]; FROZEN — OWNER APPROVED [(]2026-10-12[)].*ad78f56/,
     );
+    expect(rows('G')[0]).not.toMatch(/FREEZE CANDIDATE|NOT frozen/);
     const at = plan.indexOf('### Freeze — Checkpoint E: FROZEN — OWNER APPROVED (2026-10-10)');
     expect(at).toBeGreaterThan(0);
     const f = plan.slice(at);
