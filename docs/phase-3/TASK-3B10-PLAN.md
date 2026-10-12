@@ -110,15 +110,15 @@ Intentionally historical text (the 3b.9 plan, ADR-0019, the original architectur
 
 ## 4. Checkpoints (proposed order — each is its own STOP-and-approve step)
 
-| #   | Delivers                                                                                                                                               | Status                                                                                                                                                                                                |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A   | Reporting foundation (civil-date + company-currency contracts, read-only `ReportingRepository`), Trial Balance, query-plan gate, pins                  | **built, verified**                                                                                                                                                                                   |
-| B   | Sales Financial Report (invoices, credit notes, cancellation charges, current payment status, source ↔ GL reconciliation; branch + company `byBranch`) | **built, owner-corrected (1: line-discount authority, 2: 90-day cap), density-guarded (25 000 documents), verified — ready for freeze**                                                               |
-| C   | Tender Totals (+ refunds shown separately)                                                                                                             | **built, verified (internal only, see §12); TT-1 ruled and implemented — no calendar cap, at most 100 000 logical tender movements per company window — density closure ready for freeze**            |
-| D   | Receivables current state (Advances are NOT part of this checkpoint)                                                                                   | **built, verified (internal only, see §13); RD-1 RULED and IMPLEMENTED (at most 100 000 receivables per evaluated scope) — density closure ready for freeze**                                         |
-| E   | Customer Advances + Unapplied Receipts current state (two liabilities, never netted; Advances are NOT part of Checkpoint D)                            | **built, verified (internal only, see §14); EL-1 RULED and IMPLEMENTED (at most 100 000 Payment + CustomerAdvance roots per evaluated scope) — density closure FROZEN — OWNER APPROVED (2026-10-10)** |
-| F   | Public HTTP wiring: routes, permissions proved against the default role templates, probes                                                              | **implemented and verified (see §15) — FROZEN — OWNER APPROVED (2026-10-10)**                                                                                                                         |
-| G   | Final hard gates / full regression / documentation                                                                                                     | **local verification run (2026-10-10) — all 100 000-record HTTP worlds completed after owner-approved memory recovery (see §18.6); owner review pending — NOT frozen**                                |
+| #   | Delivers                                                                                                                                               | Status                                                                                                                                                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A   | Reporting foundation (civil-date + company-currency contracts, read-only `ReportingRepository`), Trial Balance, query-plan gate, pins                  | **built, verified**                                                                                                                                                                                                                               |
+| B   | Sales Financial Report (invoices, credit notes, cancellation charges, current payment status, source ↔ GL reconciliation; branch + company `byBranch`) | **built, owner-corrected (1: line-discount authority, 2: 90-day cap), density-guarded (25 000 documents), verified — ready for freeze**                                                                                                           |
+| C   | Tender Totals (+ refunds shown separately)                                                                                                             | **built, verified (internal only, see §12); TT-1 ruled and implemented — no calendar cap, at most 100 000 logical tender movements per company window — density closure ready for freeze**                                                        |
+| D   | Receivables current state (Advances are NOT part of this checkpoint)                                                                                   | **built, verified (internal only, see §13); RD-1 RULED and IMPLEMENTED (at most 100 000 receivables per evaluated scope) — density closure ready for freeze**                                                                                     |
+| E   | Customer Advances + Unapplied Receipts current state (two liabilities, never netted; Advances are NOT part of Checkpoint D)                            | **built, verified (internal only, see §14); EL-1 RULED and IMPLEMENTED (at most 100 000 Payment + CustomerAdvance roots per evaluated scope) — density closure FROZEN — OWNER APPROVED (2026-10-10)**                                             |
+| F   | Public HTTP wiring: routes, permissions proved against the default role templates, probes                                                              | **implemented and verified (see §15) — FROZEN — OWNER APPROVED (2026-10-10)**                                                                                                                                                                     |
+| G   | Final hard gates / full regression / documentation                                                                                                     | **local verification run (2026-10-10), merged to `main` at `9ce5095` with PR-head and `main` CI 4/4 green (see §19); FREEZE CANDIDATE — OWNER APPROVED (2026-10-12); final only when its freeze PR is merged and that PR's required CI is green** |
 
 ## 5. Checkpoint A — what exists
 
@@ -1186,3 +1186,70 @@ Both runs: **0 server errors, 0 wrong figures, 0 isolation faults (no foreign id
 **What the 422 evidence is — and is not.** The `422 REPORT_RESULT_TOO_LARGE` evidence for the Receivables and Customer Liabilities 100 000 boundary is **service-level only**: the frozen benchmark suites that build these worlds passed their accepted-100 000 / rejected-100 001 gates (§16; CI-size gate explains in the recovery runs — Receivables company 4 428 ms accepted vs 293 ms rejected, dense branch 1 856 vs 332 ms; Customer Liabilities company 3 503 vs 738 ms, dense branch 1 951 vs 782 ms). The **100 000-record HTTP boundary tests (100 001 → HTTP 422 through the real application at 1 / 2 / 5 / 10) were NOT executed** for Receivables or Customer Liabilities (nor for the Tender world); they would need a new fixture step that adds exactly one record to each restored world and have not been authorised or written. The HTTP 422 boundary is evidenced over HTTP only for Sales (§18.3).
 
 **Unchanged by this recovery.** The 4.2× mixed-load write-latency observation of §18.3 / §18.4 stands exactly as recorded (write p95 764 / 913 / 1 555 / 2 874 ms = 1.11× / 1.33× / 2.26× / 4.18× the writes-only p95 at 1 / 2 / 5 / 10 readers); the recovery runs did not re-measure it. **GitHub CI remains NOT EXECUTED** (HG3b-CI not claimed; the 25-minute `verify` timeout risk stays documented). **`HG3b-SALE-LATENCY` remains OPEN.** Checkpoint G is **not complete and not frozen**; Task 3b.11 is **NOT STARTED**. No production code, migration, grant, Docker configuration, volume, throttle, cache, index, timeout or CI change was made, and nothing was committed, pushed or opened as a PR.
+
+## 19. Checkpoint G — freeze record (FREEZE CANDIDATE, 2026-10-12)
+
+Status: **FREEZE CANDIDATE — OWNER APPROVED (2026-10-12).** This section is the formal freeze record for Checkpoint G (final local verification of the Task 3b.10 reporting surface). **It becomes final only when the PR that carries it is merged and that PR's required GitHub CI (`verify`, `security`, `e2e`, `realtime`) is green; until then Checkpoint G is not a completed freeze, and no merge date or future CI result is claimed here.** Append-only: §16–§18.6 above are the historical record and stay exactly as written — in particular the statements there that GitHub CI was "NOT EXECUTED" and that the work was uncommitted were true when written and are **superseded** by the evidence below, not edited. Local timings remain **local test-container observations; not production capacity**.
+
+### 19.1 Verified baseline
+
+| Item                                 | Value                                                                                                                       |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `main` (Task 3b.10 merged)           | `9ce50953d37200eaddbcd5160ffce67b9a1db87a` — merge commit, parents `3b63c6a` (`main`) and `58345a0` (reporting)             |
+| PR #34 head (reporting + sync merge) | `58345a03c0cd03cbd97af39f7b71bc7c14609a9f` — commits `07ede6a` (84 reviewed files), `275b297` (CI timeout), merge of `main` |
+| Security remediation                 | PR #35, commit `14927f8`, merged as `3b63c6a` (6 dependency files; `next` 16.3.8, `sharp` 0.35.5, `source-map-js` 1.2.2)    |
+| Tree identity                        | the tree of `main` `9ce5095` is byte-identical to the tested PR head `58345a0`                                              |
+| Structural pins                      | **647** pass (reporting A–F 406 + Task 3b.9 241)                                                                            |
+| Frozen production locks              | **38** (25 A–E + 13 F) protected by the pins; 32 independently recounted from the pin files, all matching                   |
+| Migrations                           | **49**, unchanged — no migration 50                                                                                         |
+
+### 19.2 GitHub CI evidence (exact SHAs)
+
+| Run (event)                          | Head SHA  | `verify`                          | `security`                       | `e2e`                            | `realtime`                       |
+| ------------------------------------ | --------- | --------------------------------- | -------------------------------- | -------------------------------- | -------------------------------- |
+| 38220583653 (`pull_request`, PR #34) | `58345a0` | success, 23 m 40 s (114715585423) | success, 6 m 21 s (114715585648) | success, 2 m 23 s (114715585582) | success, 0 m 57 s (114715585578) |
+| 38224906726 (`push` to `main`)       | `9ce5095` | success, 23 m 53 s (114729911327) | success, 1 m 27 s (114729911601) | success, 2 m 27 s (114729911600) | success, 1 m 12 s (114729911659) |
+
+Both runs: **4/4 green**. HG3b-CI ("`verify`/`security`/`e2e`/`realtime` green on every Phase 3b PR") is therefore evidenced for PR #34 on its head and on `main` after the merge. Run URLs: `https://github.com/horizone-dev/flower-saas/actions/runs/<run id>`. **History kept, not hidden:** the first PR #34 run (38209654510, head `275b297`) failed its `security` job — osv-scanner reported 8 advisories (`next` 16.3.6 ×6, `sharp` 0.35.4, `source-map-js` 1.2.1) published after the previous green `main` run; the lockfile was unchanged by this task. They were fixed in the separate security PR #35 (own runs: PR head 38215555579 and `main` 38218049674, both 4/4 green) and `main` was merged into the reporting branch before PR #34 was merged. The `verify` timeout was raised 25 → 75 minutes (commit `275b297`); measured on GitHub the job takes about 24 minutes.
+
+### 19.3 What is frozen
+
+The Task 3b.10 reporting surface as merged in `9ce5095`: the nine read-only report routes and their sixty files under `apps/api/src/modules/reporting/`; the additive multi-permission and all-branches guard support (PRE_F / POST_F reversal proof); the structural pins (647) and the 38 production SHA-256 locks; the Checkpoint G verification suites under `apps/api/src/verification/` (the nine-route HTTP load runs by default at CI size; the Sales 25 000-document, mixed read / write and 100 000-record world suites are opt-in via `G_LOAD=1`); this plan and the decision log. Any change to a frozen A–F file, lock, route, permission, density limit or this record needs a separate owner approval.
+
+### 19.4 Evidence relied on (full text in §16–§18.6 and the decision-log rows `3b.10-GV`, `3b.10-GS`, `3b.10-GL`, `3b.10-GR`)
+
+- **Regression:** the complete `apps/api` suite passed locally (3 864 tests at the first run, 3 868 in the final forced run; 0 failed) and in CI on both SHAs above; `db` 810 passed. The 11 skipped tests are 9 opt-in heavy tests and the 2 default-size 100 000 gates; they are reported as skipped, never as passed.
+- **Frozen limits:** the 100 000-record Receivables, Customer Liabilities and Tender Totals benchmarks and the 25 000-document Sales boundary all stayed inside the 12 s local engineering gate (accepted ≈ 2.9–3.8 s; over-limit requests keep their frozen `422`).
+- **Concurrency (1 / 2 / 5 / 10):** 0 wrong figures, 0 isolation faults, 0 server errors, 0 deadlocks and 0 PostgreSQL `53100` in every completed workflow, including all three 100 000-record worlds driven over HTTP (§18.3, §18.6).
+- **Security / API:** the 255-case authorisation matrix (15 caller kinds × 9 routes), cross-tenant / branch-isolation probes, no report query before authorisation, non-disclosing 404s.
+- **Mixed read / write:** 384 sales acknowledged, 0 writer errors, 53 / 53 identical idempotent replays, ledger balanced, 0 duplicate invoices or postings.
+- **Shared memory:** a PostgreSQL `/dev/shm` of 64 MB failed concurrent Trial Balance reads (`53100`); 256 MB, 512 MB and 1 GB passed with byte-identical results; every heavy run used 512 MB.
+
+### 19.5 Safety decisions recorded
+
+- **512 MB `/dev/shm` is a tested candidate, not an applied production setting.** Nothing in the repository, Docker Compose or any deployment was changed; `max_parallel_workers_per_gather = 0` remains the verified, slower fallback. Verifying it on the target environment is a deployment task.
+- **No throttle, cache, index, timeout, pool, migration, grant or production change** was made by Checkpoint G; no new numerical limit is introduced.
+- **The five historical `no-console` ESLint warnings** (`reconcile-historical-settlements.ts`) remain an owner-approved scoped waiver; whole-source `--max-warnings 0` is **not** claimed as a pass.
+- **Security overrides:** the permanent root `pnpm.overrides` `sharp@<0.35.5` and `source-map-js@<1.2.2` (PR #35) stay until upstream ranges require the patched versions.
+
+### 19.6 Carried forward — NOT resolved by this freeze
+
+- **`HG3b-SALE-LATENCY` — OPEN.** A Phase-3 FINAL hard gate belonging to Task 3b.11; the 7–11 sales / s / company figure and every Checkpoint G number remain local test-container observations, not a capacity claim.
+- **RB-1 — OPEN** (the anonymous issued-sale void / refund release blocker; Task 3b.8 is frozen); reporting does not touch it.
+- **Observed ≈ 4.2× POS write p95 degradation** under ten concurrent report readers (write p95 764 / 913 / 1 555 / 2 874 ms = 1.11× / 1.33× / 2.26× / 4.18× the writes-only p95 at 1 / 2 / 5 / 10 readers) — documented, not mitigated, no threshold set; an input to `HG3b-SALE-LATENCY` and any reader-throttling or read-replica decision.
+- **Optional HTTP 422 boundary coverage gap:** the 100 001-record HTTP `422` tests for Receivables, Tender Totals and Customer Liabilities were **not executed**; their service-level accepted-100 000 / rejected-100 001 gates passed, and the HTTP `422` is evidenced over HTTP only for Sales.
+- **PostgreSQL 512 MB `/dev/shm` deployment validation** on larger ledgers, higher concurrency and managed PostgreSQL.
+- **Phase-final CI:** HG3b-CI is re-confirmed at the Phase 3 final verification (Task 3b.11), which is **NOT STARTED**; no phase-completion tag exists or is created by this record.
+
+### 19.7 Pin amendment (owner-approved, narrow)
+
+Four assertions required row G of the §4 table to read `local verification run (2026-10-10) … NOT frozen`. They were amended — and only they — to require the new row-G wording, with the original prefix kept: `/local verification run [(]2026-10-10[)].*FREEZE CANDIDATE — OWNER APPROVED [(]2026-10-12[)]/`.
+
+| File                                        | Assertion (before → after)                                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `task-3b10-checkpoint-d-structural.test.ts` | row G regex `…2026-10-10….*NOT frozen` → `…2026-10-10….*FREEZE CANDIDATE — OWNER APPROVED (2026-10-12)` |
+| `task-3b10-checkpoint-e-structural.test.ts` | same change, in the §4 row check                                                                        |
+| `task-3b10-checkpoint-e-structural.test.ts` | same change, in the Checkpoint E freeze-record check                                                    |
+| `task-3b10-checkpoint-f-structural.test.ts` | same change, in the Checkpoint F freeze-record check                                                    |
+
+No assertion was deleted or loosened, no test was added or removed (the 647 count is unchanged), and no hash lock, tenant-isolation, permission, Task 3b.9 or financial-invariant assertion was touched.
