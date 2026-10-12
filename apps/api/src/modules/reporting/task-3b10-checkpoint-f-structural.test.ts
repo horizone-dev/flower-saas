@@ -645,8 +645,9 @@ describe('F — FROZEN, OWNER APPROVED (2026-10-10): the thirteen production fil
     expect(rows('F')[0]).toMatch(/FROZEN — OWNER APPROVED \(2026-10-10\)/);
     expect(rows('F')[0]).not.toMatch(/NOT frozen|awaiting owner/);
     expect(rows('G')[0]).toMatch(
-      /local verification run [(]2026-10-10[)].*FREEZE CANDIDATE — OWNER APPROVED [(]2026-10-12[)]/,
+      /local verification run [(]2026-10-10[)]; FROZEN — OWNER APPROVED [(]2026-10-12[)].*ad78f56/,
     );
+    expect(rows('G')[0]).not.toMatch(/FREEZE CANDIDATE|NOT frozen/);
     const f = freezeSection();
     expect(f).toMatch(/Checkpoint G \(final hard gates\) and Task 3b\.11 are NOT STARTED/);
     expect(f).toMatch(
