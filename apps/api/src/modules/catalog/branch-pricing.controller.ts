@@ -17,6 +17,7 @@ import { ScopedParam } from '../../common/auth/pipeline.decorators.js';
 import { Idempotent } from '../../common/idempotency/idempotent.decorator.js';
 import { ZodBody } from '../../common/validation/zod-body.js';
 import { DomainError } from '../../common/errors/domain-error.js';
+import { toValidationDetails } from '../../common/validation/validation-details.js';
 import { assertUuid, parseIfMatch, requireIfMatch } from './catalog-write.helpers.js';
 import { BranchPricingService } from './branch-pricing.service.js';
 
@@ -31,10 +32,7 @@ function parseStrictQuery<T extends z.ZodType>(schema: T, raw: Record<string, st
     'VALIDATION_FAILED',
     'the query string is invalid',
     400,
-    r.error.issues.map((i) => {
-      const field = i.path.join('.');
-      return field ? { field, issue: i.message } : { issue: i.message };
-    }),
+    toValidationDetails(r.error.issues),
   );
 }
 
