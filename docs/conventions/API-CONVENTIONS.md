@@ -40,6 +40,42 @@
 - **Cross-tenant / cross-branch access returns 403 or 404** (never leaks existence
   differently) — the probe suite asserts this.
 
+### Correlation id
+
+Each request carries a correlation id, used to trace one request across its response and the server's log lines. A client
+**may** suggest one in the `x-correlation-id` request header; the server uses it only if it passes the checks below,
+otherwise it generates its own (a UUID v4) and says nothing about the substitution.
+
+**Where it appears**
+
+- The `x-correlation-id` response header, on responses to requests the server routes — including 404s, request-body
+  parse errors and 5xx responses. A request whose URL the HTTP layer rejects before routing (for example an invalid
+  percent-escape such as `/%E0%A4%A`) receives its 400 **without** the header.
+- `error.correlationId` in error envelopes produced by the application's exception filter, and that filter's log line.
+- It is not stored on audit rows.
+- The API does not send `Access-Control-Expose-Headers`, so a script running on a different origin cannot read the
+  response header; it can read `error.correlationId` from an error body instead.
+
+**Accepted from a client** (case-insensitive; anything else is replaced)
+
+- a **UUID**: 8-4-4-4-12 hexadecimal digits separated by hyphens. The digits are not checked for version or variant;
+- a **ULID**: exactly 26 characters from `0-9` and `A-Z` excluding `I`, `L`, `O` and `U`. The timestamp range (leading
+  character `7` or lower) is not checked.
+
+**Card-shaped check.** An id in one of those formats is still replaced if it looks like it could contain a payment card
+number: the hyphens are removed, and every substring of 13–19 digits taken from any run of 13 or more consecutive digits
+is tested with the Luhn check; one passing substring is enough. This is a heuristic safeguard, not a guarantee that no
+card data can appear in any encoding — the restriction to the two formats above is the primary control. It also replaces
+some legitimate ids: about 0.7 % of random v4 UUIDs (14,781 of 2,000,000 measured), a far smaller share of ULIDs, and the
+nil UUID `00000000-0000-0000-0000-000000000000`.
+
+**Replaced, not honoured:** any other value — an unhyphenated or braced UUID, `urn:uuid:…`, a W3C trace id, a custom or
+numeric id (`req-…`, Snowflake, epoch milliseconds), a value longer than 36 characters, one containing whitespace, CR/LF
+or encoded text, a repeated header, or a non-string. The rejected value is not echoed in the response or written to the
+application's own log lines, and no error is returned. A client therefore cannot assume its suggested id was kept.
+
+**Not read:** `x-request-id`, `traceparent` and `tracestate` are ignored entirely.
+
 ## Pagination
 
 - Cursor-based: `?limit=<n>&cursor=<opaque>`. Response:
