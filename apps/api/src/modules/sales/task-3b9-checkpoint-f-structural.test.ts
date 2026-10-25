@@ -234,7 +234,8 @@ describe('F — scope audit: nothing outside the approved Task 3b.9 scope exists
     expect(sha(read(join(ROOT, 'packages/permissions/src/index.ts')))).toBe(
       '20f66e4258f62899b67471a4f0e64fe84f8098a2dffe9a4b6575734729ed4c42',
     );
-    expect(readdirSync(join(ROOT, 'packages')).sort()).toEqual([
+    // ORIGINAL frozen Task 3b.9 package set (13) — kept verbatim as historical evidence.
+    const ORIGINAL_PACKAGES_3B9 = [
       'api-client',
       'backend',
       'config',
@@ -248,7 +249,32 @@ describe('F — scope audit: nothing outside the approved Task 3b.9 scope exists
       'testing',
       'ui',
       'uom',
-    ]);
+    ];
+    // OWNER-APPROVED SECURITY EXCEPTION (S-1, Task 3b.11, Option N): exactly ONE package is added —
+    // `@flower/safe-logging`, the zero-dependency authoritative error serializer / log sanitizer shared by the API
+    // logger, the non-API logger and the Prisma client factory (ADR-0013 scopes `service-runtime` to the non-API
+    // roles, so a neutral package avoids a db → service-runtime edge). No other package may be added.
+    const AMENDED_PACKAGES_3B9_S1 = [
+      'api-client',
+      'backend',
+      'config',
+      'db',
+      'i18n',
+      'money',
+      'permissions',
+      'realtime-client',
+      'safe-logging',
+      'service-runtime',
+      'shared-types',
+      'testing',
+      'ui',
+      'uom',
+    ];
+    // the amendment is exactly the original set plus `safe-logging` — nothing else
+    expect(AMENDED_PACKAGES_3B9_S1).toEqual([...ORIGINAL_PACKAGES_3B9, 'safe-logging'].sort());
+    expect(AMENDED_PACKAGES_3B9_S1).toHaveLength(ORIGINAL_PACKAGES_3B9.length + 1);
+    // still an EXACT-list assertion (not a loose contains)
+    expect(readdirSync(join(ROOT, 'packages')).sort()).toEqual(AMENDED_PACKAGES_3B9_S1);
   });
 
   it('credit is not a Payment; PAID is not SETTLED; no manual Payment / AR / Advance write exists in the orchestrator or the facade', () => {

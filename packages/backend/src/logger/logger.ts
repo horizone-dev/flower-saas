@@ -1,4 +1,5 @@
-import pino, { type Logger } from 'pino';
+import pino, { type DestinationStream, type Logger } from 'pino';
+import { safePinoOptions } from '@flower/safe-logging';
 import { loadBackendConfig } from '../config/backend-env.js';
 
 /**
@@ -36,22 +37,29 @@ export const REDACT_PATHS: readonly string[] = [
  * `DbService` etc.) never constructs a logger — only an actual caller of
  * `rootLogger`/`createRootLogger` (currently: `apps/api`, which does carry
  * `pino-pretty`) pays that cost.
+ *
+ * `safePinoOptions()` (`@flower/safe-logging`) is part of the options: an error object — under `err`, under any other key,
+ * nested, or as the first argument — is replaced by its allowlisted safe shape, and message strings are templated, so a
+ * request-controlled value inside an error (a rejected id in a Prisma message, a quoted input) never reaches the sink.
+ * `destination` lets a test read the REAL serialized output; production passes none (stdout).
  */
-export function createRootLogger(): Logger {
+export function createRootLogger(destination?: DestinationStream): Logger {
   const cfg = loadBackendConfig();
   const redact = { paths: [...REDACT_PATHS], censor: '[redacted]' };
+  const safe = safePinoOptions();
 
   if (cfg.NODE_ENV === 'development') {
     return pino({
       level: cfg.LOG_LEVEL,
       redact,
+      ...safe,
       transport: {
         target: 'pino-pretty',
         options: { translateTime: 'SYS:HH:MM:ss', ignore: 'pid,hostname' },
       },
     });
   }
-  return pino({ level: cfg.LOG_LEVEL, redact });
+  return pino({ level: cfg.LOG_LEVEL, redact, ...safe }, destination);
 }
 
 let lazyInstance: Logger | undefined;
