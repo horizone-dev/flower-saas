@@ -1,6 +1,7 @@
 import { Catch, HttpException, type ArgumentsHost, type ExceptionFilter } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { rootLogger } from '../logger/logger.js';
+import { safePath } from '../logger/safe-path.js';
 import { DomainError, type ErrorDetail } from './domain-error.js';
 
 interface ErrorEnvelope {
@@ -47,12 +48,33 @@ export class AllExceptionsFilter implements ExceptionFilter {
       } else {
         message = exception.message;
       }
+      if (status === 404 && /^Cannot [A-Z]+ /.test(message)) {
+        // the router's unmatched-route message embeds the raw request target (query string included): use the safe path
+        message = `Cannot ${request.method} ${safePath(request.url)}`;
+      }
     }
 
     if (status >= 500) {
-      rootLogger.error({ err: exception, correlationId, path: request.url }, 'unhandled error');
+      rootLogger.error(
+        {
+          err: exception,
+          correlationId,
+          path: safePath(request.url),
+          route: request.routeOptions?.url,
+        },
+        'unhandled error',
+      );
     } else {
-      rootLogger.warn({ code, status, correlationId, path: request.url }, message);
+      rootLogger.warn(
+        {
+          code,
+          status,
+          correlationId,
+          path: safePath(request.url),
+          route: request.routeOptions?.url,
+        },
+        message,
+      );
     }
 
     const body: ErrorEnvelope = { error: { code, message } };

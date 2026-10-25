@@ -117,9 +117,8 @@ describe('E — every surface Checkpoint E must NOT change is byte-identical (co
     // the posting engine (the sale facade never posts anything itself)
     'modules/accounting/posting-engine.service.ts':
       '16ce70384a3522177f4038c79aadea563526c92ea5166ceddb3f222d8de4cbc0',
-    // the shared error filter and the If-Match / uuid helpers the route reuses
-    'common/errors/all-exceptions.filter.ts':
-      '37dba35380859c2fefbaac9fc9c31fb70dd04ea268fa1b4fc01458c2c73dae17',
+    // the If-Match / uuid helpers the route reuses (the shared error filter this comment used to cover is now protected by
+    // the Task 3b.11 F2 amendment block below — its frozen pre-F2 hash is kept there as historical evidence)
     'modules/catalog/catalog-write.helpers.ts':
       '7feb7e3add2909d6ed80fc543b1a2931d837e1aa783d7f00676f5b31cdfa2827',
   };
@@ -201,6 +200,68 @@ describe('E — every surface Checkpoint E must NOT change is byte-identical (co
       for (const [post] of F_DELTA[file] ?? []) expect(text.split(post).length - 1, post).toBe(1);
     });
   }
+
+  // ── Task 3b.11 F2 amendment (owner-approved additive security change: safe request path in error logs) ───────────
+  // Historical freeze evidence is KEPT: the frozen bytes of the error filter are still pinned below (PRE_F2), and the current
+  // file must equal that frozen file plus EXACTLY the listed blocks (reverting them reproduces the frozen hash byte for byte).
+  // Any other edit — a changed status mapping, a dropped correlation id, a weakened log line, an extra relaxation — fails
+  // all three pins. The filter is NEVER left unprotected: its plain "unchanged" pin was replaced by these three, not removed.
+  const F2_FILE = 'common/errors/all-exceptions.filter.ts';
+  const PRE_F2 = '37dba35380859c2fefbaac9fc9c31fb70dd04ea268fa1b4fc01458c2c73dae17';
+  const POST_F2 = '00d4911079519d473241546e13c04662cb144cfb941bbf0efcac3521b145002e';
+  /** [post-F2 text, frozen text] — the COMPLETE F2 delta (safe-path import + the two log calls), nothing else */
+  const F2_DELTA: Array<[string, string]> = [
+    [
+      "import { rootLogger } from '../logger/logger.js';\nimport { safePath } from '../logger/safe-path.js';",
+      "import { rootLogger } from '../logger/logger.js';",
+    ],
+    [
+      "      rootLogger.error(\n        {\n          err: exception,\n          correlationId,\n          path: safePath(request.url),\n          route: request.routeOptions?.url,\n        },\n        'unhandled error',\n      );",
+      "      rootLogger.error({ err: exception, correlationId, path: request.url }, 'unhandled error');",
+    ],
+    [
+      '      rootLogger.warn(\n        {\n          code,\n          status,\n          correlationId,\n          path: safePath(request.url),\n          route: request.routeOptions?.url,\n        },\n        message,\n      );',
+      '      rootLogger.warn({ code, status, correlationId, path: request.url }, message);',
+    ],
+  ];
+  // ── Task 3b.11 F2b amendment (owner-approved additive security change: the router's unmatched-route message) ────
+  // The chain is kept intact: current file = approved F2 file + the F2b block; approved F2 file = frozen file + the F2 blocks.
+  // PRE_F2 (frozen) and POST_F2 (approved F2) stay pinned unchanged; POST_F2B pins the exact current bytes.
+  const POST_F2B = '8f567e264cf9d467a9ebe200bbae50c564f954030a82318e78b44e86c105bbb0';
+  /** [post-F2b text, post-F2 text] — the COMPLETE F2b delta (one rewrite of the router's "Cannot <METHOD> <url>" message), nothing else */
+  const F2B_DELTA: Array<[string, string]> = [
+    [
+      "\n      if (status === 404 && /^Cannot [A-Z]+ /.test(message)) {\n        // the router's unmatched-route message embeds the raw request target (query string included): use the safe path\n        message = `Cannot ${request.method} ${safePath(request.url)}`;\n      }",
+      '',
+    ],
+  ];
+  const withoutF2b = (): string => {
+    let text = read(join(SRC, F2_FILE)).replace(/\r\n/g, '\n');
+    for (const [post, pre] of F2B_DELTA) text = text.split(post).join(pre);
+    return text;
+  };
+  const revertF2 = (): string => {
+    let text = withoutF2b();
+    for (const [post, pre] of F2_DELTA) text = text.split(post).join(pre);
+    return text;
+  };
+  it(`${F2_FILE} is exactly the approved post-F2b file (Task 3b.11 F2b additive change)`, () => {
+    expect(sha256(join(SRC, F2_FILE))).toBe(POST_F2B);
+  });
+  it(`${F2_FILE}: every approved F2b block is present exactly once`, () => {
+    const text = read(join(SRC, F2_FILE)).replace(/\r\n/g, '\n');
+    for (const [post] of F2B_DELTA) expect(text.split(post).length - 1, post).toBe(1);
+  });
+  it(`${F2_FILE} minus the approved F2b block is byte-identical to the approved post-F2 file`, () => {
+    expect(sha(withoutF2b())).toBe(POST_F2);
+  });
+  it(`${F2_FILE} minus the approved F2b and F2 blocks is byte-identical to the frozen pre-F2 file`, () => {
+    expect(sha(revertF2())).toBe(PRE_F2);
+  });
+  it(`${F2_FILE}: every approved F2 block is present exactly once (in the post-F2 text)`, () => {
+    const text = withoutF2b();
+    for (const [post] of F2_DELTA) expect(text.split(post).length - 1, post).toBe(1);
+  });
 
   it('realtime authorization and the worker envelope are unchanged — there is NO event allow-list to extend; the sale event is authorised by its scope fields alone', () => {
     expect(sha256(join(ROOT, 'apps/realtime/src/auth/topics.ts'))).toBe(
