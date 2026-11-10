@@ -58,6 +58,6 @@
     "testcontainers": "12.1.0",
     "tsx": "4.23.13",
     "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }
