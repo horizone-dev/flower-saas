@@ -1,0 +1,35 @@
+{
+  "name": "@flower/safe-logging",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pure, dependency-free secure error serialization and log-message sanitization shared by every backend runtime (api, worker, scheduler, realtime) and the Prisma client factory. Allowlist-first: an error is reduced to type / code / SQLSTATE / operation / safe message template / stack-frame locations; raw messages, stack headers, metadata and causes are never emitted. NO runtime dependencies, NO domain logic (CLAUDE.md rule 1, task 3b.11 S-1).",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "clean": "rimraf dist node_modules .turbo"
+  },
+  "devDependencies": {
+    "@flower/config": "workspace:*",
+    "@types/node": "24.13.3",
+    "eslint": "10.9.1",
+    "pino": "10.3.1",
+    "rimraf": "6.1.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12"
+  }
+}

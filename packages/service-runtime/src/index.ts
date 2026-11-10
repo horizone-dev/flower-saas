@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { Redis } from 'ioredis';
 import type { JobsOptions } from 'bullmq';
 import pino, { type Logger } from 'pino';
+import { safePinoOptions } from '@flower/safe-logging';
 import { z } from 'zod';
 
 /**
@@ -43,8 +44,23 @@ export function parseEnv<T extends z.ZodTypeAny>(
   return parsed.data as z.infer<T> & z.infer<typeof baseEnv>;
 }
 
-export function createLogger(name: string, level: string, pretty: boolean): Logger {
-  const opts = { level, name, redact: ['*.password', '*.secret', '*.token'] };
+/**
+ * The pino logger of every non-API runtime role. `safePinoOptions()` (`@flower/safe-logging`) is part of the options so an
+ * error object can never reach the sink raw — see that package for the allowlist. `destination` exists so a test can read
+ * the REAL serialized output; production passes none (stdout).
+ */
+export function createLogger(
+  name: string,
+  level: string,
+  pretty: boolean,
+  destination?: pino.DestinationStream,
+): Logger {
+  const opts = {
+    level,
+    name,
+    redact: ['*.password', '*.secret', '*.token'],
+    ...safePinoOptions(),
+  };
   return pretty
     ? pino({
         ...opts,
@@ -53,7 +69,7 @@ export function createLogger(name: string, level: string, pretty: boolean): Logg
           options: { translateTime: 'SYS:HH:MM:ss', ignore: 'pid,hostname' },
         },
       })
-    : pino(opts);
+    : pino(opts, destination);
 }
 
 export function createRedis(host: string, port: number): Redis {

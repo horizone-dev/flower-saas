@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
@@ -2377,6 +2378,79 @@ describe('cross-tenant isolation probe suite', () => {
   });
 
   // ══════════════════════════ coverage ══════════════════════════════════════
+  // ══════════════════ task 3b.11 (P6h) — tenant session revocation ═══════════════════
+  it('session revocation: malformed id → 400 INVALID_ID with no write; a foreign or unknown session → the same 404 with NO revocation, audit row or security event; the owning tenant revokes its own', async () => {
+    const admin = new pg.Client({ connectionString: stack.postgres.url });
+    await admin.connect();
+    const evidence = async (sid: string) => ({
+      audit: Number(
+        (await admin.query(`SELECT count(*)::int AS n FROM audit_log WHERE "resourceId"=$1`, [sid]))
+          .rows[0].n,
+      ),
+      events: Number(
+        (
+          await admin.query(
+            `SELECT count(*)::int AS n FROM login_security_event WHERE detail::text LIKE $1`,
+            [`%${sid}%`],
+          )
+        ).rows[0].n,
+      ),
+    });
+    try {
+      const victim = randomUUID();
+      const victimTok = await mint(victim, {
+        realm: 'tenant',
+        tenantId: A.tenantId,
+        userId: A.ownerId,
+        accountType: 'OWNER',
+        permissions: [...PHASE_1_TENANT_PERMISSIONS],
+      });
+      expect(victimTok).toBeTruthy();
+
+      // 1. malformed identifiers → 400 INVALID_ID before any mutation / audit / security event
+      for (const bad of [
+        'not-a-uuid',
+        '9999991111111116',
+        '9999-9911-1111-1116',
+        '%00',
+        victim + 'x',
+      ]) {
+        const res = await send('DELETE', `/v1/auth/sessions/${encodeURIComponent(bad)}`, ownerATok);
+        expect(res.statusCode, bad).toBe(400);
+        expect((res.json() as { error: { code: string } }).error.code).toBe('INVALID_ID');
+        expect(res.body).not.toContain(bad);
+        expect(await evidence(bad)).toEqual({ audit: 0, events: 0 });
+      }
+
+      // 2. tenant B (holding users:manage) cannot revoke tenant A's session — nor learn whether it exists
+      const foreign = await send('DELETE', `/v1/auth/sessions/${victim}`, ownerBTok);
+      const unknown = await send('DELETE', `/v1/auth/sessions/${randomUUID()}`, ownerBTok);
+      expect(foreign.statusCode).toBe(404);
+      expect(unknown.statusCode).toBe(404);
+      expect(foreign.json()).toEqual(unknown.json()); // identical bodies: existence is not revealed
+      expect((await store.get(victim))?.revokedAt ?? null).toBeNull(); // still live
+      expect(await evidence(victim)).toEqual({ audit: 0, events: 0 }); // no misleading success records
+
+      // 3. concurrent cross-tenant attempts: still nothing revoked, nothing recorded
+      const burst = await Promise.all(
+        Array.from({ length: 8 }, () => send('DELETE', `/v1/auth/sessions/${victim}`, ownerBTok)),
+      );
+      expect(burst.map((r) => r.statusCode)).toEqual(Array(8).fill(404));
+      expect((await store.get(victim))?.revokedAt ?? null).toBeNull();
+      expect(await evidence(victim)).toEqual({ audit: 0, events: 0 });
+
+      // 4. positive control: the OWNING tenant revokes its own session; the legitimate audit + security event exist
+      const ok = await send('DELETE', `/v1/auth/sessions/${victim}`, ownerATok);
+      expect(ok.statusCode).toBe(200);
+      expect((await store.get(victim))?.revokedAt ?? 1).not.toBeNull();
+      const after = await evidence(victim);
+      expect(after.audit).toBeGreaterThanOrEqual(1);
+      expect(after.events).toBeGreaterThanOrEqual(1);
+    } finally {
+      await admin.end();
+    }
+  });
+
   it('every non-@Public route is either probed or on the documented safe list', () => {
     const routes = enumerateRoutes(app);
     const nonPublic = routes.filter((r) => !r.isPublic);
@@ -2390,7 +2464,6 @@ describe('cross-tenant isolation probe suite', () => {
       'POST /v1/auth/step-up',
       'POST /v1/auth/mfa/enrol',
       'POST /v1/auth/mfa/confirm',
-      'DELETE /v1/auth/sessions/:sessionId',
       'GET /v1/platform/plans',
       'POST /v1/platform/plans',
       'POST /v1/platform/plans/:planId/versions',
@@ -2406,6 +2479,9 @@ describe('cross-tenant isolation probe suite', () => {
       'GET /v1/platform/business-type-templates',
     ]);
     const PROBED_PREFIXES = [
+      // task 3b.11 (P6h) — `DELETE /v1/auth/sessions/:sessionId` is NOT a safe-list route: it acts on a session id from the
+      // URL. Probed below (tenant B cannot revoke tenant A's session; malformed id rejected before any write).
+      '/v1/auth/sessions',
       '/v1/org',
       '/v1/access',
       '/v1/localization',

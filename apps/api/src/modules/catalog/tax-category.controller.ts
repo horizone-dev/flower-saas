@@ -11,6 +11,7 @@ import { RequirePermission } from '../../common/auth/require-permission.decorato
 import { ScopedParam } from '../../common/auth/pipeline.decorators.js';
 import { ZodBody } from '../../common/validation/zod-body.js';
 import { DomainError } from '../../common/errors/domain-error.js';
+import { toValidationDetails } from '../../common/validation/validation-details.js';
 import { assertUuid, parseIfMatch, requireIfMatch } from './catalog-write.helpers.js';
 import { TaxCategoryRepository } from './tax-category.repository.js';
 import { TaxResolutionService } from './tax-resolution.service.js';
@@ -36,10 +37,7 @@ function parseResolveQuery(raw: Record<string, string>): string {
       'VALIDATION_FAILED',
       'the query string is invalid — `?date=YYYY-MM-DD` is required',
       400,
-      r.error.issues.map((i) => {
-        const field = i.path.join('.');
-        return field ? { field, issue: i.message } : { issue: i.message };
-      }),
+      toValidationDetails(r.error.issues),
     );
   }
   if (!isFiscalDate(r.data.date)) {

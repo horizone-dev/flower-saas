@@ -8,6 +8,7 @@ import type { RequestContext } from '../../common/context/index.js';
 import { DomainError, ForbiddenError } from '../../common/errors/domain-error.js';
 import { parseCookies, serializeCookie } from '../../common/http/cookies.js';
 import { ZodBody } from '../../common/validation/zod-body.js';
+import { requireUuidParam } from '../../common/validation/uuid-param.js';
 import { AuthService } from './auth.service.js';
 import type { LoginResult } from './auth.service.js';
 import {
@@ -204,7 +205,8 @@ export class AuthController {
   @Delete('sessions/:sessionId')
   @RequirePermission('users:manage')
   async revokeSession(@Param('sessionId') sessionId: string, @Ctx() ctx: RequestContext) {
-    await this.auth.revokeSession(sessionId, ctx.userId);
+    // validate BEFORE anything is written, then revoke only a session of the caller's own tenant (404 otherwise)
+    await this.auth.revokeTenantSession(requireUuidParam(sessionId), ctx.tenantId, ctx.userId);
     return { status: 'ok' };
   }
 }

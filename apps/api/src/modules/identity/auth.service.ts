@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { SignJWT, jwtVerify } from 'jose';
 import { APP_CONFIG, type AppConfig } from '../../config/env.js';
-import { DomainError } from '../../common/errors/domain-error.js';
+import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
 import { PasswordService } from '../../common/crypto/password.service.js';
 import { TotpService } from '../../common/crypto/totp.service.js';
 import { AuditWriter } from '../../common/audit/audit.writer.js';
@@ -261,6 +261,23 @@ export class AuthService {
 
   async logout(sessionId: string): Promise<void> {
     await this.sessions.revoke(sessionId, 'logout');
+  }
+
+  /**
+   * Tenant-realm revoke (`DELETE /v1/auth/sessions/:sessionId`): the target must exist AND belong to the caller's tenant.
+   * A missing, expired or foreign-tenant session is the same 404 (existence is not revealed) and nothing is written —
+   * no revocation, no audit row, no security event. `SessionData.tenantId` is fixed at issue, so the check cannot race.
+   */
+  async revokeTenantSession(
+    targetSessionId: string,
+    callerTenantId: string | null,
+    byUserId: string | null,
+  ): Promise<void> {
+    const session = await this.sessions.get(targetSessionId);
+    if (!session || !callerTenantId || session.tenantId !== callerTenantId) {
+      throw new NotFoundError('session');
+    }
+    await this.revokeSession(targetSessionId, byUserId);
   }
 
   async revokeSession(targetSessionId: string, byUserId: string | null): Promise<void> {

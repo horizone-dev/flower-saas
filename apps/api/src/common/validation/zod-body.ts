@@ -1,6 +1,7 @@
 import { type PipeTransform } from '@nestjs/common';
 import type { ZodType } from 'zod';
 import { DomainError } from '../errors/domain-error.js';
+import { toValidationDetails } from './validation-details.js';
 
 /**
  * `@Body(new ZodBody(schema)) dto: T` — validates the request body against a zod
@@ -16,10 +17,7 @@ export class ZodBody<T> implements PipeTransform<unknown, T> {
       'VALIDATION_FAILED',
       'the request body is invalid',
       400,
-      result.error.issues.map((i) => {
-        const field = i.path.join('.');
-        return field ? { field, issue: i.message } : { issue: i.message };
-      }),
+      toValidationDetails(result.error.issues),
     );
   }
 }

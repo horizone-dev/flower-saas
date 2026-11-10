@@ -6,6 +6,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter.js';
 import { installRequestContext } from './common/context/index.js';
+import { CORRELATION_HEADER, installCorrelationId } from './common/context/correlation-id.js';
 import { installRawBodyCapture } from './common/http/raw-body.js';
 import { WebhookRecoveryProcessor } from './modules/payments/webhook-recovery.repository.js';
 import { assertEveryRouteDeclaresIntent } from './common/auth/index.js';
@@ -13,21 +14,14 @@ import { assertNoIdempotencyOnCredentialRoutes } from './common/idempotency/inde
 import { rootLogger } from './common/logger/logger.js';
 import { loadConfig } from './config/env.js';
 
-const CORRELATION_HEADER = 'x-correlation-id';
-
 async function bootstrap(): Promise<void> {
   const config = loadConfig();
 
   const adapter = new FastifyAdapter({ trustProxy: true, genReqId: () => randomUUID() });
 
-  // Correlation id: honour an inbound header, else use Fastify's request id.
-  adapter.getInstance().addHook('onRequest', (request, reply, done) => {
-    const inbound = request.headers[CORRELATION_HEADER];
-    const correlationId = (Array.isArray(inbound) ? inbound[0] : inbound) ?? String(request.id);
-    (request as { correlationId?: string }).correlationId = correlationId;
-    void reply.header(CORRELATION_HEADER, correlationId);
-    done();
-  });
+  // Correlation id: honour an inbound header ONLY when it is a safe canonical id (UUID / ULID, not card-shaped);
+  // otherwise use Fastify's request id. A rejected value is never echoed or logged.
+  installCorrelationId(adapter.getInstance());
 
   // Establish the per-request RequestContext (ALS) before guards run. The auth
   // guard (task 1.5) layers the session's tenant/user/scope onto it.

@@ -38,6 +38,7 @@
     "clean": "rimraf dist node_modules .turbo generated"
   },
   "dependencies": {
+    "@flower/safe-logging": "workspace:*",
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0",
     "@prisma/client-runtime-utils": "7.10.0",
