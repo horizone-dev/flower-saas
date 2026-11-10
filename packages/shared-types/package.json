@@ -26,13 +26,13 @@
   "dependencies": {
     "@flower/money": "workspace:*",
     "@flower/uom": "workspace:*",
-    "zod": "4.5.4"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@flower/config": "workspace:*",
     "eslint": "10.9.1",
     "rimraf": "6.1.3",
     "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }
