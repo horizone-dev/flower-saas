@@ -105,6 +105,8 @@ export interface MintOptions {
   companyScope?: string[] | 'ALL';
   overlay?: Record<string, string[]>;
   stepUp?: boolean;
+  /** the session's user; default = a random id with NO user row (fine for routes that never load the user) */
+  userId?: string;
 }
 
 export async function mintTenantToken(
@@ -115,7 +117,7 @@ export async function mintTenantToken(
 ): Promise<string> {
   const s = baseSess(`g-${randomUUID()}`, 'tenant');
   s.tenantId = tenantId;
-  s.userId = randomUUID();
+  s.userId = o.userId ?? randomUUID();
   s.accountType = 'OWNER';
   if (o.stepUp) {
     s.mfaLevel = 'STEP_UP';

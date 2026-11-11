@@ -605,14 +605,26 @@ describe('PCI bounded-negative verification — canaries on every output and sto
       const routes = enumerateRoutes(w.h.app).filter(
         (r) => !/^\/v1\/(healthz|readyz)$/.test(r.path),
       );
+      // a REAL owner user: the session must name an existing user, or routes that load it (MFA enrolment) fail a foreign key and
+      // answer 500 for a reason unrelated to the canary
+      const ownerRow = await w.pool.query(
+        `SELECT id FROM "user" WHERE "tenantId" = $1 AND "accountType" = 'OWNER' ORDER BY "createdAt" LIMIT 1`,
+        [w.a.tenantId],
+      );
+      const realOwnerId = ownerRow.rows[0]?.id as string;
+      expect(realOwnerId).toBeTruthy();
       const start = captured.serialized.length;
       let reached500 = 0;
+      const answered500: string[] = [];
       for (const r of routes) {
         const token = r.isPublic
           ? null
           : r.realm === 'platform'
             ? await mintPlatform()
-            : await mintTenantToken(w.h, w.a.tenantId, owner, { stepUp: true });
+            : await mintTenantToken(w.h, w.a.tenantId, owner, {
+                stepUp: true,
+                userId: realOwnerId,
+              });
         const url = r.path.replace(/^\/v1/, '').replace(/:[A-Za-z]+/g, c.pan);
         const query =
           r.httpMethod === 'GET'
@@ -628,7 +640,10 @@ describe('PCI bounded-negative verification — canaries on every output and sto
             'idempotency-key': `p6f-${reached500}-${Math.random().toString(36).slice(2)}`,
           },
         );
-        if (res.status >= 500) reached500++;
+        if (res.status >= 500) {
+          reached500++;
+          answered500.push(`${r.httpMethod} ${r.path}`);
+        }
       }
       const out = captured.serialized.slice(start);
       const records = out.map((l) => JSON.parse(l) as Json);
@@ -649,10 +664,18 @@ describe('PCI bounded-negative verification — canaries on every output and sto
               .slice(0, 300)
           : '',
       };
-      // the sweep really did reach the database layer and really did log errors …
-      expect(reached500).toBeGreaterThan(10);
-      expect(classified.length).toBeGreaterThan(10);
-      // … with useful diagnostics preserved …
+      // Closure change (Task 3b.11 V-1 / V-2): a malformed id used to reach PostgreSQL and answer 500, and this sweep used those 500s
+      // to force sanitised `err` records into the log. A malformed id is now a 404, so the sweep must (a) still reach the database
+      // layer (its 404 translation is logged and scanned below) and (b) answer no 5xx at all. The
+      // sanitised-`err` serialisation (code P2007, sqlstate 22P02, frames, no value) is proven by `packages/safe-logging`
+      // (`pino.test.ts`, `safe-error.test.ts`); if an `err` record does appear here its diagnostics must still be intact.
+      // the malformed canary ids really did reach the database cast and were translated (the interceptor's warning is the proof)
+      const translated = records.filter(
+        (r) => r['msg'] === 'resource not found' && r['status'] === 404,
+      );
+      expect(translated.length).toBeGreaterThan(10);
+      // NO 5xx at all: a card-number canary in any path parameter or query value must never be a server fault
+      expect(answered500).toEqual([]);
       for (const r of classified) {
         const e = r['err'] as Json;
         expect(typeof e['operation']).toBe('string');
