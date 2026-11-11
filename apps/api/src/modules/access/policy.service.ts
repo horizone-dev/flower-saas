@@ -3,10 +3,12 @@ import { resolveEffectivePermissions } from '@flower/permissions';
 import type { ScopeSet } from '../../common/context/index.js';
 import { AccessRepository, type UserAccessRow } from './access.repository.js';
 import type { ResolvedAccess } from './policy.types.js';
+import { NotFoundError } from '../../common/errors/domain-error.js';
 
-export class UserNotFoundError extends Error {
-  constructor(userId: string) {
-    super(`user ${userId} not found in this tenant`);
+/** 404 `NOT_FOUND` — an unknown (or other-tenant) user id is the caller's mistake, never a server fault (Task 3b.11 F4). The id is not echoed. */
+export class UserNotFoundError extends NotFoundError {
+  constructor(_userId: string) {
+    super('user');
     this.name = 'UserNotFoundError';
   }
 }

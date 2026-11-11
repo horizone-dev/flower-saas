@@ -1,3 +1,4 @@
+import { parseInput } from '../../common/validation/zod-input.js';
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { z } from 'zod';
 import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
@@ -34,7 +35,7 @@ export class LocalizationController {
   @Get('reference')
   @RequirePermission('settings:tenant:manage')
   reference(@Query() raw: Record<string, string>) {
-    const q = referenceQuerySchema.parse(raw);
+    const q = parseInput(referenceQuerySchema, raw, 'query');
     return this.localization.reference(parseAt(q.at));
   }
 
@@ -42,7 +43,7 @@ export class LocalizationController {
   @RequirePermission('settings:tenant:manage')
   @ScopedParam({ company: 'companyId' })
   companyProfile(@Param('companyId') companyId: string, @Query() raw: Record<string, string>) {
-    const q = referenceQuerySchema.parse(raw);
+    const q = parseInput(referenceQuerySchema, raw, 'query');
     return this.localization.forCompany(companyId, parseAt(q.at));
   }
 }

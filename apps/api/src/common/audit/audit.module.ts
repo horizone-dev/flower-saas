@@ -3,6 +3,7 @@ import { APP_INTERCEPTOR } from '@nestjs/core';
 import { AuditWriter } from './audit.writer.js';
 import { OutboxWriter } from './outbox.writer.js';
 import { ImpersonationReadInterceptor } from './impersonation-read.interceptor.js';
+import { InputHardeningModule } from '../validation/input-hardening.module.js';
 
 /**
  * Audit + outbox foundation (task 1.14). `AuditWriter` / `OutboxWriter` write
@@ -13,6 +14,7 @@ import { ImpersonationReadInterceptor } from './impersonation-read.interceptor.j
  */
 @Global()
 @Module({
+  imports: [InputHardeningModule],
   providers: [
     AuditWriter,
     OutboxWriter,

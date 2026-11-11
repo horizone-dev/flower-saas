@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { runPlatform, type PrismaClient } from '@flower/db';
 import { DbService } from '../../common/data/index.js';
+import { NotFoundError } from '../../common/errors/domain-error.js';
 
 export interface PlanVersionConfig {
   planVersionId: string;
@@ -88,12 +89,13 @@ export class PlanRepository {
   }
 
   async publishPlanVersion(planVersionId: string): Promise<void> {
-    await runPlatform(this.c, (tx) =>
-      tx.planVersion.update({
+    const { count } = await runPlatform(this.c, (tx) =>
+      tx.planVersion.updateMany({
         where: { id: planVersionId },
         data: { status: 'PUBLISHED', publishedAt: new Date() },
       }),
     );
+    if (count === 0) throw new NotFoundError('plan version'); // an unknown id is a 404, not a server fault (F4)
   }
 
   /** The defaults for a plan version — used by provisioning to snapshot a tenant. */
