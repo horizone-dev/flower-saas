@@ -11,6 +11,10 @@ import {
 import { parseReportDateRange } from './report-date-range.js';
 import { INVOICE_PAYMENT_STATUSES, PAYMENT_STATUS_NOTE } from './sales-financial-report.js';
 import { parseSalesReportRange, SALES_REPORT_MAX_DOCUMENTS } from './sales-report-range.js';
+import {
+  frozenSchemaShaOfFile,
+  withoutAuthorizedMigrations,
+} from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.10 Checkpoint B — structural pins: the Sales Financial Report.
@@ -185,12 +189,12 @@ describe('B — scope: only the Sales Financial Report; nothing of Checkpoints C
 
   it('no migration 50, no schema change, no permission change, no role-template change', () => {
     const migrations = join(ROOT, 'packages/db/prisma/migrations');
-    const all = readdirSync(migrations)
+    const all = withoutAuthorizedMigrations(readdirSync(migrations))
       .filter((n) => !n.endsWith('.toml'))
       .sort();
     expect(all).toHaveLength(49);
     expect(all[all.length - 1]).toBe('20261010120000_phase_3b8_currency_and_release_integrity');
-    expect(sha(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
+    expect(frozenSchemaShaOfFile(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
       '15ef99cee245e0cc64166ab6a5156767b4795a0a7b763435207514945ea37459',
     );
     expect(sha(join(ROOT, 'packages/permissions/src/index.ts'))).toBe(

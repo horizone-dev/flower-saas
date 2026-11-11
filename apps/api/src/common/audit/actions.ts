@@ -278,6 +278,22 @@ export const AUDITABLE_ACTIONS = {
   // Bounded payloads only: ids, amount/currency, creditAuthorized/
   // authorizationMode booleans/labels, and (override only) a short, length-
   // bounded textual reason — never Customer PII, never a raw DTO dump.
+  // ── RB-1 A2 (Phase 3B closure): anonymous issued-sale credit notes and their per-tender refunds. Immutable documents; the refund
+  // outcome is attested by a user (execute / fail). Bounded payloads: ids, amounts, codes — never card data or free text.
+  'anonymous_credit_note.issued': { resourceType: 'anonymous_credit_note', security: false },
+  'anonymous_credit_note.refund_added': {
+    resourceType: 'anonymous_credit_note_refund',
+    security: false,
+  },
+  'anonymous_credit_note.refund_executed': {
+    resourceType: 'anonymous_credit_note_refund',
+    security: false,
+  },
+  'anonymous_credit_note.refund_failed': {
+    resourceType: 'anonymous_credit_note_refund',
+    security: false,
+  },
+
   'receivable.created': { resourceType: 'customer_receivable', security: false },
   'credit_limit.override_used': { resourceType: 'customer_company_account', security: false },
 

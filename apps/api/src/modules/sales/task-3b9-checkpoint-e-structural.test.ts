@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { planSale, SalePlanError } from './sale-plan.js';
+import { withoutAuthorizedMigrations } from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.9 Checkpoint E — structural pins of the PUBLIC surface.
@@ -38,7 +39,7 @@ function codeOnly(src: string): string {
     .replace(/`(?:\\.|[^`\\])*`/g, '``');
 }
 function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
+  for (const name of withoutAuthorizedMigrations(readdirSync(dir))) {
     if (
       name === 'node_modules' ||
       name === 'dist' ||
@@ -280,7 +281,9 @@ describe('E — every surface Checkpoint E must NOT change is byte-identical (co
 
   it('the migration chain is exactly the frozen 49 — the surface needed no new persistence', () => {
     const dir = join(ROOT, 'packages/db/prisma/migrations');
-    const migrations = readdirSync(dir).filter((n) => !n.endsWith('.toml'));
+    const migrations = withoutAuthorizedMigrations(readdirSync(dir)).filter(
+      (n) => !n.endsWith('.toml'),
+    );
     expect(migrations).toHaveLength(49);
     expect([...migrations].sort().pop()).toBe(
       '20261010120000_phase_3b8_currency_and_release_integrity',

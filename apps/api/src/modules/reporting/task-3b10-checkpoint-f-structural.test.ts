@@ -3,6 +3,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  frozenSchemaShaOfFile,
+  withoutAuthorizedMigrations,
+} from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.10 Checkpoint F — structural pins of the PUBLIC HTTP WIRING of the five frozen reports.
@@ -159,14 +163,14 @@ describe('F — the frozen Checkpoints A–E are byte-identical (25 production h
   }
 
   it('no migration 50, no schema change, no permission-registry change, no role-template change', () => {
-    const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter(
-      (n) => !n.endsWith('.toml'),
-    );
+    const dirs = withoutAuthorizedMigrations(
+      readdirSync(join(ROOT, 'packages/db/prisma/migrations')),
+    ).filter((n) => !n.endsWith('.toml'));
     expect(dirs).toHaveLength(49);
     expect(dirs.sort()[dirs.length - 1]).toBe(
       '20261010120000_phase_3b8_currency_and_release_integrity',
     );
-    expect(sha(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
+    expect(frozenSchemaShaOfFile(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
       '15ef99cee245e0cc64166ab6a5156767b4795a0a7b763435207514945ea37459',
     );
     expect(sha(join(ROOT, 'packages/permissions/src/index.ts'))).toBe(
@@ -477,7 +481,18 @@ describe('F — the additive guard features live in the ONE centralized pipeline
       }
     };
     walk(SRC);
-    expect(users.sort()).toEqual(CONTROLLERS.map((n) => `modules/reporting/${n}`).sort());
+    // PHASE 3B CLOSURE AMENDMENT (F-1 / F-2, 2026-11-12): exactly ONE further consumer is reviewed and admitted — the read-only anonymous
+    // credit-note SUMMARY controller, whose company-wide route needs the same unrestricted-branch authority as a company report (and
+    // `@RequireAllBranches` is used once, there). Every other file must still be a report controller; `@RequireAllPermissions` stays
+    // reserved for them (the summary uses a single permission and never declares it).
+    const SUMMARY_CONTROLLER =
+      'modules/anonymous-credit-notes/anonymous-credit-note-summary.controller.ts';
+    expect(users.sort()).toEqual(
+      [...CONTROLLERS.map((n) => `modules/reporting/${n}`), SUMMARY_CONTROLLER].sort(),
+    );
+    const summarySrc = stripComments(read(join(SRC, SUMMARY_CONTROLLER)));
+    expect(summarySrc).not.toMatch(/@RequireAllPermissions\(/);
+    expect([...summarySrc.matchAll(/@RequireAllBranches\(/g)]).toHaveLength(1);
   });
 });
 

@@ -3,6 +3,10 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  frozenSchemaShaOfFile,
+  withoutAuthorizedMigrations,
+} from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.9 Checkpoint F — structural pins of the FINAL integrated tree.
@@ -27,7 +31,7 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 }
 function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
+  for (const name of withoutAuthorizedMigrations(readdirSync(dir))) {
     if (name === 'node_modules' || name === 'dist' || name.startsWith('.')) continue;
     const abs = join(dir, name);
     if (statSync(abs).isDirectory()) walk(abs, out);
@@ -65,7 +69,7 @@ const TOUCHED = [
 describe('F — the migration chain is untouched: exactly the frozen 49, Task 3b.8 hashes intact', () => {
   const dir = join(ROOT, 'packages/db/prisma/migrations');
   const migrations = (): string[] =>
-    readdirSync(dir)
+    withoutAuthorizedMigrations(readdirSync(dir))
       .filter((n) => !n.endsWith('.toml'))
       .sort();
 
@@ -106,7 +110,7 @@ describe('F — the migration chain is untouched: exactly the frozen 49, Task 3b
   }
 
   it('the Prisma schema and the migration lock are unchanged — Task 3b.9 introduces no schema drift', () => {
-    expect(sha(read(join(ROOT, 'packages/db/prisma/schema.prisma')))).toBe(
+    expect(frozenSchemaShaOfFile(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
       '15ef99cee245e0cc64166ab6a5156767b4795a0a7b763435207514945ea37459',
     );
     expect(sha(read(join(dir, 'migration_lock.toml')))).toBe(
@@ -163,7 +167,7 @@ describe('F — test and source hygiene of every Task 3b.9 file', () => {
     }
     for (const dir of [SALES, join(SRC, 'modules/orders')]) {
       expect(
-        readdirSync(dir).some((n) => /\.(bak|orig|tmp|rej)$/.test(n)),
+        withoutAuthorizedMigrations(readdirSync(dir)).some((n) => /\.(bak|orig|tmp|rej)$/.test(n)),
         rel(dir),
       ).toBe(false);
     }

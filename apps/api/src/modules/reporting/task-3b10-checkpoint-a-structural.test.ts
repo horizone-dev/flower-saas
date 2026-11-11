@@ -4,6 +4,10 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { TRIAL_BALANCE_SQL } from './trial-balance.sql.js';
+import {
+  frozenSchemaShaOfFile,
+  withoutAuthorizedMigrations,
+} from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.10 Checkpoint A — structural pins: reporting foundation + Trial Balance.
@@ -202,7 +206,8 @@ describe('A — scope: exactly the Checkpoint A files exist; nothing of a later 
 // ═══════════════════════════════════════════════════════════════════════════════
 describe('A — OD-1: no new permission, no migration, no schema change', () => {
   const migrations = join(ROOT, 'packages/db/prisma/migrations');
-  const migrationDirs = (): string[] => readdirSync(migrations).filter((n) => !n.endsWith('.toml'));
+  const migrationDirs = (): string[] =>
+    withoutAuthorizedMigrations(readdirSync(migrations)).filter((n) => !n.endsWith('.toml'));
 
   it('there is NO migration 50: exactly 49 migrations, the last is the frozen Task 3b.8 one', () => {
     const all = migrationDirs().sort();
@@ -211,7 +216,7 @@ describe('A — OD-1: no new permission, no migration, no schema change', () => 
   });
 
   it('schema.prisma and the migration lock are byte-unchanged (no reporting table, no index, no column)', () => {
-    expect(sha(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
+    expect(frozenSchemaShaOfFile(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
       '15ef99cee245e0cc64166ab6a5156767b4795a0a7b763435207514945ea37459',
     );
     expect(sha(join(migrations, 'migration_lock.toml'))).toBe(

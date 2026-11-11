@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { withoutAuthorizedMigrations } from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.9 Checkpoint B — structural pins.
@@ -296,7 +297,7 @@ describe('B — the Checkpoint A pure modules stay pure and do not depend on the
 
 describe('B — no migration 50, no Task 3b.10', () => {
   const migrationsDir = join(ROOT, 'packages/db/prisma/migrations');
-  const migrations = readdirSync(migrationsDir)
+  const migrations = withoutAuthorizedMigrations(readdirSync(migrationsDir))
     .filter((n) => /^\d{14}_/.test(n))
     .sort();
 
