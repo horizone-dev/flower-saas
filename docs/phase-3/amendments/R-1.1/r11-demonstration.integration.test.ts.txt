@@ -1,0 +1,210 @@
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import pg from 'pg';
+import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
+import {
+  createSaleWorld,
+  mintTenantToken,
+  rolePerms,
+  type Co,
+  type SaleWorld,
+} from '../../verification/load-sale-world.js';
+
+/**
+ * R-1.1 DEMONSTRATION (a TRIAL artifact, not part of the closure branch). One file, two modes:
+ *   R11 unset  → runs against TODAY's frozen Sales report and records the defect: a fully reversed anonymous sale is returned as
+ *                `reconciled: true` with its sale still counted, and ledger-level tampering of the anonymous credit journals is invisible;
+ *   R11=1      → runs against the report with the R-1.1 amendment applied and proves the fix: the credit is in the figures, the report
+ *                equals the general ledger, and any disagreement with the ledger fails the report CLOSED (no figures are returned).
+ */
+type Json = Record<string, unknown>;
+const obj = (v: unknown): Json => v as Json;
+const str = (v: unknown): string => String(v);
+const AMENDED = process.env['R11'] === '1';
+const UNIT = 3333n;
+
+describe(`R-1.1 demonstration — ${AMENDED ? 'AMENDED Sales report' : 'FROZEN Sales report (baseline)'}`, () => {
+  let stack: TestStack;
+  let w: SaleWorld;
+  let admin: pg.Pool;
+  let co: Co;
+  let b0 = '';
+  let b1 = '';
+  let manager = '';
+  let D = '';
+  let counter = 0;
+  const key = (p: string): string => `${p}-${++counter}-${randomUUID().slice(0, 8)}`;
+  const rows = async <T extends Json = Json>(sql: string, p: unknown[] = []): Promise<T[]> =>
+    (await admin.query(sql, p)).rows as T[];
+  const out: Record<string, unknown> = {};
+
+  async function sell(branch: string, qty: number) {
+    const base = `/companies/${co.companyId}/branches/${branch}`;
+    const created = await w.req('POST', `${base}/orders`, w.ownerToken,
+      { lines: [{ productId: w.productId, variantId: w.variantId, selectedUomCode: 'piece', quantity: String(qty) }] },
+      { 'idempotency-key': key('order') });
+    const order = obj(obj(created.body)['order']) as { id: string; version: number };
+    const prev = await w.req('GET', `${base}/orders/${order.id}/totals`, w.ownerToken);
+    const total = str(obj(prev.body)['totalAmountMinor']);
+    const done = await w.req('POST', `${base}/orders/${order.id}/complete-sale`, w.ownerToken,
+      { paymentIntent: 'PAY_NOW', tenders: [{ method: 'CASH', amountMinor: total }] },
+      { 'if-match': String(order.version), 'idempotency-key': key('sale') });
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    const inv = obj(obj(done.body)['invoice']);
+    const lineIds = (await rows<{ id: string }>(`SELECT id FROM order_line WHERE "orderId" = $1`, [order.id])).map((r) => r.id);
+    return { branch, invoiceId: str(inv['id']), total: BigInt(total), tax: BigInt(str(inv['taxTotalAmountMinor'])), lineIds, qty };
+  }
+  async function reverse(s: Awaited<ReturnType<typeof sell>>) {
+    const base = `/companies/${co.companyId}/branches/${s.branch}`;
+    const r = await w.req('POST', `${base}/invoices/${s.invoiceId}/anonymous-credit-notes`, manager,
+      { reasonCode: 'CUSTOMER_REQUEST', lines: s.lineIds.map((id) => ({ orderLineId: id, quantity: String(s.qty) })),
+        refunds: [{ method: 'CASH', amountMinor: s.total.toString() }] },
+      { 'idempotency-key': key('cn') });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const note = obj(r.body);
+    const refundId = str((note['refunds'] as Json[])[0]!['id']);
+    const ex = await w.req('POST', `${base}/anonymous-credit-notes/${str(note['id'])}/refunds/${refundId}/execute`, manager, {}, { 'idempotency-key': key('ex') });
+    expect(ex.status, JSON.stringify(ex.body)).toBe(200);
+    return note;
+  }
+  const get = (p: string) => w.req('GET', `/companies/${co.companyId}${p}`, w.ownerToken);
+  const q = (): string => `from=${D}&to=${D}`;
+
+  beforeAll(async () => {
+    stack = await startTestStack({ services: ['postgres', 'redis'] });
+    migrateTestDb(stack.postgres.url);
+    admin = new pg.Pool({ connectionString: stack.postgres.url, max: 4 });
+    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 3);
+    co = w.a;
+    [b0, b1] = [co.branches[0]!, co.branches[1]!];
+    await admin.query(`
+      INSERT INTO tax_category (key,"nameEn","nameAr") VALUES ('STANDARD','Standard','x') ON CONFLICT (key) DO NOTHING;
+      INSERT INTO tax_rate ("countryCode","taxCategoryKey","rateBps","effectiveFrom") VALUES ('AE','STANDARD',500,'2020-01-01');`);
+    const prod = await w.req('GET', `/catalog/products/${w.productId}`, w.ownerToken);
+    await w.req('PUT', `/catalog/products/${w.productId}/tax-category`, w.ownerToken, { taxCategoryKey: 'STANDARD' },
+      { 'if-match': `"${str(obj(prod.body)['version'])}"` });
+    const cur = await w.req('GET', `/catalog/companies/${co.companyId}/variants/${w.variantId}/prices`, w.ownerToken);
+    await w.req('PUT', `/catalog/companies/${co.companyId}/variants/${w.variantId}/prices`, w.ownerToken,
+      { prices: [{ uomCode: 'piece', sell: { amountMinor: UNIT.toString(), currency: 'AED', exponent: 2 } }] },
+      { 'if-match': `"${str(obj(cur.body)['version'])}"` });
+    manager = await mintTenantToken(w.h, co.tenantId, rolePerms('manager'), { stepUp: true });
+  }, 600_000);
+  afterAll(async () => {
+    process.stdout.write(`### R11 ${AMENDED ? 'AMENDED' : 'BASELINE'} ${JSON.stringify(out)}\n`);
+    await w?.h.app.close();
+    await w?.pool?.end();
+    await admin?.end();
+    await stack?.stop();
+  });
+
+  it('a FULLY REVERSED anonymous sale, one branch: the report vs the general ledger', async () => {
+    const s = await sell(b0, 2);
+    D = str((await rows(`SELECT to_char("postingDate",'YYYY-MM-DD') AS d FROM journal_entry WHERE "sourceId" = $1`, [s.invoiceId]))[0]!['d']);
+    await reverse(s);
+    const [tb, sales] = [await get(`/reports/trial-balance?${q()}`), await get(`/reports/sales?${q()}`)];
+    expect(sales.status, JSON.stringify(sales.body)).toBe(200);
+    const body = obj(sales.body);
+    const acc = (k: string): bigint => {
+      const a = (obj(tb.body)['accounts'] as Json[]).find((x) => x['accountKey'] === k);
+      return a ? BigInt(str(a['closingDebitMinor'])) - BigInt(str(a['closingCreditMinor'])) : 0n;
+    };
+    const glRevenue = -acc('REVENUE.SALES');
+    const glTax = -acc('LIABILITY.TAX_PAYABLE');
+    const frozenNet = BigInt(str(obj(body['netSalesAfterCreditNotes'])['netSalesAfterCreditNotesExTaxMinor']));
+    const frozenTax = BigInt(str(obj(body['netSalesAfterCreditNotes'])['netSalesAfterCreditNotesTaxMinor']));
+    out['fullyReversed'] = {
+      status: sales.status,
+      reconciled: obj(body['reconciliation'])['reconciled'],
+      invoiceNetExTax: str(obj(body['invoices'])['salesNetExTaxMinor']),
+      netSalesAfterCreditNotesExTax: frozenNet.toString(),
+      glRevenueSales: glRevenue.toString(),
+      anonymousCreditNotes: body['anonymousCreditNotes'] ?? null,
+      netSalesAfterAllCredits: body['netSalesAfterAllCredits'] ?? null,
+    };
+    expect(obj(body['reconciliation'])['reconciled']).toBe(true);
+    if (!AMENDED) {
+      // THE DEFECT: reconciled, yet the fully reversed sale is still counted as net sales and the ledger says 0
+      expect(glRevenue).toBe(0n);
+      expect(frozenNet).toBe(s.total - s.tax);
+      expect(frozenNet).not.toBe(glRevenue);
+      expect(frozenTax).toBe(s.tax);
+      expect(body['anonymousCreditNotes']).toBeUndefined();
+    } else {
+      const adj = obj(body['anonymousCreditNotes']);
+      expect(adj['anonymousCreditNoteCount']).toBe(1);
+      // separation: the customer-linked credit-note block stays empty — an anonymous credit is never counted in it
+      expect(obj(body['creditNotes'])['creditNoteCount']).toBe(0);
+      expect(obj(body['creditNotes'])['creditNoteTotalMinor']).toBe('0');
+      expect(BigInt(str(adj['anonymousCreditNoteTotalMinor']))).toBe(s.total);
+      expect(BigInt(str(adj['anonymousCreditNoteTaxMinor']))).toBe(s.tax);
+      expect(BigInt(str(adj['anonymousCreditNoteNetExTaxMinor']))).toBe(s.total - s.tax);
+      const all = obj(body['netSalesAfterAllCredits']);
+      expect(BigInt(str(all['netSalesAfterAllCreditsExTaxMinor']))).toBe(glRevenue); // equals the LEDGER (0 for a fully reversed sale)
+      expect(BigInt(str(all['netSalesAfterAllCreditsExTaxMinor']))).toBe(0n);
+      expect(BigInt(str(all['netSalesAfterAllCreditsTaxMinor']))).toBe(glTax);
+      const rec = obj(obj(body['reconciliation'])['anonymousCreditNotes']);
+      expect(obj(rec['revenueReversal'])['reconciled']).toBe(true);
+      expect(obj(rec['outputTaxReversal'])['reconciled']).toBe(true);
+      // the legacy fields keep their historical meaning and values (customer-linked credit notes only)
+      expect(frozenNet).toBe(s.total - s.tax);
+    }
+  });
+
+  it('LEDGER TAMPERING in branch 1: an amount that disagrees with its credit note, and a phantom credit journal — the baseline stays silent, the amended report FAILS CLOSED', async () => {
+    const s = await sell(b1, 1);
+    const note = await reverse(s);
+    const noteId = str(note['id']);
+    const codeOf = (r: { status: number; body: unknown }): string => `${r.status}:${str(obj(obj(r.body)['error'] ?? {})['code'] ?? 'OK')}`;
+    const company0 = await get(`/reports/sales?${q()}`);
+    // the branch routes live under /companies/:companyId/branches/:branchId/reports/sales
+    const branchReport = (b: string) => w.req('GET', `/companies/${co.companyId}/branches/${b}/reports/sales?${q()}`, w.ownerToken);
+    expect(company0.status).toBe(200);
+
+    // (A) the note's stored tax is changed by one unit with triggers disabled (a superuser bypass): the document and its journal now disagree
+    const c = await admin.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL session_replication_role = replica`);
+      await c.query(`UPDATE anonymous_credit_note SET "taxTotalAmountMinor" = "taxTotalAmountMinor" + 1 WHERE id = $1`, [noteId]);
+      await c.query('COMMIT');
+    } finally {
+      c.release();
+    }
+    const afterA = { company: codeOf(await get(`/reports/sales?${q()}`)), b1: codeOf(await branchReport(b1)), b0: codeOf(await branchReport(b0)) };
+
+    // (B) a phantom anonymous credit journal (balanced, sealed, no document behind it) on branch 1
+    const je = randomUUID();
+    const pc = await admin.connect();
+    try {
+      await pc.query('BEGIN');
+      await pc.query(
+        `INSERT INTO journal_entry (id,"tenantId","companyId","accountingPeriodId","postingDate","sourceKind","sourceId","currencyCode","postingFingerprint")
+         VALUES ($1,$2,$3,(SELECT id FROM accounting_period WHERE "companyId" = $3 AND status = 'OPEN' ORDER BY "startDate" DESC LIMIT 1),$4::date,'anonymous_credit_note',$5,'AED',$6)`,
+        [je, co.tenantId, co.companyId, D, randomUUID(), `fp-${je}`]);
+      for (const [k, dr, cr] of [['REVENUE.SALES', 777, 0], ['ASSET.PAYMENT_CLEARING', 0, 777]] as const) {
+        await pc.query(
+          `INSERT INTO journal_line (id,"tenantId","companyId","journalEntryId","accountId","branchId","debitMinor","creditMinor")
+           VALUES (uuidv7(),$1,$2,$3,(SELECT id FROM account WHERE "companyId" = $2 AND key = $4),$5,$6,$7)`,
+          [co.tenantId, co.companyId, je, k, b1, dr, cr]);
+      }
+      await pc.query(`UPDATE journal_entry SET "sealedAt" = now() WHERE id = $1`, [je]);
+      await pc.query('COMMIT');
+    } finally {
+      pc.release();
+    }
+    const afterB = { company: codeOf(await get(`/reports/sales?${q()}`)), b1: codeOf(await branchReport(b1)), b0: codeOf(await branchReport(b0)) };
+    out['tampering'] = { afterA_documentDisagreesWithJournal: afterA, afterB_phantomJournal: afterB };
+
+    if (!AMENDED) {
+      // baseline: BOTH tamperings are invisible — every report still says 200 / reconciled
+      expect(afterA).toEqual({ company: '200:OK', b1: '200:OK', b0: '200:OK' });
+      expect(afterB).toEqual({ company: '200:OK', b1: '200:OK', b0: '200:OK' });
+    } else {
+      expect(afterA.company).toBe('500:REPORT_SALES_GL_MISMATCH');
+      expect(afterA.b1).toBe('500:REPORT_SALES_GL_MISMATCH');
+      expect(afterA.b0).toBe('200:OK'); // an unaffected branch is not contaminated
+      expect(afterB.company).toBe('500:REPORT_SALES_SOURCE_INTEGRITY'); // the phantom journal is an orphan (no document), still failing closed
+      expect(afterB.b0).toBe('200:OK');
+    }
+  });
+});

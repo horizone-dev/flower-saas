@@ -1,0 +1,537 @@
+diff --git a/apps/api/src/modules/reporting/sales-financial-report.sql.ts b/apps/api/src/modules/reporting/sales-financial-report.sql.ts
+index fb41e04..6466f22 100644
+--- a/apps/api/src/modules/reporting/sales-financial-report.sql.ts
++++ b/apps/api/src/modules/reporting/sales-financial-report.sql.ts
+@@ -1,3 +1,4 @@
++import { ANONYMOUS_CREDIT_NOTE_SOURCE_KIND } from '../anonymous-credit-notes/anonymous-credit-note-plan.js';
+ import { WALK_IN_SALE_SOURCE_KIND } from '../sales/walk-in-sale-journal.js';
+ import type { InvoiceLineSetFacts } from './sales-invoice-line-set-proof.js';
+ import { SALES_REPORT_MAX_DOCUMENTS } from './sales-report-range.js';
+@@ -63,6 +64,8 @@ export const SALES_SOURCE_KINDS = {
+   invoiceAnonymous: WALK_IN_SALE_SOURCE_KIND,
+   creditNote: 'credit_note',
+   cancellationCharge: 'cancellation_charge',
++  // R-1.1: the fifth kind — IMPORTED from its producer (never retyped), like the walk-in sale kind
++  anonymousCreditNote: ANONYMOUS_CREDIT_NOTE_SOURCE_KIND,
+ } as const;
+ 
+ const INVOICE_KINDS = `'${SALES_SOURCE_KINDS.invoiceCustomer}', '${SALES_SOURCE_KINDS.invoiceAnonymous}'`;
+@@ -109,19 +112,19 @@ sel AS (
+      AND je."sealedAt" IS NOT NULL
+      AND je."postingDate" >= $3::date
+      AND je."postingDate" <= $4::date
+-     AND je."sourceKind" IN ('${SALES_SOURCE_KINDS.invoiceCustomer}', '${SALES_SOURCE_KINDS.invoiceAnonymous}', '${SALES_SOURCE_KINDS.creditNote}', '${SALES_SOURCE_KINDS.cancellationCharge}')
++     AND je."sourceKind" IN ('${SALES_SOURCE_KINDS.invoiceCustomer}', '${SALES_SOURCE_KINDS.invoiceAnonymous}', '${SALES_SOURCE_KINDS.creditNote}', '${SALES_SOURCE_KINDS.cancellationCharge}', '${SALES_SOURCE_KINDS.anonymousCreditNote}')
+ ),
+ cand AS (
+   SELECT s."entryId" AS "entryId", s."sourceKind" AS "sourceKind", s."sourceId" AS "sourceId",
+          s."journalCurrency" AS "journalCurrency", s."docId" AS "docId",
+-         (i."id" IS NOT NULL OR n."id" IS NOT NULL OR x."id" IS NOT NULL) AS "found",
+-         COALESCE(i."branchId", n."branchId", x."branchId") AS "branchId",
+-         COALESCE(i."currencyCode", n."currencyCode", x."currencyCode") AS "docCurrency",
++         (i."id" IS NOT NULL OR n."id" IS NOT NULL OR x."id" IS NOT NULL OR a."id" IS NOT NULL) AS "found",
++         COALESCE(i."branchId", n."branchId", x."branchId", a."branchId") AS "branchId",
++         COALESCE(i."currencyCode", n."currencyCode", x."currencyCode", a."currencyCode") AS "docCurrency",
+          i."subtotalAmountMinor" AS "subtotal",
+          i."documentDiscountAmountMinor" AS "docDiscount",
+-         COALESCE(i."taxTotalAmountMinor", n."taxTotalAmountMinor", x."taxAmountMinor") AS "tax",
+-         COALESCE(i."totalAmountMinor", n."totalAmountMinor", x."totalAmountMinor") AS "total",
+-         COALESCE(i."totalAmountMinor" - i."taxTotalAmountMinor", n."totalAmountMinor" - n."taxTotalAmountMinor", x."netAmountMinor") AS "net",
++         COALESCE(i."taxTotalAmountMinor", n."taxTotalAmountMinor", x."taxAmountMinor", a."taxTotalAmountMinor") AS "tax",
++         COALESCE(i."totalAmountMinor", n."totalAmountMinor", x."totalAmountMinor", a."totalAmountMinor") AS "total",
++         COALESCE(i."totalAmountMinor" - i."taxTotalAmountMinor", n."totalAmountMinor" - n."taxTotalAmountMinor", x."netAmountMinor", a."totalAmountMinor" - a."taxTotalAmountMinor") AS "net",
+          i."invoicePaymentStatus" AS "status",
+          i."orderId" AS "orderId",
+          n."invoiceId" AS "invoiceId"
+@@ -135,7 +138,10 @@ cand AS (
+     LEFT JOIN "cancellation_charge" x
+       ON x."id" = s."docId" AND x."tenantId" = $1::uuid AND x."companyId" = $2::uuid
+      AND s."sourceKind" = '${SALES_SOURCE_KINDS.cancellationCharge}'
+-   WHERE ($5::uuid IS NULL OR COALESCE(i."branchId", n."branchId", x."branchId") = $5::uuid)
++    LEFT JOIN "anonymous_credit_note" a
++      ON a."id" = s."docId" AND a."tenantId" = $1::uuid AND a."companyId" = $2::uuid
++     AND s."sourceKind" = '${SALES_SOURCE_KINDS.anonymousCreditNote}'
++   WHERE ($5::uuid IS NULL OR COALESCE(i."branchId", n."branchId", x."branchId", a."branchId") = $5::uuid)
+    LIMIT ${maxDocuments + 1}
+ ),
+ gate AS (
+@@ -203,7 +209,10 @@ br AS (
+          COUNT(*) FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.cancellationCharge}') AS "cancellationChargeCount",
+          COALESCE(SUM(d."net") FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.cancellationCharge}'), 0) AS "cancellationChargeNet",
+          COALESCE(SUM(d."tax") FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.cancellationCharge}'), 0) AS "cancellationChargeTax",
+-         COALESCE(SUM(d."total") FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.cancellationCharge}'), 0) AS "cancellationChargeTotal"
++         COALESCE(SUM(d."total") FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.cancellationCharge}'), 0) AS "cancellationChargeTotal",
++         COUNT(*) FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.anonymousCreditNote}') AS "anonymousCreditNoteCount",
++         COALESCE(SUM(d."total") FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.anonymousCreditNote}'), 0) AS "anonymousCreditNoteTotal",
++         COALESCE(SUM(d."tax") FILTER (WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.anonymousCreditNote}'), 0) AS "anonymousCreditNoteTax"
+     FROM fdocs d
+    GROUP BY d."branchId"
+ ),
+@@ -277,7 +286,10 @@ SELECT json_build_object(
+       'cancellationChargeCount', br."cancellationChargeCount",
+       'cancellationChargeNetMinor', br."cancellationChargeNet"::text,
+       'cancellationChargeTaxMinor', br."cancellationChargeTax"::text,
+-      'cancellationChargeTotalMinor', br."cancellationChargeTotal"::text
++      'cancellationChargeTotalMinor', br."cancellationChargeTotal"::text,
++      'anonymousCreditNoteCount', br."anonymousCreditNoteCount",
++      'anonymousCreditNoteTotalMinor', br."anonymousCreditNoteTotal"::text,
++      'anonymousCreditNoteTaxMinor', br."anonymousCreditNoteTax"::text
+     ) ORDER BY br."branchId") FROM br), '[]'::json),
+   'statuses', COALESCE((SELECT json_agg(json_build_object(
+       'branchId', st."branchId", 'status', st."status", 'count', st."n", 'invoiceTotalMinor', st."total"::text
+@@ -363,6 +375,9 @@ export interface SalesFinancialReportJson {
+     cancellationChargeNetMinor: string;
+     cancellationChargeTaxMinor: string;
+     cancellationChargeTotalMinor: string;
++    anonymousCreditNoteCount: number;
++    anonymousCreditNoteTotalMinor: string;
++    anonymousCreditNoteTaxMinor: string;
+   }[];
+   readonly statuses: readonly {
+     branchId: string;
+diff --git a/apps/api/src/modules/reporting/sales-financial-report.ts b/apps/api/src/modules/reporting/sales-financial-report.ts
+index 5b9d17b..acf3855 100644
+--- a/apps/api/src/modules/reporting/sales-financial-report.ts
++++ b/apps/api/src/modules/reporting/sales-financial-report.ts
+@@ -71,6 +71,9 @@ export interface SalesBranchAggregate {
+   readonly cancellationChargeNet: bigint;
+   readonly cancellationChargeTax: bigint;
+   readonly cancellationChargeTotal: bigint;
++  readonly anonymousCreditNoteCount: number;
++  readonly anonymousCreditNoteTotal: bigint;
++  readonly anonymousCreditNoteTax: bigint;
+ }
+ export interface SalesStatusAggregate {
+   readonly branchId: string;
+@@ -120,6 +123,19 @@ export interface SalesFinancialBlocks {
+     readonly cancellationChargeTaxMinor: string;
+     readonly cancellationChargeTotalMinor: string;
+   };
++  /** R-1.1 — credits of ANONYMOUS (walk-in) invoiced sales; separate from `creditNotes` (customer-linked), never merged into it */
++  readonly anonymousCreditNotes: {
++    readonly anonymousCreditNoteCount: number;
++    readonly anonymousCreditNoteNetExTaxMinor: string;
++    readonly anonymousCreditNoteTaxMinor: string;
++    readonly anonymousCreditNoteTotalMinor: string;
++  };
++  /** R-1.1 — invoices − credit notes − anonymous credit notes (the legacy `netSalesAfterCreditNotes` keeps its historical meaning) */
++  readonly netSalesAfterAllCredits: {
++    readonly netSalesAfterAllCreditsExTaxMinor: string;
++    readonly netSalesAfterAllCreditsTaxMinor: string;
++    readonly netSalesAfterAllCreditsTotalMinor: string;
++  };
+   readonly currentPaymentStatusBreakdown: {
+     readonly note: string;
+     readonly statuses: readonly {
+@@ -142,6 +158,10 @@ export interface SalesFinancialBlocks {
+       readonly revenue: ReconciliationControl;
+       readonly outputTax: ReconciliationControl;
+     };
++    readonly anonymousCreditNotes: {
++      readonly revenueReversal: ReconciliationControl;
++      readonly outputTaxReversal: ReconciliationControl;
++    };
+   };
+ }
+ 
+@@ -160,6 +180,9 @@ const zeroAggregate = (branchId: string): SalesBranchAggregate => ({
+   cancellationChargeNet: 0n,
+   cancellationChargeTax: 0n,
+   cancellationChargeTotal: 0n,
++  anonymousCreditNoteCount: 0,
++  anonymousCreditNoteTotal: 0n,
++  anonymousCreditNoteTax: 0n,
+ });
+ 
+ /** Add branch aggregates together (the company aggregate is the exact sum of its branches). */
+@@ -183,6 +206,9 @@ export function sumAggregates(
+       cancellationChargeNet: acc.cancellationChargeNet + r.cancellationChargeNet,
+       cancellationChargeTax: acc.cancellationChargeTax + r.cancellationChargeTax,
+       cancellationChargeTotal: acc.cancellationChargeTotal + r.cancellationChargeTotal,
++      anonymousCreditNoteCount: acc.anonymousCreditNoteCount + r.anonymousCreditNoteCount,
++      anonymousCreditNoteTotal: acc.anonymousCreditNoteTotal + r.anonymousCreditNoteTotal,
++      anonymousCreditNoteTax: acc.anonymousCreditNoteTax + r.anonymousCreditNoteTax,
+     }),
+     zeroAggregate(branchId),
+   );
+@@ -240,12 +266,15 @@ export function buildSalesFinancialBlocks(
+     ['cancellationChargeNet', aggregate.cancellationChargeNet],
+     ['cancellationChargeTax', aggregate.cancellationChargeTax],
+     ['cancellationChargeTotal', aggregate.cancellationChargeTotal],
++    ['anonymousCreditNoteTotal', aggregate.anonymousCreditNoteTotal],
++    ['anonymousCreditNoteTax', aggregate.anonymousCreditNoteTax],
+   ] as const) {
+     assertNonNegative(value, label);
+   }
+ 
+   const salesNetExTax = aggregate.invoicedTotal - aggregate.outputTax;
+   const creditNoteNetExTax = aggregate.creditNoteTotal - aggregate.creditNoteTax;
++  const anonymousNetExTax = aggregate.anonymousCreditNoteTotal - aggregate.anonymousCreditNoteTax;
+ 
+   // the CURRENT payment-status breakdown — the full frozen vocabulary, zero-filled, PAID ≠ SETTLED
+   const byStatus = new Map<string, { count: number; total: bigint }>(
+@@ -311,6 +340,16 @@ export function buildSalesFinancialBlocks(
+         glNet(gl, [SALES_SOURCE_KINDS.cancellationCharge], SALES_ACCOUNT_KEYS.outputTax, 'credit'),
+       ),
+     },
++    anonymousCreditNotes: {
++      revenueReversal: control(
++        anonymousNetExTax,
++        glNet(gl, [SALES_SOURCE_KINDS.anonymousCreditNote], SALES_ACCOUNT_KEYS.salesRevenue, 'debit'),
++      ),
++      outputTaxReversal: control(
++        aggregate.anonymousCreditNoteTax,
++        glNet(gl, [SALES_SOURCE_KINDS.anonymousCreditNote], SALES_ACCOUNT_KEYS.outputTax, 'debit'),
++      ),
++    },
+   };
+   const controls = [
+     reconciliation.invoices.salesRevenue,
+@@ -319,6 +358,8 @@ export function buildSalesFinancialBlocks(
+     reconciliation.creditNotes.outputTaxReversal,
+     reconciliation.cancellationCharges.revenue,
+     reconciliation.cancellationCharges.outputTax,
++    reconciliation.anonymousCreditNotes.revenueReversal,
++    reconciliation.anonymousCreditNotes.outputTaxReversal,
+   ];
+   if (controls.some((c) => !c.reconciled)) {
+     throw new DomainError(
+@@ -359,6 +400,23 @@ export function buildSalesFinancialBlocks(
+       cancellationChargeTaxMinor: minorUnitsToWire(aggregate.cancellationChargeTax),
+       cancellationChargeTotalMinor: minorUnitsToWire(aggregate.cancellationChargeTotal),
+     },
++    anonymousCreditNotes: {
++      anonymousCreditNoteCount: aggregate.anonymousCreditNoteCount,
++      anonymousCreditNoteNetExTaxMinor: minorUnitsToWire(anonymousNetExTax),
++      anonymousCreditNoteTaxMinor: minorUnitsToWire(aggregate.anonymousCreditNoteTax),
++      anonymousCreditNoteTotalMinor: minorUnitsToWire(aggregate.anonymousCreditNoteTotal),
++    },
++    netSalesAfterAllCredits: {
++      netSalesAfterAllCreditsExTaxMinor: minorUnitsToWire(
++        salesNetExTax - creditNoteNetExTax - anonymousNetExTax,
++      ),
++      netSalesAfterAllCreditsTaxMinor: minorUnitsToWire(
++        aggregate.outputTax - aggregate.creditNoteTax - aggregate.anonymousCreditNoteTax,
++      ),
++      netSalesAfterAllCreditsTotalMinor: minorUnitsToWire(
++        aggregate.invoicedTotal - aggregate.creditNoteTotal - aggregate.anonymousCreditNoteTotal,
++      ),
++    },
+     currentPaymentStatusBreakdown: { note: PAYMENT_STATUS_NOTE, statuses: statusRows },
+     reconciliation: { reconciled: true, ...reconciliation },
+   };
+diff --git a/apps/api/src/modules/reporting/sales-financial-report.repository.ts b/apps/api/src/modules/reporting/sales-financial-report.repository.ts
+index 9f18304..cb2a93f 100644
+--- a/apps/api/src/modules/reporting/sales-financial-report.repository.ts
++++ b/apps/api/src/modules/reporting/sales-financial-report.repository.ts
+@@ -241,6 +241,15 @@ function parseAggregates(json: SalesFinancialReportJson): SalesBranchAggregate[]
+       b.cancellationChargeTotalMinor,
+       'cancellationChargeTotalMinor',
+     ),
++    anonymousCreditNoteCount: b.anonymousCreditNoteCount,
++    anonymousCreditNoteTotal: parseMinorUnitsText(
++      b.anonymousCreditNoteTotalMinor,
++      'anonymousCreditNoteTotalMinor',
++    ),
++    anonymousCreditNoteTax: parseMinorUnitsText(
++      b.anonymousCreditNoteTaxMinor,
++      'anonymousCreditNoteTaxMinor',
++    ),
+   }));
+ }
+ 
+diff --git a/apps/api/src/modules/reporting/sales-financial-report.test.ts b/apps/api/src/modules/reporting/sales-financial-report.test.ts
+index 1e8b5a2..de9e24c 100644
+--- a/apps/api/src/modules/reporting/sales-financial-report.test.ts
++++ b/apps/api/src/modules/reporting/sales-financial-report.test.ts
+@@ -29,6 +29,9 @@ const agg = (over: Partial<SalesBranchAggregate> = {}): SalesBranchAggregate =>
+   cancellationChargeNet: 0n,
+   cancellationChargeTax: 0n,
+   cancellationChargeTotal: 0n,
++  anonymousCreditNoteCount: 0,
++  anonymousCreditNoteTotal: 0n,
++  anonymousCreditNoteTax: 0n,
+   ...over,
+ });
+ const gl = (
+@@ -326,3 +329,95 @@ describe('sumAggregates — the company aggregate is the exact sum of its branch
+     expect(sumAggregates('COMPANY', [])).toEqual(agg({ branchId: 'COMPANY' }));
+   });
+ });
++
++// ═══════════════════════════ R-1.1 — the fifth source kind: anonymous credit notes ═══════════════════════════
++describe('R-1.1 — anonymous credit notes: shown separately, reconciled to their own journals, never silently absent', () => {
++  const ANON = 'anonymous_credit_note';
++  /** the base scope plus ONE anonymous credit note (total 10 500, tax 500 → net 10 000) and its journal lines */
++  const withAnon = () => {
++    const s = scope();
++    return {
++      aggregate: { ...s.aggregate, anonymousCreditNoteCount: 1, anonymousCreditNoteTotal: 10_500n, anonymousCreditNoteTax: 500n },
++      statuses: s.statuses,
++      ledger: [
++        ...s.ledger,
++        gl(ANON, REV, 10_000n, 0n),
++        gl(ANON, TAX, 500n, 0n),
++        gl(ANON, 'ASSET.PAYMENT_CLEARING', 0n, 10_500n), // the in-flight leg: not part of a Sales control
++      ],
++    };
++  };
++  const build = (x: ReturnType<typeof withAnon>) => buildSalesFinancialBlocks(x.aggregate, x.statuses, x.ledger);
++
++  it('a separate block (count, net ex-tax = total − tax, tax, total) — never merged into the customer-linked credit notes', () => {
++    const b = build(withAnon());
++    expect(b.anonymousCreditNotes).toEqual({
++      anonymousCreditNoteCount: 1,
++      anonymousCreditNoteNetExTaxMinor: '10000',
++      anonymousCreditNoteTaxMinor: '500',
++      anonymousCreditNoteTotalMinor: '10500',
++    });
++    expect(b.creditNotes.creditNoteTotalMinor).toBe('5250'); // unchanged: customer-linked only
++  });
++
++  it('the explicit net after ALL credits = invoices − credit notes − anonymous credit notes; the legacy net keeps its historical meaning', () => {
++    const b = build(withAnon());
++    expect(b.netSalesAfterAllCredits).toEqual({
++      netSalesAfterAllCreditsExTaxMinor: '15000', // 30 000 − 5 000 − 10 000
++      netSalesAfterAllCreditsTaxMinor: '750', // 1 500 − 250 − 500
++      netSalesAfterAllCreditsTotalMinor: '15750', // 31 500 − 5 250 − 10 500
++    });
++    expect(b.netSalesAfterCreditNotes).toEqual({
++      netSalesAfterCreditNotesExTaxMinor: '25000',
++      netSalesAfterCreditNotesTaxMinor: '1250',
++      netSalesAfterCreditNotesTotalMinor: '26250',
++    });
++  });
++
++  it('no anonymous credit note: zeros, and EVERY legacy figure is byte-identical to the report without the amendment', () => {
++    const s = scope();
++    const b = buildSalesFinancialBlocks(s.aggregate, s.statuses, s.ledger);
++    expect(b.anonymousCreditNotes.anonymousCreditNoteTotalMinor).toBe('0');
++    expect(b.netSalesAfterAllCredits.netSalesAfterAllCreditsExTaxMinor).toBe(b.netSalesAfterCreditNotes.netSalesAfterCreditNotesExTaxMinor);
++    expect(b.reconciliation.anonymousCreditNotes.revenueReversal).toEqual({ sourceMinor: '0', glMinor: '0', differenceMinor: '0', reconciled: true });
++    expect(b.invoices.salesNetExTaxMinor).toBe('30000');
++  });
++
++  it('each anonymous control reconciles its OWN kind, account and side — a difference of one minor unit fails the report CLOSED', () => {
++    const mismatch = (f: (x: ReturnType<typeof withAnon>) => ReturnType<typeof withAnon>) =>
++      failure(() => build(f(withAnon()))).code;
++    const lines = (x: ReturnType<typeof withAnon>, key: string, kind: string) => x.ledger.findIndex((l) => l.accountKey === key && l.sourceKind === kind);
++    // the revenue reversal
++    expect(mismatch((x) => { x.ledger[lines(x, REV, ANON)] = gl(ANON, REV, 9_999n, 0n); return x; })).toBe('REPORT_SALES_GL_MISMATCH');
++    // the output-tax reversal
++    expect(mismatch((x) => { x.ledger[lines(x, TAX, ANON)] = gl(ANON, TAX, 499n, 0n); return x; })).toBe('REPORT_SALES_GL_MISMATCH');
++    // the reversal posted on the wrong side
++    expect(mismatch((x) => { x.ledger[lines(x, REV, ANON)] = gl(ANON, REV, 0n, 10_000n); return x; })).toBe('REPORT_SALES_GL_MISMATCH');
++    // the same amounts under ANOTHER kind (credit_note) do not satisfy the anonymous control
++    expect(mismatch((x) => { x.ledger[lines(x, REV, ANON)] = gl('credit_note', REV, 10_000n, 0n); return x; })).toBe('REPORT_SALES_GL_MISMATCH');
++  });
++
++  it('A FULLY REVERSED ANONYMOUS SALE cannot be reconciled WITHOUT its credit adjustment: the sale and its reversal journals are in the ledger; if the source side lacks the credit note the report is refused', () => {
++    // one anonymous sale (10 500, tax 500) and its FULL reversal
++    const sale = agg({ invoiceCount: 1, invoicedSubtotal: 10_000n, outputTax: 500n, invoicedTotal: 10_500n });
++    const statuses = [st('PAID', 1, 10_500n)];
++    const ledger = [
++      gl('walk_in_sale', REV, 0n, 10_000n), gl('walk_in_sale', TAX, 0n, 500n),
++      gl(ANON, REV, 10_000n, 0n), gl(ANON, TAX, 500n, 0n),
++    ];
++    // WITH the adjustment: reconciled, and the net after all credits is exactly zero (= the ledger)
++    const ok = buildSalesFinancialBlocks({ ...sale, anonymousCreditNoteCount: 1, anonymousCreditNoteTotal: 10_500n, anonymousCreditNoteTax: 500n }, statuses, ledger);
++    expect(ok.reconciliation.reconciled).toBe(true);
++    expect(ok.netSalesAfterAllCredits).toEqual({
++      netSalesAfterAllCreditsExTaxMinor: '0', netSalesAfterAllCreditsTaxMinor: '0', netSalesAfterAllCreditsTotalMinor: '0',
++    });
++    // WITHOUT it (the credit note missing from the source side while its journal is in the ledger): no report at all
++    expect(failure(() => buildSalesFinancialBlocks(sale, statuses, ledger)).code).toBe('REPORT_SALES_GL_MISMATCH');
++  });
++
++  it('the company aggregate adds the anonymous fields exactly', () => {
++    const a = agg({ branchId: 'x', anonymousCreditNoteCount: 1, anonymousCreditNoteTotal: 10_500n, anonymousCreditNoteTax: 500n });
++    const b = agg({ branchId: 'y', anonymousCreditNoteCount: 2, anonymousCreditNoteTotal: 2_100n, anonymousCreditNoteTax: 100n });
++    expect(sumAggregates('COMPANY', [a, b])).toMatchObject({ anonymousCreditNoteCount: 3, anonymousCreditNoteTotal: 12_600n, anonymousCreditNoteTax: 600n });
++  });
++});
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts
+index e191ae4..89b5d93 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts
+@@ -220,12 +220,13 @@ describe('B — scope: only the Sales Financial Report; nothing of Checkpoints C
+ describe('B — the EXACT frozen source kinds and account keys (discovered in the producing code, never assumed)', () => {
+   const producer = (path: string): string => read(join(ROOT, path));
+ 
+-  it('the four source kinds are exactly the literals the frozen producers post with', () => {
++  it('the five source kinds are exactly the literals the frozen producers post with (R-1.1 adds the anonymous credit note)', () => {
+     expect(SALES_SOURCE_KINDS).toEqual({
+       invoiceCustomer: 'invoice_ar',
+       invoiceAnonymous: 'walk_in_sale',
+       creditNote: 'credit_note',
+       cancellationCharge: 'cancellation_charge',
++      anonymousCreditNote: 'anonymous_credit_note',
+     });
+     expect(producer('apps/api/src/modules/receivables/customer-invoice-ar.repository.ts')).toMatch(
+       /sourceKind: 'invoice_ar',\s*sourceId: input\.invoiceId/,
+@@ -248,6 +249,15 @@ describe('B — the EXACT frozen source kinds and account keys (discovered in th
+     expect(producer('apps/api/src/modules/orders/cancellation-charge.repository.ts')).toMatch(
+       /sourceKind: 'cancellation_charge',\s*sourceId: charge\.id/,
+     );
++    // R-1.1: the fifth kind is IMPORTED from its producer's exported constant and never repeated as a literal in the report
++    expect(producer('apps/api/src/modules/anonymous-credit-notes/anonymous-credit-note-plan.ts')).toMatch(
++      /ANONYMOUS_CREDIT_NOTE_SOURCE_KIND = 'anonymous_credit_note'/,
++    );
++    expect(sqlModule).toMatch(
++      /import \{ ANONYMOUS_CREDIT_NOTE_SOURCE_KIND \} from '\.\.\/anonymous-credit-notes\/anonymous-credit-note-plan\.js';/,
++    );
++    expect(sqlModule).toMatch(/anonymousCreditNote: ANONYMOUS_CREDIT_NOTE_SOURCE_KIND,/);
++    expect(sqlModule).not.toMatch(/'anonymous_credit_note'/);
+   });
+ 
+   it('the account keys are exactly the frozen chart-of-accounts keys', () => {
+@@ -260,9 +270,9 @@ describe('B — the EXACT frozen source kinds and account keys (discovered in th
+     for (const key of Object.values(SALES_ACCOUNT_KEYS)) expect(coa).toContain(`'${key}'`);
+   });
+ 
+-  it('the report selects ONLY those four kinds — no other kind, no registry, no catch-all', () => {
++  it('the report selects ONLY those five kinds — no other kind, no registry, no catch-all', () => {
+     expect(SQL).toMatch(
+-      /je\."sourceKind" IN \('invoice_ar', 'walk_in_sale', 'credit_note', 'cancellation_charge'\)/,
++      /je\."sourceKind" IN \('invoice_ar', 'walk_in_sale', 'credit_note', 'cancellation_charge', 'anonymous_credit_note'\)/,
+     );
+     expect((SQL.match(/je\."sourceKind"\s+(?:IN|=|<>|!=|NOT|LIKE|~)/g) ?? []).length).toBe(1);
+     const sources = bProd('sales-financial-report.sql.ts');
+@@ -303,6 +313,7 @@ describe('B — the statement: ONE read statement, journal-anchored, sealed, pos
+     const tables = [...SQL.matchAll(/\b(?:FROM|JOIN)\s+"([a-z_]+)"/gi)].map((m) => m[1]);
+     expect([...new Set(tables)].sort()).toEqual([
+       'account',
++      'anonymous_credit_note',
+       'branch',
+       'cancellation_charge',
+       'company',
+@@ -377,7 +388,7 @@ describe('B — the statement: ONE read statement, journal-anchored, sealed, pos
+ 
+   it('the branch predicate is the EXPLICIT document branch ($5) — NULL for the company report', () => {
+     expect(SQL).toMatch(
+-      /\(\$5::uuid IS NULL OR COALESCE\(i\."branchId", n\."branchId", x\."branchId"\) = \$5::uuid\)/,
++      /\(\$5::uuid IS NULL OR COALESCE\(i\."branchId", n\."branchId", x\."branchId", a\."branchId"\) = \$5::uuid\)/,
+     );
+     expect(SQL).toMatch(/b\."id" = \$5::uuid/);
+     expect((SQL.match(/\$5::uuid/g) ?? []).length).toBe(4);
+@@ -593,6 +604,7 @@ describe('B — separation: credit ≠ payment, PAID ≠ SETTLED, refund / advan
+     expect(pure).toMatch(/INVOICE_KINDS/);
+     expect(pure).toMatch(/\[SALES_SOURCE_KINDS\.creditNote\]/);
+     expect(pure).toMatch(/\[SALES_SOURCE_KINDS\.cancellationCharge\]/);
++    expect(pure).toMatch(/\[SALES_SOURCE_KINDS\.anonymousCreditNote\]/);
+     expect(pure).toMatch(/REPORT_SALES_GL_MISMATCH/);
+     // each of the six controls pairs ITS OWN kind set with ITS OWN account and side — a swapped kind set,
+     // account or direction on any one of them would reconcile the wrong GL lines
+@@ -608,6 +620,8 @@ describe('B — separation: credit ≠ payment, PAID ≠ SETTLED, refund / advan
+       '[SALES_SOURCE_KINDS.creditNote] | outputTax | debit',
+       '[SALES_SOURCE_KINDS.cancellationCharge] | cancellationChargeRevenue | credit',
+       '[SALES_SOURCE_KINDS.cancellationCharge] | outputTax | credit',
++      '[SALES_SOURCE_KINDS.anonymousCreditNote] | salesRevenue | debit',
++      '[SALES_SOURCE_KINDS.anonymousCreditNote] | outputTax | debit',
+     ]);
+     // the GL rows come only from the selected (sel → fdocs) journals
+     expect(SQL).toMatch(/FROM fdocs d\s+JOIN "journal_line" jl/);
+@@ -893,23 +907,23 @@ describe('B density — the v1 document limit: 25 000 financial documents per in
+     // the limit is the LAST thing of the stage: the branch predicate is applied BEFORE it (a branch counts only itself)
+     expect(
+       cand.indexOf(
+-        'WHERE ($5::uuid IS NULL OR COALESCE(i."branchId", n."branchId", x."branchId") = $5::uuid)',
++        'WHERE ($5::uuid IS NULL OR COALESCE(i."branchId", n."branchId", x."branchId", a."branchId") = $5::uuid)',
+       ),
+     ).toBeGreaterThan(-1);
+     expect(cand.indexOf('$5::uuid')).toBeLessThan(cand.indexOf('LIMIT 25001'));
+     expect(cte('gate', 'docs')).toMatch(/SELECT COUNT\(\*\) AS "n" FROM cand\n/);
+   });
+ 
+-  it('what is counted: the sealed journals of the four document kinds joined to their documents — never journal lines, never a payment / refund / advance / settlement', () => {
++  it('what is counted: the sealed journals of the five document kinds joined to their documents — never journal lines, never a payment / refund / advance / settlement', () => {
+     const cand = cte('cand', 'gate');
+     expect(cand).toMatch(/FROM sel s/);
+-    for (const t of ['invoice', 'credit_note', 'cancellation_charge']) {
++    for (const t of ['invoice', 'credit_note', 'cancellation_charge', 'anonymous_credit_note']) {
+       expect(cand).toMatch(new RegExp(`LEFT JOIN "${t}"`));
+     }
+     expect(cand).not.toMatch(/journal_line|"payment|refund|advance|settlement|"order"|order_line/i);
+     // the candidate journals are `sel`: exactly the four kinds (pinned elsewhere) — one journal per document
+     expect(cte('sel', 'cand')).toMatch(
+-      /je\."sourceKind" IN \('invoice_ar', 'walk_in_sale', 'credit_note', 'cancellation_charge'\)/,
++      /je\."sourceKind" IN \('invoice_ar', 'walk_in_sale', 'credit_note', 'cancellation_charge', 'anonymous_credit_note'\)/,
+     );
+   });
+ 
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts
+index eaa735c..2f42be1 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts
+@@ -115,11 +115,11 @@ describe('C — Checkpoints A and B are FROZEN: their production files are byte-
+       '40e1b01900e2a6911411a86e5ef570b9848118e566f43af5b4614e4581061c7b',
+     'trial-balance.service.ts': '6fd6cc46c24cdf86b3c07bfdd67923cc15c35f6471accba10274f8473dc2075d',
+     // Checkpoint B (Sales Financial Report, the line-discount authority, the 90-day cap, the density guard)
+-    'sales-financial-report.ts': '724ded058d15b40d93c5382d980b2db6b4837ceb456217a62a57029f422c8422',
++    'sales-financial-report.ts': 'c63604839f1f0bdb198be47f9b236e83513be6c41cf00ad24c099fb43a8b1508',
+     'sales-financial-report.sql.ts':
+-      'de4618891eab1d7c34a48bd873164730226b087f6694221611d99f9cf77e9528',
++      '6caff0cfcfb5efc3117c9576168c56f39053c71024efb80298bcbe5a70232f6f',
+     'sales-financial-report.repository.ts':
+-      'd26efb618d8c1cd16b80abbf6e10bf9c90a197f3a724318fdad852df04c7520e',
++      '90643f8672896f81df5ee5127aea657652bdb1915d902030609a6a03a83f4717',
+     'sales-financial-report.service.ts':
+       '33d2c722b7ff855edb59462edaad8033ac56d1c8fb56475bcb193167f2a89bc5',
+     'sales-invoice-line-set-proof.ts':
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts
+index babbb89..183b419 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts
+@@ -113,11 +113,11 @@ describe('D — Checkpoints A, B and C are FROZEN: their production files are by
+       '40e1b01900e2a6911411a86e5ef570b9848118e566f43af5b4614e4581061c7b',
+     'trial-balance.service.ts': '6fd6cc46c24cdf86b3c07bfdd67923cc15c35f6471accba10274f8473dc2075d',
+     // Checkpoint B (Sales Financial Report)
+-    'sales-financial-report.ts': '724ded058d15b40d93c5382d980b2db6b4837ceb456217a62a57029f422c8422',
++    'sales-financial-report.ts': 'c63604839f1f0bdb198be47f9b236e83513be6c41cf00ad24c099fb43a8b1508',
+     'sales-financial-report.sql.ts':
+-      'de4618891eab1d7c34a48bd873164730226b087f6694221611d99f9cf77e9528',
++      '6caff0cfcfb5efc3117c9576168c56f39053c71024efb80298bcbe5a70232f6f',
+     'sales-financial-report.repository.ts':
+-      'd26efb618d8c1cd16b80abbf6e10bf9c90a197f3a724318fdad852df04c7520e',
++      '90643f8672896f81df5ee5127aea657652bdb1915d902030609a6a03a83f4717',
+     'sales-financial-report.service.ts':
+       '33d2c722b7ff855edb59462edaad8033ac56d1c8fb56475bcb193167f2a89bc5',
+     'sales-invoice-line-set-proof.ts':
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts
+index 680373a..1887436 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts
+@@ -118,11 +118,11 @@ describe('E — Checkpoints A, B, C and D are FROZEN: their production files are
+       '40e1b01900e2a6911411a86e5ef570b9848118e566f43af5b4614e4581061c7b',
+     'trial-balance.service.ts': '6fd6cc46c24cdf86b3c07bfdd67923cc15c35f6471accba10274f8473dc2075d',
+     // Checkpoint B (Sales Financial Report)
+-    'sales-financial-report.ts': '724ded058d15b40d93c5382d980b2db6b4837ceb456217a62a57029f422c8422',
++    'sales-financial-report.ts': 'c63604839f1f0bdb198be47f9b236e83513be6c41cf00ad24c099fb43a8b1508',
+     'sales-financial-report.sql.ts':
+-      'de4618891eab1d7c34a48bd873164730226b087f6694221611d99f9cf77e9528',
++      '6caff0cfcfb5efc3117c9576168c56f39053c71024efb80298bcbe5a70232f6f',
+     'sales-financial-report.repository.ts':
+-      'd26efb618d8c1cd16b80abbf6e10bf9c90a197f3a724318fdad852df04c7520e',
++      '90643f8672896f81df5ee5127aea657652bdb1915d902030609a6a03a83f4717',
+     'sales-financial-report.service.ts':
+       '33d2c722b7ff855edb59462edaad8033ac56d1c8fb56475bcb193167f2a89bc5',
+     'sales-invoice-line-set-proof.ts':
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts
+index 2d7b3a4..dcac59e 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts
+@@ -122,11 +122,11 @@ describe('F — the frozen Checkpoints A–E are byte-identical (25 production h
+     'trial-balance.repository.ts':
+       '40e1b01900e2a6911411a86e5ef570b9848118e566f43af5b4614e4581061c7b',
+     'trial-balance.service.ts': '6fd6cc46c24cdf86b3c07bfdd67923cc15c35f6471accba10274f8473dc2075d',
+-    'sales-financial-report.ts': '724ded058d15b40d93c5382d980b2db6b4837ceb456217a62a57029f422c8422',
++    'sales-financial-report.ts': 'c63604839f1f0bdb198be47f9b236e83513be6c41cf00ad24c099fb43a8b1508',
+     'sales-financial-report.sql.ts':
+-      'de4618891eab1d7c34a48bd873164730226b087f6694221611d99f9cf77e9528',
++      '6caff0cfcfb5efc3117c9576168c56f39053c71024efb80298bcbe5a70232f6f',
+     'sales-financial-report.repository.ts':
+-      'd26efb618d8c1cd16b80abbf6e10bf9c90a197f3a724318fdad852df04c7520e',
++      '90643f8672896f81df5ee5127aea657652bdb1915d902030609a6a03a83f4717',
+     'sales-financial-report.service.ts':
+       '33d2c722b7ff855edb59462edaad8033ac56d1c8fb56475bcb193167f2a89bc5',
+     'sales-invoice-line-set-proof.ts':
