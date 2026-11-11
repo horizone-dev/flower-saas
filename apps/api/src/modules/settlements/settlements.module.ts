@@ -1,3 +1,4 @@
+import { AnonymousCreditNotesModule } from '../anonymous-credit-notes/anonymous-credit-notes.module.js';
 import { Module } from '@nestjs/common';
 import { AccountingModule } from '../accounting/accounting.module.js';
 import { SettlementBatchRepository } from './settlement-batch.repository.js';
@@ -29,7 +30,7 @@ import { HistoricalSettlementReconciliationRepository } from './historical-settl
  * does not boot the full Nest HTTP application).
  */
 @Module({
-  imports: [AccountingModule],
+  imports: [AccountingModule, AnonymousCreditNotesModule],
   controllers: [SettlementBatchController],
   providers: [
     SettlementBatchRepository,

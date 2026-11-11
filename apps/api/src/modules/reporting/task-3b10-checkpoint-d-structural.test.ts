@@ -24,6 +24,10 @@ import {
   RECEIVABLES_REPORT_MAX_RECEIVABLES,
   RECEIVABLES_REPORT_SQL as SQL,
 } from './receivables-report.sql.js';
+import {
+  frozenSchemaShaOfFile,
+  withoutAuthorizedMigrations,
+} from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.10 Checkpoint D — structural pins: the Receivables CURRENT-STATE report.
@@ -200,12 +204,14 @@ describe('D — scope: only the Receivables current-state report; nothing of Adv
 
   it('no migration 50, no schema change, no permission change, no role-template change, no new permission key', () => {
     const migrations = join(ROOT, 'packages/db/prisma/migrations');
-    const dirs = readdirSync(migrations).filter((n) => !n.endsWith('.toml'));
+    const dirs = withoutAuthorizedMigrations(readdirSync(migrations)).filter(
+      (n) => !n.endsWith('.toml'),
+    );
     expect(dirs).toHaveLength(49);
     expect(dirs.sort()[dirs.length - 1]).toBe(
       '20261010120000_phase_3b8_currency_and_release_integrity',
     );
-    expect(sha(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
+    expect(frozenSchemaShaOfFile(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
       '15ef99cee245e0cc64166ab6a5156767b4795a0a7b763435207514945ea37459',
     );
     expect(sha(join(ROOT, 'packages/permissions/src/index.ts'))).toBe(
@@ -319,6 +325,10 @@ describe('D — the exact frozen sources: receivable source types, AR journal ki
       .sort();
     expect(posters).toEqual(
       [
+        // Phase 3B closure (RB-1 A2, owner-approved 2026-11-11) — REVIEWED producer: its journals post only REVENUE.SALES, LIABILITY.TAX_PAYABLE,
+        // ASSET.PAYMENT_CLEARING, ASSET.CASH_ON_HAND and ASSET.BANK. It never touches ASSET.ACCOUNTS_RECEIVABLE, LIABILITY.CUSTOMER_ADVANCES or
+        // LIABILITY.UNAPPLIED_RECEIPTS, so its AR / customer-liability effect is NONE and the controls above are unchanged.
+        'anonymous-credit-notes/anonymous-credit-note.repository.ts',
         'orders/cancellation-charge.repository.ts',
         'orders/credit-note.repository.ts',
         'receivables/customer-advance-application.repository.ts',

@@ -1,3 +1,4 @@
+import { UuidCursorPipe } from '../../common/validation/uuid-pipes.js';
 import {
   Body,
   Controller,
@@ -173,7 +174,7 @@ export class SettlementBatchController {
   async list(
     @Param('companyId') companyId: string,
     @Param('branchId') branchId: string,
-    @Query('cursor') cursor: string | undefined,
+    @Query('cursor', UuidCursorPipe) cursor: string | undefined,
     @Query('limit') limit: string | undefined,
   ) {
     assertUuid(companyId, 'company');

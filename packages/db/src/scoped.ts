@@ -14,10 +14,21 @@ export type ScopedTx = Omit<
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const ROLE_RE = /^[a-z_][a-z0-9_]*$/;
 
-function assertUuid(value: string, label: string): void {
-  if (!UUID_RE.test(value)) {
-    throw new Error(`${label} is not a UUID: ${JSON.stringify(value)}`);
+/**
+ * A tenant / branch scope id that is not a UUID, refused BEFORE any statement runs. A typed error with a stable `code`
+ * (`INVALID_SCOPE_ID`) so a caller (the API's uuid-cast interceptor) can translate it WITHOUT matching message text. The message names
+ * the field only — the rejected value is deliberately NOT included, so it can never reach a log line or an error body.
+ */
+export class InvalidScopeIdError extends Error {
+  readonly code = 'INVALID_SCOPE_ID' as const;
+  constructor(readonly field: 'tenantId' | 'branchId') {
+    super(`runScoped: ${field} is not a UUID`);
+    this.name = 'InvalidScopeIdError';
   }
+}
+
+function assertUuid(value: string, field: 'tenantId' | 'branchId'): void {
+  if (!UUID_RE.test(value)) throw new InvalidScopeIdError(field);
 }
 
 export interface ScopeContext {
@@ -53,8 +64,8 @@ export async function runScoped<T>(
   fn: (tx: ScopedTx) => Promise<T>,
   opts: RunOptions = {},
 ): Promise<T> {
-  assertUuid(ctx.tenantId, 'runScoped: tenantId');
-  if (ctx.branchId != null && ctx.branchId !== '') assertUuid(ctx.branchId, 'runScoped: branchId');
+  assertUuid(ctx.tenantId, 'tenantId');
+  if (ctx.branchId != null && ctx.branchId !== '') assertUuid(ctx.branchId, 'branchId');
 
   const role = opts.role === undefined ? DB_ROLES.app : opts.role;
   if (role != null && !ROLE_RE.test(role))

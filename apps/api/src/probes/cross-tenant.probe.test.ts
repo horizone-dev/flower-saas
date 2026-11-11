@@ -2507,6 +2507,15 @@ describe('cross-tenant isolation probe suite', () => {
       // task 3b.3 Checkpoint C — probed above (tenant B cannot read tenant
       // A's issued Invoice, same branch-nested scope rules).
       '/v1/companies/:companyId/branches/:branchId/invoices',
+      // Phase 3B closure (RB-1 A2) — the anonymous credit-note routes. Tenant B, another company of the same tenant and a
+      // branch-scoped caller of another branch all get a non-disclosing 404 and write nothing, proven against REAL tenant-A rows in
+      // `modules/anonymous-credit-notes/anonymous-credit-note.integration.test.ts` (test "ISOLATION").
+      '/v1/companies/:companyId/branches/:branchId/anonymous-credit-notes',
+      // Phase 3B closure (F-1 / F-2) — the two READ-ONLY anonymous credit-note summary routes: tenant B, a company-restricted caller of the
+      // same tenant and a branch-restricted caller all get a non-disclosing 404 (or 403 for the company aggregate), proven against REAL
+      // tenant-A rows in `anonymous-credit-note-summary.integration.test.ts` (test "SCOPES").
+      '/v1/companies/:companyId/anonymous-credit-note-summary',
+      '/v1/companies/:companyId/branches/:branchId/anonymous-credit-note-summary',
       // task 3b.6 (Checkpoints C-G) — probed above (tenant B, holding the
       // full receivables:* owner permission tier, cannot create a receipt/
       // Advance-conversion/Advance-application/Opening-Balance/customer-

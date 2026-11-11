@@ -1,3 +1,4 @@
+import { UuidCursorPipe } from '../../common/validation/uuid-pipes.js';
 import {
   Body,
   Controller,
@@ -69,7 +70,7 @@ export class CustomerController {
   @ScopedParam({ company: 'companyId' })
   async list(
     @Param('companyId') companyId: string,
-    @Query('cursor') cursor: string | undefined,
+    @Query('cursor', UuidCursorPipe) cursor: string | undefined,
     @Query('displayName') displayName: string | undefined,
     @Query('phone') phone: string | undefined,
     @Query('email') email: string | undefined,
@@ -264,7 +265,7 @@ export class CustomerTenantController {
   @Get()
   @RequirePermission('customers:view')
   @NoStepUp()
-  async list(@Query('cursor') cursor: string | undefined) {
+  async list(@Query('cursor', UuidCursorPipe) cursor: string | undefined) {
     return this.customers.listForTenant(cursor !== undefined ? { cursor } : {});
   }
 

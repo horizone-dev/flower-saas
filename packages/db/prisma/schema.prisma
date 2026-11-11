@@ -4212,3 +4212,90 @@ model ProviderRefundEvent {
   @@index([refundAttemptId])
   @@map("provider_refund_event")
 }
+
+// ═══ PHASE 3B RB-1 A2 — BEGIN (owner-approved additive block; the frozen-schema pins strip exactly this block) ═══
+// Anonymous issued-sale credit note + per-tender refund. Scalar-only models: NO relation field is declared, so no existing (frozen)
+// model block is edited; the foreign keys, CHECKs, triggers, RLS and least-privilege grants live in the migration SQL
+// `20261105120000_phase_3b_rb1_anonymous_credit_note` (the same hand-added-FK convention as `credit_note_invoice_tenant_company_branch_fkey`).
+
+/// Immutable document for an ANONYMOUS invoice (order.customerId IS NULL); numbered from the SAME company `CREDIT_NOTE` counter as
+/// `credit_note`. Never updated or deleted (trigger).
+model AnonymousCreditNote {
+  id                  String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId            String   @db.Uuid
+  companyId           String   @db.Uuid
+  branchId            String   @db.Uuid
+  invoiceId           String   @db.Uuid
+  creditNoteNumber    String
+  issuedAt            DateTime @db.Timestamptz(6)
+  accountingDate      DateTime @db.Date
+  currencyCode        String
+  currencyExponent    Int      @db.SmallInt
+  reasonCode          String
+  note                String?  @db.VarChar(255)
+  subtotalAmountMinor BigInt
+  taxTotalAmountMinor BigInt
+  totalAmountMinor    BigInt
+  createdByUserId     String?  @db.Uuid
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, companyId, id])
+  @@unique([tenantId, companyId, branchId, id])
+  @@unique([tenantId, companyId, creditNoteNumber], map: "anonymous_credit_note_tenantId_companyId_number_key")
+  @@index([tenantId, companyId, invoiceId])
+  @@map("anonymous_credit_note")
+}
+
+/// Frozen per-line reversal snapshot (same components as `credit_note_line`). Never updated or deleted (trigger).
+model AnonymousCreditNoteLine {
+  id                                    String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId                              String   @db.Uuid
+  companyId                             String   @db.Uuid
+  creditNoteId                          String   @db.Uuid
+  orderLineId                           String   @db.Uuid
+  quantityCredited                      Decimal  @db.Decimal(18, 4)
+  grossCreditedMinor                    BigInt
+  discountCreditedMinor                 BigInt
+  documentDiscountShareCreditedMinor    BigInt
+  netAfterDocumentDiscountCreditedMinor BigInt
+  taxCreditedMinor                      BigInt
+  lineTotalCreditedMinor                BigInt
+  currencyCode                          String
+  currencyExponent                      Int      @db.SmallInt
+  createdAt                             DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@index([creditNoteId])
+  @@index([orderLineId])
+  @@map("anonymous_credit_note_line")
+}
+
+/// The refund INTENT per tender (PENDING) and its attested outcome (EXECUTED | FAILED). Only the outcome columns may ever change
+/// (trigger); a refund is never reported executed before a user attests its tender execution.
+model AnonymousCreditNoteRefund {
+  id                String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId          String    @db.Uuid
+  companyId         String    @db.Uuid
+  branchId          String    @db.Uuid
+  creditNoteId      String    @db.Uuid
+  invoiceId         String    @db.Uuid
+  method            String
+  amountMinor       BigInt
+  currencyCode      String
+  currencyExponent  Int       @db.SmallInt
+  status            String    @default("PENDING")
+  reference         String?   @db.VarChar(60)
+  requestedByUserId String?   @db.Uuid
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6)
+  resolvedAt        DateTime? @db.Timestamptz(6)
+  resolvedByUserId  String?   @db.Uuid
+  failureReasonCode String?
+  updatedAt         DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@index([creditNoteId])
+  @@index([invoiceId, method])
+  @@map("anonymous_credit_note_refund")
+}
+// ═══ PHASE 3B RB-1 A2 — END ═══

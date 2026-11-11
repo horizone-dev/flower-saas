@@ -10584,8 +10584,29 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
         const actual = table.filter((r) => modules.has(r.slice(0, r.indexOf(':'))));
         expect(actual).toEqual(expected);
 
+        // PHASE 3B CLOSURE AMENDMENT (owner-approved RB-1 option A2, 2026-11-11): the ONLY routes outside the frozen 3b.8 set that may
+        // carry a credit-note / refund path or a credit_notes / refunds permission are the five reviewed anonymous-credit-note routes and
+        // the two reviewed READ-ONLY summary routes (F-1 / F-2), pinned here as a CLOSED set. Every other route must still satisfy the
+        // frozen "nothing else" rules below, unchanged.
+        const ANON = 'AnonymousCreditNoteController: ';
+        const SUMMARY = 'AnonymousCreditNoteSummaryController: ';
+        const AN = `${BR}/anonymous-credit-notes/:creditNoteId`;
+        const expectedAnonymous = [
+          `${ANON}GET ${AN} => credit_notes:view | no-step-up | ${S}`,
+          `${ANON}POST ${BR}/invoices/:invoiceId/anonymous-credit-notes => credit_notes:issue | STEP-UP | ${S}`,
+          `${ANON}POST ${AN}/refunds => credit_notes:issue | STEP-UP | ${S}`,
+          `${ANON}POST ${AN}/refunds/:refundId/execute => refunds:execute | STEP-UP | ${S}`,
+          `${ANON}POST ${AN}/refunds/:refundId/fail => refunds:execute | STEP-UP | ${S}`,
+          `${SUMMARY}GET /v1/companies/:companyId/anonymous-credit-note-summary => credit_notes:view | no-step-up | scope(companyId,-)`,
+          `${SUMMARY}GET ${BR}/anonymous-credit-note-summary => credit_notes:view | no-step-up | ${S}`,
+        ].sort();
+        const isReviewedAnonymous = (r: string): boolean =>
+          r.startsWith(ANON) || r.startsWith(SUMMARY);
+        expect(table.filter(isReviewedAnonymous)).toEqual(expectedAnonymous);
+        const tableOutsideAnonymous = table.filter((r) => !isReviewedAnonymous(r));
+
         // nothing else — anywhere in the application — carries a 3b.8 document permission or path
-        const everyRoute = table.join('\n');
+        const everyRoute = tableOutsideAnonymous.join('\n');
         for (const forbidden of [
           /credit_notes:/, // issued INSIDE the cancellation, never a route's own permission
           /cancellation_charges:/,
@@ -10596,7 +10617,7 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
           expect(everyRoute, String(forbidden)).not.toMatch(forbidden);
         }
         // exactly ONE route mentions "refund" at all (the POST above) and none is a read
-        const refundRoutes = table.filter((r) => /refund/i.test(r));
+        const refundRoutes = tableOutsideAnonymous.filter((r) => /refund/i.test(r));
         expect(refundRoutes).toEqual([
           `RefundController: POST ${CU}/advances/:advanceId/refunds => refunds:execute | STEP-UP | ${S}`,
         ]);

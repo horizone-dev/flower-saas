@@ -1,3 +1,4 @@
+import { UuidCursorPipe } from '../../common/validation/uuid-pipes.js';
 import {
   Body,
   Controller,
@@ -115,7 +116,7 @@ export class OrderController {
   async list(
     @Param('companyId') companyId: string,
     @Param('branchId') branchId: string,
-    @Query('cursor') cursor: string | undefined,
+    @Query('cursor', UuidCursorPipe) cursor: string | undefined,
     @Query('status') status: string | undefined,
     @Query('customerId') customerId: string | undefined,
   ) {

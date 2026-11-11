@@ -20,6 +20,10 @@ import {
   TENDER_TOTALS_REPORT_SQL as SQL,
 } from './tender-totals-report.sql.js';
 import { TENDER_NET_NOTE, buildTenderTotalsBlocks } from './tender-totals-report.js';
+import {
+  frozenSchemaShaOfFile,
+  withoutAuthorizedMigrations,
+} from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.10 Checkpoint C — structural pins: Tender Totals.
@@ -208,12 +212,12 @@ describe('C — scope: only Tender Totals; nothing of Receivables, Advances or T
 
   it('no migration 50, no schema change, no permission change, no role-template change, no new permission key', () => {
     const migrations = join(ROOT, 'packages/db/prisma/migrations');
-    const all = readdirSync(migrations)
+    const all = withoutAuthorizedMigrations(readdirSync(migrations))
       .filter((n) => !n.endsWith('.toml'))
       .sort();
     expect(all).toHaveLength(49);
     expect(all[all.length - 1]).toBe('20261010120000_phase_3b8_currency_and_release_integrity');
-    expect(sha(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
+    expect(frozenSchemaShaOfFile(join(ROOT, 'packages/db/prisma/schema.prisma'))).toBe(
       '15ef99cee245e0cc64166ab6a5156767b4795a0a7b763435207514945ea37459',
     );
     expect(sha(join(ROOT, 'packages/permissions/src/index.ts'))).toBe(

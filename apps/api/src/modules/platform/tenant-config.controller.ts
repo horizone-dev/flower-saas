@@ -1,3 +1,4 @@
+import { parseInput } from '../../common/validation/zod-input.js';
 import { Body, Controller, Get, Param, Put } from '@nestjs/common';
 import { z } from 'zod';
 import { ENTITLEMENT_MODULES, LIMIT_KEYS, limitKeySchema } from '@flower/shared-types';
@@ -52,7 +53,7 @@ export class TenantConfigController {
     @Body(new ZodBody(overrideLimitSchema)) dto: z.infer<typeof overrideLimitSchema>,
     @Ctx() ctx: RequestContext,
   ) {
-    const key = limitKeySchema.parse(limitKey);
+    const key = parseInput(limitKeySchema, limitKey, 'parameter');
     void LIMIT_KEYS;
     await this.config.overrideLimit(
       tenantId,

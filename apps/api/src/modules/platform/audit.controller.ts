@@ -1,3 +1,4 @@
+import { parseInput } from '../../common/validation/zod-input.js';
 import { Controller, Get, Query } from '@nestjs/common';
 import { z } from 'zod';
 import { PlatformRealm } from '../../common/auth/pipeline.decorators.js';
@@ -29,7 +30,7 @@ export class AuditController {
   @Get()
   @RequirePermission('platform:audit:view')
   query(@Query() raw: Record<string, string>) {
-    const q = querySchema.parse(raw);
+    const q = parseInput(querySchema, raw, 'query');
     return this.audit.query({
       tenantId: q.tenantId,
       actorId: q.actorId,
@@ -44,7 +45,7 @@ export class AuditController {
   @Get('security-events')
   @RequirePermission('platform:audit:view')
   securityEvents(@Query() raw: Record<string, string>) {
-    const q = securityQuerySchema.parse(raw);
+    const q = parseInput(securityQuerySchema, raw, 'query');
     return this.audit.securityEvents({ tenantId: q.tenantId, limit: q.limit });
   }
 }

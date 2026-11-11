@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { withoutAuthorizedMigrations } from '../../verification/phase3b-authorized-additions.js';
 
 /**
  * Task 3b.9 Checkpoint C — structural pins.
@@ -344,7 +345,7 @@ describe('C — the TaxFinalizationService split is behaviour-preserving and add
 
 describe('C — no migration 50, no Task 3b.10, RB-1 still open', () => {
   const migrationsDir = join(ROOT, 'packages/db/prisma/migrations');
-  const migrations = readdirSync(migrationsDir)
+  const migrations = withoutAuthorizedMigrations(readdirSync(migrationsDir))
     .filter((n) => /^\d{14}_/.test(n))
     .sort();
 
