@@ -12,6 +12,7 @@ export {
   runScoped,
   runPlatform,
   runDispatcher,
+  InvalidScopeIdError,
   currentTenantGuc,
   type ScopedTx,
   type ScopeContext,
