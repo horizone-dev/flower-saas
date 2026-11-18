@@ -48,6 +48,34 @@ export type {
  * transport (auth header, Idempotency-Key, error envelope).
  */
 
+import type {
+  ConfigureCustomerCreditInput,
+  CustomerCreditAccount,
+  ReceivablesReport,
+  OrderTotalsPreview,
+  OrgBranchRow,
+  OrgCompanyRow,
+  PosCompleteSaleInput,
+  PosCompleteSaleResponse,
+  PosCreateOrderInput,
+  PosCustomerAccountSummary,
+  PosCustomerAdvancePage,
+  PosCustomerReceiptInput,
+  PosCustomerReceiptResult,
+  PosCustomerReceivablePage,
+  PosCustomerStatementPage,
+  PosCustomerUnappliedReceiptPage,
+  PosCustomerPage,
+  PosCustomerRow,
+  PosInvoiceRow,
+  PosOrderPage,
+  PosOrderWithLines,
+  PosUpdateOrderInput,
+  ReceiptIdentity,
+  SalesReport,
+} from './pos-types.js';
+export type * from './pos-types.js';
+
 export interface ApiClientOptions {
   baseUrl: string;
   /** injected so the client never reaches for a global fetch implicitly */
@@ -682,7 +710,11 @@ export class ApiClient {
 
   constructor(opts: ApiClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
-    const f = opts.fetch ?? globalThis.fetch;
+    // a browser `fetch` must be CALLED on `window`/`globalThis`: stored unbound and invoked as a method of this client it throws
+    // "Illegal invocation" — so the default is bound (a caller-supplied implementation is used exactly as given)
+    const f =
+      opts.fetch ??
+      (typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : undefined);
     if (!f) throw new Error('No fetch implementation available; pass one via options');
     this.doFetch = f;
     this.getAccessToken = opts.getAccessToken ?? (() => null);
@@ -764,12 +796,27 @@ export class ApiClient {
   platformLogin(input: { email: string; password: string; code?: string }): Promise<LoginResponse> {
     return this.send('POST', '/v1/platform/auth/login', input);
   }
+  /** confirm the current session with a fresh authenticator code (step-up MFA); the session then carries step-up for its window */
+  stepUp(code: string): Promise<unknown> {
+    return this.send('POST', '/v1/auth/step-up', { code });
+  }
   tenantLogin(input: {
     workspaceSlug: string;
     email: string;
     password: string;
   }): Promise<LoginResponse> {
     return this.send('POST', '/v1/auth/login', input);
+  }
+  /**
+   * Start authenticator (TOTP) enrolment for the signed-in tenant user: the server stores a PENDING factor and returns its secret ONCE with the
+   * `otpauth://` URI. The factor only counts after `confirmMfa` succeeds. The caller must show the secret and never persist or log it.
+   */
+  enrolMfa(): Promise<{ secret: string; uri: string }> {
+    return this.send('POST', '/v1/auth/mfa/enrol', {});
+  }
+  /** confirm the pending factor with a CURRENT code from the authenticator app (`401 MFA_FAILED` when the code is wrong) */
+  confirmMfa(code: string): Promise<unknown> {
+    return this.send('POST', '/v1/auth/mfa/confirm', { code });
   }
   verifyMfa(input: { mfaChallenge: string; code: string }): Promise<LoginResponse> {
     return this.send('POST', '/v1/auth/mfa/verify', input);
@@ -1472,6 +1519,233 @@ export class ApiClient {
     if (query?.cursor !== undefined) q['cursor'] = query.cursor;
     if (query?.limit !== undefined) q['limit'] = query.limit;
     return this.get(`/v1/catalog/branches/${branchId}/catalog`, q);
+  }
+
+  // ── POS selling (Phase 3 backend contracts; read / write through the SAME guarded routes the till uses) ─────────────────
+  // Every write that moves money or state carries an `Idempotency-Key` supplied by the CALLER (so a retry after a network failure replays the
+  // same operation instead of selling twice). Company and branch are SCOPED PATH parameters, verified against the session by the API.
+
+  listOrgCompanies(): Promise<OrgCompanyRow[]> {
+    return this.get('/v1/org/companies');
+  }
+  listOrgBranches(): Promise<OrgBranchRow[]> {
+    return this.get('/v1/org/branches');
+  }
+
+  listCustomers(
+    companyId: string,
+    query?: { displayName?: string; phone?: string; email?: string; cursor?: string },
+  ): Promise<PosCustomerPage> {
+    return this.get(`/v1/companies/${companyId}/customers`, query);
+  }
+  createCustomer(
+    companyId: string,
+    input: { displayName: string; phone?: string; email?: string },
+    idempotencyKey: string,
+  ): Promise<PosCustomerRow> {
+    return this.send('POST', `/v1/companies/${companyId}/customers`, input, idempotencyKey);
+  }
+
+  createOrder(
+    companyId: string,
+    branchId: string,
+    input: PosCreateOrderInput,
+    idempotencyKey: string,
+  ): Promise<PosOrderWithLines> {
+    return this.send(
+      'POST',
+      `/v1/companies/${companyId}/branches/${branchId}/orders`,
+      input,
+      idempotencyKey,
+    );
+  }
+  updateOrder(
+    companyId: string,
+    branchId: string,
+    orderId: string,
+    input: PosUpdateOrderInput,
+    expectedVersion: number,
+  ): Promise<PosOrderWithLines> {
+    return this.call(
+      `/v1/companies/${companyId}/branches/${branchId}/orders/${orderId}`,
+      { method: 'PATCH', body: input, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as PosOrderWithLines,
+    );
+  }
+  getOrder(companyId: string, branchId: string, orderId: string): Promise<PosOrderWithLines> {
+    return this.get(`/v1/companies/${companyId}/branches/${branchId}/orders/${orderId}`);
+  }
+  listOrders(
+    companyId: string,
+    branchId: string,
+    query?: { cursor?: string; status?: string; customerId?: string },
+  ): Promise<PosOrderPage> {
+    return this.get(`/v1/companies/${companyId}/branches/${branchId}/orders`, query);
+  }
+  /** the seller identity for the receipt header (legal name, TRN, address) — a cashier can read it (existing `orders:view` + own scope) */
+  getReceiptIdentity(companyId: string, branchId: string): Promise<ReceiptIdentity> {
+    return this.get(`/v1/companies/${companyId}/branches/${branchId}/receipt-identity`);
+  }
+  /** the sales financial report for a civil period (inclusive YYYY-MM-DD); `branchId` selects the one-branch route */
+  getSalesReport(
+    companyId: string,
+    q: { from: string; to: string; branchId?: string },
+  ): Promise<SalesReport> {
+    const qs = `from=${encodeURIComponent(q.from)}&to=${encodeURIComponent(q.to)}`;
+    return this.get(
+      q.branchId
+        ? `/v1/companies/${companyId}/branches/${q.branchId}/reports/sales?${qs}`
+        : `/v1/companies/${companyId}/reports/sales?${qs}`,
+    );
+  }
+  getOrderTotals(
+    companyId: string,
+    branchId: string,
+    orderId: string,
+  ): Promise<OrderTotalsPreview> {
+    return this.get(`/v1/companies/${companyId}/branches/${branchId}/orders/${orderId}/totals`);
+  }
+  /** complete a DRAFT order as a sale: the tenders must add up to the server-computed total (the server refuses anything else) */
+  completeSale(
+    companyId: string,
+    branchId: string,
+    orderId: string,
+    input: PosCompleteSaleInput,
+    expectedVersion: number,
+    idempotencyKey: string,
+  ): Promise<PosCompleteSaleResponse> {
+    return this.call(
+      `/v1/companies/${companyId}/branches/${branchId}/orders/${orderId}/complete-sale`,
+      { method: 'POST', body: input, ifMatch: `"${expectedVersion}"`, idempotencyKey },
+      (raw) => raw as PosCompleteSaleResponse,
+    );
+  }
+  /** the customer's account at this branch: receivable outstanding, advances available, credit limit / exposure (`receivables:view`) */
+  getCustomerAccountSummary(
+    companyId: string,
+    branchId: string,
+    customerId: string,
+  ): Promise<PosCustomerAccountSummary> {
+    return this.get(
+      `/v1/companies/${companyId}/branches/${branchId}/customers/${customerId}/account/summary`,
+    );
+  }
+  /** one customer of the company (`customers:view`) */
+  getCustomer(companyId: string, customerId: string): Promise<PosCustomerRow> {
+    return this.get(`/v1/companies/${companyId}/customers/${customerId}`);
+  }
+  /** the customer's COMPANY-level credit configuration and its version (`customers:view`) — the version is the `If-Match` of the credit PATCH */
+  getCustomerCreditAccount(companyId: string, customerId: string): Promise<CustomerCreditAccount> {
+    return this.get(`/v1/companies/${companyId}/customers/${customerId}/account`);
+  }
+  /**
+   * Switch a customer's credit on or off and/or set the limit (`customers:credit:manage` + a fresh step-up; `If-Match` = the account version, no
+   * Idempotency-Key — the version is the guard). An omitted limit keeps the stored one: the server has no way to clear it. The limit must be a plain
+   * digit string (minor units); anything else is refused here, before a request, because the server's schema is strict.
+   */
+  configureCustomerCredit(
+    companyId: string,
+    customerId: string,
+    input: ConfigureCustomerCreditInput,
+    expectedVersion: number,
+  ): Promise<CustomerCreditAccount> {
+    if (input.creditLimitMinor !== undefined && !/^\d+$/.test(input.creditLimitMinor)) {
+      throw new Error(
+        'configureCustomerCredit: creditLimitMinor must be a digit string of minor units',
+      );
+    }
+    const body: ConfigureCustomerCreditInput =
+      input.creditLimitMinor === undefined
+        ? { creditEnabled: input.creditEnabled }
+        : { creditEnabled: input.creditEnabled, creditLimitMinor: input.creditLimitMinor };
+    return this.call(
+      `/v1/companies/${companyId}/customers/${customerId}/account/credit`,
+      { method: 'PATCH', body, ifMatch: `"${expectedVersion}"` },
+      (raw) => raw as CustomerCreditAccount,
+    );
+  }
+  /** the CURRENT receivables report (`receivables:view`): the company (needs all-branch authority) or, with `branchId`, one branch; optionally one customer, paged by customer */
+  getReceivablesReport(
+    companyId: string,
+    q?: { branchId?: string; customerId?: string; cursor?: string; limit?: number },
+  ): Promise<ReceivablesReport> {
+    const path = q?.branchId
+      ? `/v1/companies/${companyId}/branches/${q.branchId}/reports/receivables`
+      : `/v1/companies/${companyId}/reports/receivables`;
+    return this.get(path, {
+      customerId: q?.customerId,
+      cursor: q?.cursor,
+      limit: q?.limit,
+    });
+  }
+  /** the customer's OPEN receivables at this branch, oldest first as the server orders them (`receivables:view`) */
+  listCustomerReceivables(
+    companyId: string,
+    branchId: string,
+    customerId: string,
+    query?: { cursor?: string; limit?: number },
+  ): Promise<PosCustomerReceivablePage> {
+    return this.get(
+      `/v1/companies/${companyId}/branches/${branchId}/customers/${customerId}/account/receivables`,
+      query,
+    );
+  }
+  /** the customer's account statement at this branch (`receivables:view`); `from` / `to` are YYYY-MM-DD */
+  getCustomerStatement(
+    companyId: string,
+    branchId: string,
+    customerId: string,
+    query?: { from?: string; to?: string; cursor?: string; limit?: number },
+  ): Promise<PosCustomerStatementPage> {
+    return this.get(
+      `/v1/companies/${companyId}/branches/${branchId}/customers/${customerId}/account/statement`,
+      query,
+    );
+  }
+  /** money received from the customer and not yet allocated (`receivables:view`) */
+  listCustomerUnappliedReceipts(
+    companyId: string,
+    branchId: string,
+    customerId: string,
+    query?: { cursor?: string; limit?: number },
+  ): Promise<PosCustomerUnappliedReceiptPage> {
+    return this.get(
+      `/v1/companies/${companyId}/branches/${branchId}/customers/${customerId}/account/unapplied-receipts`,
+      query,
+    );
+  }
+  /**
+   * collect money from a customer against their open receivables (`receivables:collect`; `Idempotency-Key` required). The server allocates it
+   * oldest-first; the body carries only the amount and the tender method (CASH / BANK_TRANSFER / OTHER_MANUAL — never card).
+   */
+  collectCustomerReceipt(
+    companyId: string,
+    branchId: string,
+    customerId: string,
+    input: PosCustomerReceiptInput,
+    idempotencyKey: string,
+  ): Promise<PosCustomerReceiptResult> {
+    return this.send(
+      'POST',
+      `/v1/companies/${companyId}/branches/${branchId}/customers/${customerId}/receipts`,
+      input,
+      idempotencyKey,
+    );
+  }
+  /** the customer's advances at this branch, newest page first (`receivables:view`); applying one is a separate authority (`receivables:advance:apply`) */
+  listCustomerAdvances(
+    companyId: string,
+    branchId: string,
+    customerId: string,
+    query?: { cursor?: string; limit?: number },
+  ): Promise<PosCustomerAdvancePage> {
+    return this.get(
+      `/v1/companies/${companyId}/branches/${branchId}/customers/${customerId}/account/advances`,
+      query,
+    );
+  }
+  getInvoice(companyId: string, branchId: string, invoiceId: string): Promise<PosInvoiceRow> {
+    return this.get(`/v1/companies/${companyId}/branches/${branchId}/invoices/${invoiceId}`);
   }
 
   // ── catalog tax-category assignment + rate resolution (task 3.9) ───────────

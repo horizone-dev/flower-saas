@@ -6,6 +6,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "env": ["NEXT_PUBLIC_API_BASE_URL", "API_PROXY_TARGET"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**", "build/**"]
     },
     "typecheck": {
