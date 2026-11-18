@@ -1,0 +1,62 @@
+name: MVP browser journey
+
+# First committed in PR 8 (never run on GitHub before this PR): the Owner Web -> POS journeys (pilot sale, credit/advance, collect-on-account, Owner Web
+# credit settings) in real Chromium against the real API and PostgreSQL/Redis (Testcontainers), with the database checks of apps/pos-pwa/e2e/run.mjs. Deterministic: fixed ports (3001/3300/3400, pre-flight checked),
+# disposable containers per run, no retries, real clock but period/timezone-safe, teardown in `finally`.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mvp-browser-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TURBO_TELEMETRY_DISABLED: '1'
+  NEXT_TELEMETRY_DISABLED: '1'
+  DO_NOT_TRACK: '1'
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+
+jobs:
+  browser-journey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable corepack (pins pnpm from package.json)
+        run: corepack enable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (api dist + api-client + testing + workspace deps)
+        run: pnpm -w build
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @flower/pos-pwa exec playwright install --with-deps chromium
+
+      - name: Owner Web -> POS journey (+ database verification)
+        run: pnpm --filter @flower/pos-pwa test:e2e
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mvp-playwright-trace
+          path: apps/pos-pwa/test-results/
+          if-no-files-found: ignore

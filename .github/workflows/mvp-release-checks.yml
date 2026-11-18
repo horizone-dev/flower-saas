@@ -1,0 +1,60 @@
+name: MVP release checks
+
+# First committed in PR 8 (never run on GitHub before this PR): the checks that guard the controlled-pilot deployment path. NOTHING here deploys.
+#  - migration-runner: the approved-migration manifest matches git HEAD; the runner image builds from the FROZEN lockfile and passes its
+#    disposable-database verification (refuses unapproved / tampered / drifted migrations, one runner at a time, backup-independent checks).
+#  - staging-config: the staging Compose file and both Caddyfiles are syntactically valid, and the env preflight refuses unsafe files.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mvp-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migration-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Approved-migration manifest matches the migrations committed at HEAD
+        run: node infra/migrate/generate-approved-manifest.mjs --check
+      - name: Build the migration runner image (frozen lockfile)
+        run: docker build -f infra/migrate/Dockerfile -t flower/migrate:ci .
+      - name: Verify the runner against a disposable PostgreSQL
+        run: node infra/migrate/verify.mjs flower/migrate:ci
+
+  staging-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Preflight refuses the placeholder example
+        run: |
+          if node infra/staging/preflight.mjs infra/staging/.env.example; then echo "preflight accepted the placeholder file"; exit 1; fi
+      - name: Compose file is valid with a generated (random) environment
+        run: |
+          node -e "
+          const r=()=>require('crypto').randomBytes(18).toString('hex');
+          const e=['POS_HOST=pos.ci.flower-saas.dev','OWNER_HOST=owner.ci.flower-saas.dev','OPS_HOST=ops.ci.flower-saas.dev','ADMIN_CIDR=203.0.113.0/24','API_IMAGE=flower/api:ci','POS_IMAGE=flower/pos-pwa:ci','OWNER_IMAGE=flower/owner-web:ci','MIGRATE_IMAGE=flower/migrate:ci','MIGRATION_MODE=check','POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
+          require('fs').writeFileSync('infra/staging/.env.ci',e.join('\n')+'\n')"
+          node infra/staging/preflight.mjs infra/staging/.env.ci
+          docker compose -f infra/staging/docker-compose.staging.yml --env-file infra/staging/.env.ci config -q
+      - name: Start order, published ports, healthchecks and workflow references
+        run: node infra/staging/check-release.mjs infra/staging/.env.ci
+      - name: Caddyfiles are valid
+        run: |
+          for f in Caddyfile Caddyfile.local; do
+            docker run --rm -i -e POS_HOST=a.example.test -e OWNER_HOST=b.example.test -e OPS_HOST=c.example.test -e ADMIN_CIDR=203.0.113.0/24 caddy:2 \
+              sh -c 'cat > /tmp/Caddyfile && caddy validate --config /tmp/Caddyfile' < infra/staging/$f
+          done
