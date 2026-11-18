@@ -70,6 +70,8 @@
 
 ## 6. Checkpoint 5 update (2026-11-18) — measured results, not plans
 
+> **Superseded in part, see §8:** every picomatch statement in this section (the exception, the exception PR, "no patched version blocks #45") was overtaken on 2026-11-18 at 15:38 UTC, when the advisory `GHSA-fc5q-39xc-vjpf` was withdrawn. No exception is needed.
+
 Nothing below is approved, applied, merged or deployed. Scanner runs used the pinned tool versions locally against hashes of the real PR heads; the F-7b/F-7c runs used a disposable tree at the #49 tip `ace6f61` plus the #52 files.
 
 ### 6.1 CI baseline (GitHub, latest run on each head)
@@ -184,3 +186,16 @@ Nothing here is approved or applied. Every boundary is one patch that touches **
 The four main-based boundaries do not overlap: all five patches apply together on `origin/main`. F-7b, F-7c and the gate need the #49 stack and apply in that order only.
 
 **Integrated gates on the full sequence (50 files, fresh run 2026-11-18):** `tsc` clean; structural + probes **713/713** (15 files / 691 + 22); config, secrets, identity, access **17 files / 126 tests** (includes the gate G1–G10); catalog, orders (F-6) and tooling **9 files / 359 tests**; ESLint **0 errors** (5 known `no-console` warnings); Prettier clean. The lean POS journey (13 browser + 134 database checks) and the Owner Web journey (8 browser + 14 database checks) last passed on the previous revision of the same sequence; this revision changed only the gate's integration test, so they were not re-run.
+
+## 8. Correction: the picomatch advisory was withdrawn (2026-11-18 15:38 UTC)
+
+Found while reading the CI result of this very PR: the `security` job's osv-scanner step now listed only the two Next advisories. Checked against the live OSV record: `GHSA-fc5q-39xc-vjpf` is **withdrawn** (record modified 15:56 UTC), following an upstream dispute; picomatch itself is **unchanged** (4.0.7, no patched release, the fix PR was closed by the maintainer). Re-measured with osv-scanner v2.5.1 on #45's lockfile with no config: **No issues found, exit 0**.
+
+| Earlier statement (§1 row 0, §6.1–§6.3)                                   | Now                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #45 leaves exactly one osv finding (picomatch)                            | #45 leaves **none**                                                                                                                                                                                                                                                                            |
+| A time-bounded picomatch exception PR needs independent security approval | **Not needed; do not create it.** #46 is a record: owner decision                                                                                                                                                                                                                              |
+| Merge order #51 → #45 → #46 + exception PR → #47 → …                      | **#51 → #45 → #47 → #42 → #43/#52 → #44 → #48 → #49**                                                                                                                                                                                                                                          |
+| gitleaks and Trivy cannot run in CI until the exception is merged         | They run as soon as osv passes, i.e. once #45 is in the branch; **measured:** the re-run of #45's CI (run 44248436741, attempt 2, 2026-11-18) passed the **whole `security` job in 1m16s: osv-scanner, gitleaks, Trivy Dockerfile and Trivy filesystem**, the first time any of them ran in CI |
+
+Risk that remains: advisory databases change. Re-scan on the day of each merge.
