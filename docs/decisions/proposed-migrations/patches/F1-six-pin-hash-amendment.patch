@@ -1,0 +1,84 @@
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-a-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-a-structural.test.ts
+index eab11d7..7f7ddfe 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-a-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-a-structural.test.ts
+@@ -224,7 +224,8 @@ describe('A — OD-1: no new permission, no migration, no schema change', () =>
+       '20f66e4258f62899b67471a4f0e64fe84f8098a2dffe9a4b6575734729ed4c42',
+     );
+     expect(sha(join(SRC, 'modules/platform/system-roles.ts'))).toBe(
+-      '977d2e6bd6e215b70d034ce6b6def9e3ff97eb282555541c271ce278028d14f0',
++      // F-1a (PROPOSED): system-roles.ts with read-only catalog:view added to cashier and sales; see docs/mvp/F1-FROZEN-PIN-AMENDMENT-PROPOSAL.md
++      '18a49b3e9e44e17bfaed57b92fb91b364ba8161c7094af6db162c1709436fe2c',
+     );
+   });
+ 
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts
+index 6af1dd1..219a639 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts
+@@ -197,7 +197,8 @@ describe('B — scope: only the Sales Financial Report; nothing of Checkpoints C
+       '20f66e4258f62899b67471a4f0e64fe84f8098a2dffe9a4b6575734729ed4c42',
+     );
+     expect(sha(join(SRC, 'modules/platform/system-roles.ts'))).toBe(
+-      '977d2e6bd6e215b70d034ce6b6def9e3ff97eb282555541c271ce278028d14f0',
++      // F-1a (PROPOSED): system-roles.ts with read-only catalog:view added to cashier and sales; see docs/mvp/F1-FROZEN-PIN-AMENDMENT-PROPOSAL.md
++      '18a49b3e9e44e17bfaed57b92fb91b364ba8161c7094af6db162c1709436fe2c',
+     );
+     for (const n of B_PRODUCTION) {
+       expect(read(join(DIR, n)), n).not.toMatch(
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts
+index 6b8f9ce..6d22226 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts
+@@ -220,7 +220,8 @@ describe('C — scope: only Tender Totals; nothing of Receivables, Advances or T
+       '20f66e4258f62899b67471a4f0e64fe84f8098a2dffe9a4b6575734729ed4c42',
+     );
+     expect(sha(join(SRC, 'modules/platform/system-roles.ts'))).toBe(
+-      '977d2e6bd6e215b70d034ce6b6def9e3ff97eb282555541c271ce278028d14f0',
++      // F-1a (PROPOSED): system-roles.ts with read-only catalog:view added to cashier and sales; see docs/mvp/F1-FROZEN-PIN-AMENDMENT-PROPOSAL.md
++      '18a49b3e9e44e17bfaed57b92fb91b364ba8161c7094af6db162c1709436fe2c',
+     );
+     for (const n of C_PRODUCTION) {
+       expect(read(join(DIR, n)), n).not.toMatch(
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts
+index 9024a30..d0bc32a 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts
+@@ -212,7 +212,8 @@ describe('D — scope: only the Receivables current-state report; nothing of Adv
+       '20f66e4258f62899b67471a4f0e64fe84f8098a2dffe9a4b6575734729ed4c42',
+     );
+     expect(sha(join(SRC, 'modules/platform/system-roles.ts'))).toBe(
+-      '977d2e6bd6e215b70d034ce6b6def9e3ff97eb282555541c271ce278028d14f0',
++      // F-1a (PROPOSED): system-roles.ts with read-only catalog:view added to cashier and sales; see docs/mvp/F1-FROZEN-PIN-AMENDMENT-PROPOSAL.md
++      '18a49b3e9e44e17bfaed57b92fb91b364ba8161c7094af6db162c1709436fe2c',
+     );
+     for (const n of D_PRODUCTION) {
+       expect(dProd(n), n).not.toMatch(/['"`]\w+:[a-z_]+(?::[a-z_]+)?['"`]\s*[,)\]]/);
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts
+index 3a40f51..24ab9ec 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts
+@@ -226,7 +226,8 @@ describe('E — scope: only the customer-liabilities current-state report; no co
+       '20f66e4258f62899b67471a4f0e64fe84f8098a2dffe9a4b6575734729ed4c42',
+     );
+     expect(sha(join(SRC, 'modules/platform/system-roles.ts'))).toBe(
+-      '977d2e6bd6e215b70d034ce6b6def9e3ff97eb282555541c271ce278028d14f0',
++      // F-1a (PROPOSED): system-roles.ts with read-only catalog:view added to cashier and sales; see docs/mvp/F1-FROZEN-PIN-AMENDMENT-PROPOSAL.md
++      '18a49b3e9e44e17bfaed57b92fb91b364ba8161c7094af6db162c1709436fe2c',
+     );
+     for (const n of E_PRODUCTION) {
+       expect(eProd(n), n).not.toMatch(/['"`]\w+:[a-z_]+(?::[a-z_]+)?['"`]\s*[,;)\]]/);
+diff --git a/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts b/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts
+index 722f9ce..1b4a810 100644
+--- a/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts
++++ b/apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts
+@@ -173,7 +173,8 @@ describe('F — the frozen Checkpoints A–E are byte-identical (25 production h
+       '20f66e4258f62899b67471a4f0e64fe84f8098a2dffe9a4b6575734729ed4c42',
+     );
+     expect(sha(join(SRC, 'modules/platform/system-roles.ts'))).toBe(
+-      '977d2e6bd6e215b70d034ce6b6def9e3ff97eb282555541c271ce278028d14f0',
++      // F-1a (PROPOSED): system-roles.ts with read-only catalog:view added to cashier and sales; see docs/mvp/F1-FROZEN-PIN-AMENDMENT-PROPOSAL.md
++      '18a49b3e9e44e17bfaed57b92fb91b364ba8161c7094af6db162c1709436fe2c',
+     );
+   });
+ });
