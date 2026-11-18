@@ -18,6 +18,7 @@
     "@flower/shared-types": "workspace:*",
     "@flower/ui": "workspace:*",
     "next": "16.4.1",
+    "qrcode-generator": "2.0.4",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
@@ -28,6 +29,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.6",
     "eslint": "10.9.1",
+    "jsqr": "1.4.0",
     "rimraf": "6.1.3",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",

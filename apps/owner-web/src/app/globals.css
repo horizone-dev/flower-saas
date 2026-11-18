@@ -243,3 +243,62 @@ button.btn,
   flex-wrap: wrap;
   gap: 0.3rem;
 }
+
+/* authenticator enrolment (/security): the QR code scales to the screen and keeps a white quiet zone for scanners */
+.qr {
+  width: min(16rem, 100%);
+  aspect-ratio: 1;
+  background: #fff;
+  border: 1px solid var(--border, #d0d5dd);
+  border-radius: 0.5rem;
+  padding: 0.25rem;
+  align-self: center;
+}
+.qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.secret {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.15rem;
+  letter-spacing: 0.08em;
+  word-break: break-all;
+  user-select: all;
+}
+@media (max-width: 480px) {
+  .secret {
+    font-size: 1rem;
+  }
+}
+
+/* phones and small tablets: the navigation becomes a wrapped bar above the content instead of a 200px column */
+@media (max-width: 720px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  .nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem 0.5rem;
+    border-right: 0;
+    border-bottom: 1px solid #e7e5e4;
+    padding: 0.5rem 0.75rem;
+  }
+  .nav .brand {
+    margin-bottom: 0;
+    margin-right: 0.5rem;
+  }
+  .nav form {
+    margin-top: 0;
+    margin-left: auto;
+  }
+  .content {
+    padding: 1rem;
+    min-width: 0;
+  }
+  .table-wrap {
+    overflow-x: auto;
+  }
+}

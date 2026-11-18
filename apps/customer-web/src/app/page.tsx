@@ -1,42 +1,101 @@
-import { createApiClient } from '@flower/api-client';
-import { Button } from '@flower/ui';
+import Link from 'next/link';
+import { t } from '@/lib/i18n';
+import { getLocale } from '@/lib/locale';
+import { getCatalog } from '@/lib/storefront';
+import { displayName, filterProducts } from '@/lib/storefront/catalog';
+import { ProductCard } from '@/components/product-card';
 
-// Phase 0 shell: fetch the API health at request time and render the status.
 export const dynamic = 'force-dynamic';
 
-async function getApiStatus(): Promise<'healthy' | 'unavailable'> {
-  const baseUrl = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:3001';
-  try {
-    const client = createApiClient({ baseUrl });
-    const res = await client.health();
-    return res.status === 'ok' ? 'healthy' : 'unavailable';
-  } catch {
-    return 'unavailable';
-  }
-}
+/** browse: categories, search, and the product grid (the catalog's names, prices and availability exactly as given) */
+export default async function ShopPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ category?: string; q?: string }>;
+}) {
+  const sp = await searchParams;
+  const locale = await getLocale();
+  const catalog = getCatalog();
+  const [categories, products] = await Promise.all([
+    catalog.listCategories(),
+    catalog.listProducts(),
+  ]);
+  const shown = filterProducts(products, categories, { category: sp.category, q: sp.q });
+  const filtered = Boolean(sp.category || sp.q?.trim());
 
-export default async function Page() {
-  const status = await getApiStatus();
+  const href = (category?: string): string => {
+    const p = new URLSearchParams();
+    if (category) p.set('category', category);
+    if (sp.q?.trim()) p.set('q', sp.q.trim());
+    const s = p.toString();
+    return s ? `/?${s}` : '/';
+  };
+
   return (
-    <main
-      style={{
-        maxWidth: '40rem',
-        margin: '4rem auto',
-        padding: '0 1.5rem',
-        fontFamily: 'Inter, system-ui, sans-serif',
-      }}
-    >
-      <p style={{ fontSize: '0.85rem', letterSpacing: '0.08em', color: '#9d174d' }}>
-        FLOWER SAAS · PHASE 0
+    <>
+      <h1 className="page__title">{t(locale, 'shop.heading')}</h1>
+
+      <form method="get" action="/" className="search" role="search">
+        {sp.category ? <input type="hidden" name="category" value={sp.category} /> : null}
+        <label className="search__label" htmlFor="q">
+          {t(locale, 'shop.search.label')}
+        </label>
+        <div className="search__row">
+          <input
+            id="q"
+            name="q"
+            type="search"
+            defaultValue={sp.q ?? ''}
+            placeholder={t(locale, 'shop.search.placeholder')}
+            data-testid="search-input"
+          />
+          <button type="submit" className="btn">
+            {t(locale, 'shop.search.submit')}
+          </button>
+        </div>
+      </form>
+
+      <nav className="rail" aria-label={t(locale, 'shop.categories')}>
+        <Link
+          href={href()}
+          className={`rail__item${sp.category ? '' : ' rail__item--on'}`}
+          aria-current={sp.category ? undefined : 'page'}
+        >
+          {t(locale, 'shop.all')}
+        </Link>
+        {categories.map((c) => (
+          <Link
+            key={c.id}
+            href={href(c.slug)}
+            className={`rail__item${sp.category === c.slug ? ' rail__item--on' : ''}`}
+            aria-current={sp.category === c.slug ? 'page' : undefined}
+            data-testid={`cat-${c.slug}`}
+          >
+            {displayName(c, locale)}
+          </Link>
+        ))}
+      </nav>
+
+      <p className="muted" role="status" data-testid="result-count">
+        {t(locale, 'shop.resultCount', { count: shown.length })}
       </p>
-      <h1 style={{ fontSize: '1.6rem', margin: '0.25rem 0 0.5rem' }}>Customer Web</h1>
-      <p style={{ color: '#4b574f', marginTop: 0 }}>Storefront</p>
-      <p style={{ marginTop: '1.5rem', fontSize: '1.1rem' }}>
-        API: <strong>{status === 'healthy' ? 'healthy' : 'unavailable'}</strong>
-      </p>
-      <div style={{ marginTop: '1rem' }}>
-        <Button variant="secondary">Design system shell</Button>
-      </div>
-    </main>
+
+      {shown.length === 0 ? (
+        <div className="empty" data-testid="shop-empty">
+          <p>{t(locale, 'shop.empty')}</p>
+          {filtered ? (
+            <Link href="/" className="btn">
+              {t(locale, 'shop.clear')}
+            </Link>
+          ) : null}
+        </div>
+      ) : (
+        <ul className="grid" data-testid="product-grid">
+          {shown.map((p) => (
+            <ProductCard key={p.id} product={p} locale={locale} />
+          ))}
+        </ul>
+      )}
+    </>
   );
 }

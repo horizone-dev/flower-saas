@@ -566,3 +566,382 @@ describe('@flower/api-client', () => {
     });
   });
 });
+
+describe('@flower/api-client — default fetch (browser regression)', () => {
+  it('calls the global fetch bound to globalThis (an unbound browser fetch throws "Illegal invocation")', async () => {
+    const strictFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation');
+      return Promise.resolve(jsonResponse({ status: 'ok' }));
+    });
+    vi.stubGlobal('fetch', strictFetch);
+    try {
+      const client = createApiClient({ baseUrl: 'http://api.test' });
+      await expect(client.health()).resolves.toEqual({ status: 'ok' });
+      expect(strictFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('@flower/api-client — POS selling routes (request contract)', () => {
+  const C = 'c0000000-0000-4000-8000-000000000001';
+  const B = 'b0000000-0000-4000-8000-000000000002';
+  const O = 'a0000000-0000-4000-8000-000000000003';
+  const make = (body: unknown = {}) => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(body));
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 'tok',
+    });
+    const last = () => {
+      const [url, init] = fetchMock.mock.calls.at(-1)!;
+      return {
+        url: String(url),
+        method: init?.method,
+        headers: init?.headers as Record<string, string>,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      };
+    };
+    return { client, last };
+  };
+
+  it('createOrder: POST with the caller’s Idempotency-Key and ONLY ids / unit / quantity per line', async () => {
+    const { client, last } = make({ order: {}, lines: [] });
+    await client.createOrder(
+      C,
+      B,
+      { lines: [{ productId: 'p', variantId: 'v', selectedUomCode: 'piece', quantity: '2' }] },
+      'key-1',
+    );
+    expect(last()).toMatchObject({
+      url: `http://api.test/v1/companies/${C}/branches/${B}/orders`,
+      method: 'POST',
+      headers: { 'idempotency-key': 'key-1', authorization: 'Bearer tok' },
+      body: {
+        lines: [{ productId: 'p', variantId: 'v', selectedUomCode: 'piece', quantity: '2' }],
+      },
+    });
+  });
+
+  it('updateOrder: PATCH with the order version as If-Match', async () => {
+    const { client, last } = make({ order: {}, lines: [] });
+    await client.updateOrder(C, B, O, { customerId: null }, 3);
+    expect(last()).toMatchObject({
+      url: `http://api.test/v1/companies/${C}/branches/${B}/orders/${O}`,
+      method: 'PATCH',
+      headers: { 'if-match': '"3"' },
+      body: { customerId: null },
+    });
+  });
+
+  it('completeSale: POST complete-sale with If-Match AND Idempotency-Key and the tenders — no totals, no price', async () => {
+    const { client, last } = make({});
+    await client.completeSale(
+      C,
+      B,
+      O,
+      { paymentIntent: 'PAY_NOW', tenders: [{ method: 'CASH', amountMinor: '2888' }] },
+      4,
+      'key-2',
+    );
+    expect(last()).toMatchObject({
+      url: `http://api.test/v1/companies/${C}/branches/${B}/orders/${O}/complete-sale`,
+      method: 'POST',
+      headers: { 'if-match': '"4"', 'idempotency-key': 'key-2' },
+      body: { paymentIntent: 'PAY_NOW', tenders: [{ method: 'CASH', amountMinor: '2888' }] },
+    });
+  });
+
+  it('reads: totals, order, invoice, orders list (status + cursor), customers search, customer create', async () => {
+    const { client, last } = make({ data: [], nextCursor: null });
+    await client.getOrderTotals(C, B, O);
+    expect(last().url).toBe(`http://api.test/v1/companies/${C}/branches/${B}/orders/${O}/totals`);
+    await client.getReceiptIdentity(C, B);
+    expect(last().url).toBe(`http://api.test/v1/companies/${C}/branches/${B}/receipt-identity`);
+    await client.getSalesReport(C, { from: '2026-11-01', to: '2026-11-14' });
+    expect(last().url).toBe(
+      `http://api.test/v1/companies/${C}/reports/sales?from=2026-11-01&to=2026-11-14`,
+    );
+    await client.getSalesReport(C, { from: '2026-11-01', to: '2026-11-14', branchId: B });
+    expect(last().url).toBe(
+      `http://api.test/v1/companies/${C}/branches/${B}/reports/sales?from=2026-11-01&to=2026-11-14`,
+    );
+    await client.getOrder(C, B, O);
+    expect(last().url).toBe(`http://api.test/v1/companies/${C}/branches/${B}/orders/${O}`);
+    await client.getInvoice(C, B, 'inv');
+    expect(last().url).toBe(`http://api.test/v1/companies/${C}/branches/${B}/invoices/inv`);
+    await client.listOrders(C, B, { status: 'CONFIRMED', cursor: 'cur' });
+    expect(last().url).toBe(
+      `http://api.test/v1/companies/${C}/branches/${B}/orders?status=CONFIRMED&cursor=cur`,
+    );
+    await client.listCustomers(C, { displayName: 'Ann' });
+    expect(last().url).toBe(`http://api.test/v1/companies/${C}/customers?displayName=Ann`);
+    await client.createCustomer(C, { displayName: 'Ann', phone: '+971500000000' }, 'key-3');
+    expect(last()).toMatchObject({
+      url: `http://api.test/v1/companies/${C}/customers`,
+      method: 'POST',
+      headers: { 'idempotency-key': 'key-3' },
+      body: { displayName: 'Ann', phone: '+971500000000' },
+    });
+    await client.getBranchEffectiveCatalog(B, { cursor: 'x' });
+    expect(last().url).toBe(`http://api.test/v1/catalog/branches/${B}/catalog?cursor=x`);
+  });
+
+  it('authenticator enrolment: POST mfa/enrol with an empty body, then mfa/confirm with ONLY the code (existing approved routes)', async () => {
+    const { client, last } = make({ secret: 'JBSWY3DPEHPK3PXP', uri: 'otpauth://totp/x' });
+    const e = await client.enrolMfa();
+    expect(last()).toMatchObject({
+      url: 'http://api.test/v1/auth/mfa/enrol',
+      method: 'POST',
+      body: {},
+    });
+    expect(e).toEqual({ secret: 'JBSWY3DPEHPK3PXP', uri: 'otpauth://totp/x' });
+    await client.confirmMfa('123456');
+    expect(last()).toMatchObject({
+      url: 'http://api.test/v1/auth/mfa/confirm',
+      method: 'POST',
+      body: { code: '123456' },
+    });
+  });
+});
+
+describe('@flower/api-client — POS customer credit and advance sale (frozen complete-sale contract)', () => {
+  const C = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const CUST = '33333333-3333-4333-8333-333333333333';
+  const ADV = '44444444-4444-4444-8444-444444444444';
+  function recorder(body: unknown = {}) {
+    const calls: { url: string; method: string; headers: Record<string, string>; body: unknown }[] =
+      [];
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init?.method ?? 'GET',
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return jsonResponse(body);
+    });
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 't',
+    });
+    return { client, calls };
+  }
+
+  it('completeSale carries ON_CREDIT, the advance applications and a credit exception REASON, with If-Match and Idempotency-Key — and nothing authoritative', async () => {
+    const { client, calls } = recorder({ paymentIntent: 'ON_CREDIT' });
+    await client.completeSale(
+      C,
+      B,
+      'ord-1',
+      {
+        paymentIntent: 'ON_CREDIT',
+        tenders: [{ method: 'CASH', amountMinor: '1000' }],
+        advanceApplications: [{ advanceId: ADV, amountMinor: '2500' }],
+        creditLimitExceptionReason: 'regular wedding customer',
+      },
+      7,
+      'idem-1',
+    );
+    const c = calls[0]!;
+    expect(c.url).toBe(
+      `http://api.test/v1/companies/${C}/branches/${B}/orders/ord-1/complete-sale`,
+    );
+    expect(c.method).toBe('POST');
+    expect(c.headers['if-match']).toBe('"7"');
+    expect(c.headers['idempotency-key']).toBe('idem-1');
+    expect(c.body).toEqual({
+      paymentIntent: 'ON_CREDIT',
+      tenders: [{ method: 'CASH', amountMinor: '1000' }],
+      advanceApplications: [{ advanceId: ADV, amountMinor: '2500' }],
+      creditLimitExceptionReason: 'regular wedding customer',
+    });
+    // the server rejects (strict DTO) any scope / customer / money-authority field, so the typed request has none
+    expect(Object.keys(c.body as object).sort()).toEqual([
+      'advanceApplications',
+      'creditLimitExceptionReason',
+      'paymentIntent',
+      'tenders',
+    ]);
+  });
+
+  it('getCustomerAccountSummary reads the branch-scoped account summary (receivables:view)', async () => {
+    const { client, calls } = recorder({ branchFinancials: {}, credit: {} });
+    await client.getCustomerAccountSummary(C, B, CUST);
+    expect(calls[0]!.url).toBe(
+      `http://api.test/v1/companies/${C}/branches/${B}/customers/${CUST}/account/summary`,
+    );
+    expect(calls[0]!.method).toBe('GET');
+  });
+
+  it('listCustomerAdvances reads the advances page and forwards cursor / limit only when given', async () => {
+    const { client, calls } = recorder({ data: [], nextCursor: null });
+    await client.listCustomerAdvances(C, B, CUST);
+    await client.listCustomerAdvances(C, B, CUST, { cursor: 'abc', limit: 50 });
+    expect(calls[0]!.url).toBe(
+      `http://api.test/v1/companies/${C}/branches/${B}/customers/${CUST}/account/advances`,
+    );
+    expect(calls[1]!.url).toBe(
+      `http://api.test/v1/companies/${C}/branches/${B}/customers/${CUST}/account/advances?cursor=abc&limit=50`,
+    );
+  });
+});
+
+describe('@flower/api-client — POS customer account and collection (existing receivables + receipt routes)', () => {
+  const C = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const CUST = '33333333-3333-4333-8333-333333333333';
+  const base = `http://api.test/v1/companies/${C}/branches/${B}/customers/${CUST}`;
+  function recorder(body: unknown = {}) {
+    const calls: { url: string; method: string; headers: Record<string, string>; body: unknown }[] =
+      [];
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init?.method ?? 'GET',
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return jsonResponse(body);
+    });
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 't',
+    });
+    return { client, calls };
+  }
+
+  it('reads one customer from the company-scoped route', async () => {
+    const { client, calls } = recorder({ id: CUST, displayName: 'Dora' });
+    await client.getCustomer(C, CUST);
+    expect(calls[0]!.url).toBe(`http://api.test/v1/companies/${C}/customers/${CUST}`);
+    expect(calls[0]!.method).toBe('GET');
+  });
+
+  it('lists the OPEN receivables of one customer at one branch, forwarding cursor / limit only when given', async () => {
+    const { client, calls } = recorder({ data: [], nextCursor: null });
+    await client.listCustomerReceivables(C, B, CUST);
+    await client.listCustomerReceivables(C, B, CUST, { cursor: 'c1', limit: 25 });
+    expect(calls[0]!.url).toBe(`${base}/account/receivables`);
+    expect(calls[1]!.url).toBe(`${base}/account/receivables?cursor=c1&limit=25`);
+  });
+
+  it('reads the statement with an optional date range and cursor, and the unapplied receipts', async () => {
+    const { client, calls } = recorder({ data: [], nextCursor: null, openingState: null });
+    await client.getCustomerStatement(C, B, CUST);
+    await client.getCustomerStatement(C, B, CUST, {
+      from: '2026-11-01',
+      to: '2026-11-30',
+      limit: 50,
+    });
+    await client.listCustomerUnappliedReceipts(C, B, CUST, { limit: 10 });
+    expect(calls[0]!.url).toBe(`${base}/account/statement`);
+    expect(calls[1]!.url).toBe(`${base}/account/statement?from=2026-11-01&to=2026-11-30&limit=50`);
+    expect(calls[2]!.url).toBe(`${base}/account/unapplied-receipts?limit=10`);
+  });
+
+  it('collectCustomerReceipt POSTs ONLY the amount and method, with the Idempotency-Key — no customer, scope, invoice list or allocation', async () => {
+    const { client, calls } = recorder({ paymentId: 'p1' });
+    await client.collectCustomerReceipt(
+      C,
+      B,
+      CUST,
+      { amountMinor: '1000', method: 'CASH' },
+      'idem-collect-1',
+    );
+    const c = calls[0]!;
+    expect(c.url).toBe(`${base}/receipts`);
+    expect(c.method).toBe('POST');
+    expect(c.headers['idempotency-key']).toBe('idem-collect-1');
+    expect(c.body).toEqual({ amountMinor: '1000', method: 'CASH' });
+    expect(Object.keys(c.body as object).sort()).toEqual(['amountMinor', 'method']);
+  });
+});
+
+describe('@flower/api-client — Owner Web customer credit settings and receivables report (existing routes)', () => {
+  const C = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const CUST = '33333333-3333-4333-8333-333333333333';
+  function recorder(body: unknown = {}) {
+    const calls: { url: string; method: string; headers: Record<string, string>; body: unknown }[] =
+      [];
+    const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init?.method ?? 'GET',
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return jsonResponse(body);
+    });
+    const client = createApiClient({
+      baseUrl: 'http://api.test',
+      fetch: fetchMock,
+      getAccessToken: () => 't',
+    });
+    return { client, calls };
+  }
+
+  it('reads the customer credit configuration (and its version) from the company-scoped account route', async () => {
+    const { client, calls } = recorder({ creditEnabled: true, version: 4 });
+    await client.getCustomerCreditAccount(C, CUST);
+    expect(calls[0]!.url).toBe(`http://api.test/v1/companies/${C}/customers/${CUST}/account`);
+    expect(calls[0]!.method).toBe('GET');
+  });
+
+  it('configureCustomerCredit PATCHes ONLY creditEnabled (+ the limit when given) with If-Match and NO Idempotency-Key', async () => {
+    const { client, calls } = recorder({ creditEnabled: true, version: 5 });
+    await client.configureCustomerCredit(
+      C,
+      CUST,
+      { creditEnabled: true, creditLimitMinor: '250000' },
+      4,
+    );
+    await client.configureCustomerCredit(C, CUST, { creditEnabled: false }, 5);
+    const first = calls[0]!;
+    expect(first.url).toBe(`http://api.test/v1/companies/${C}/customers/${CUST}/account/credit`);
+    expect(first.method).toBe('PATCH');
+    expect(first.headers['if-match']).toBe('"4"');
+    expect(first.headers).not.toHaveProperty('idempotency-key');
+    expect(first.body).toEqual({ creditEnabled: true, creditLimitMinor: '250000' });
+    // disabling without a limit sends NO limit field at all (the server keeps the stored one)
+    expect(calls[1]!.body).toEqual({ creditEnabled: false });
+    expect(Object.keys(calls[1]!.body as object)).toEqual(['creditEnabled']);
+  });
+
+  it('configureCustomerCredit refuses a limit that is not a plain digit string before any request is made', () => {
+    const { client, calls } = recorder();
+    expect(() =>
+      client.configureCustomerCredit(
+        C,
+        CUST,
+        { creditEnabled: true, creditLimitMinor: '12.50' },
+        1,
+      ),
+    ).toThrow(/creditLimitMinor/);
+    expect(() =>
+      client.configureCustomerCredit(C, CUST, { creditEnabled: true, creditLimitMinor: '-5' }, 1),
+    ).toThrow(/creditLimitMinor/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reads the company receivables report and the one-branch report, forwarding only the given filters', async () => {
+    const { client, calls } = recorder({ customers: { rows: [], nextCursor: null } });
+    await client.getReceivablesReport(C);
+    await client.getReceivablesReport(C, { customerId: CUST, cursor: 'c1', limit: 25 });
+    await client.getReceivablesReport(C, { branchId: B });
+    expect(calls[0]!.url).toBe(`http://api.test/v1/companies/${C}/reports/receivables`);
+    expect(calls[1]!.url).toBe(
+      `http://api.test/v1/companies/${C}/reports/receivables?customerId=${CUST}&cursor=c1&limit=25`,
+    );
+    expect(calls[2]!.url).toBe(
+      `http://api.test/v1/companies/${C}/branches/${B}/reports/receivables`,
+    );
+    expect(calls.every((c) => c.method === 'GET')).toBe(true);
+  });
+});

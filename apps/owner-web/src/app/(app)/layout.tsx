@@ -12,6 +12,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     <div className="shell">
       <nav className="nav">
         <div className="brand">OWNER</div>
+        <a href="/products">Products</a>
+        <a href="/stock">Branch stock</a>
+        <a href="/customers">Customers</a>
+        <a href="/receivables">Who owes us</a>
+        <a href="/reports">Sales report</a>
+        <a href="/company">Company</a>
+        <a href="/security">Security</a>
         <a href="/access">My access</a>
         <form action={logout}>
           <button className="btn" type="submit">
