@@ -28,4 +28,7 @@ regexes = [
   '''dev-only-insecure-secrets-master-key-change-me-\d+''',
   # the fixed argon2id "dummy" digest used for constant-time login (auth.service.ts)
   '''\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+''',
+  # the PUBLIC fake password every *.integration.test.ts already uses (those files are path-allowlisted above). The approval `.patch`
+  # artefacts under docs/decisions/ are hash-pinned (SHARE-MANIFEST.json) and carry the same test code, so they are matched by VALUE.
+  '''CorrectHorseBatteryStaple9''',
 ]
