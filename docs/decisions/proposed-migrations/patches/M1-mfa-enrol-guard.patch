@@ -1,0 +1,144 @@
+diff --git a/apps/api/src/modules/identity/auth.service.ts b/apps/api/src/modules/identity/auth.service.ts
+index 8f5d585..437dbca 100644
+--- a/apps/api/src/modules/identity/auth.service.ts
++++ b/apps/api/src/modules/identity/auth.service.ts
+@@ -498,11 +498,13 @@ export class AuthService {
+     userId: string,
+     email: string,
+   ): Promise<{ secret: string; uri: string }> {
++    await this.assertNoConfirmedAuthenticator(tenantId, userId);
+     const secret = this.totp.generateSecret();
+     await this.identity.upsertMfaFactor(tenantId, userId, secret);
+     return { secret, uri: this.totp.keyUri(email, secret) };
+   }
+   async confirmMfa(tenantId: string, userId: string, code: string): Promise<void> {
++    await this.assertNoConfirmedAuthenticator(tenantId, userId);
+     const factor = await this.identity.pendingMfaFactor(tenantId, userId);
+     if (!factor || !this.totp.verify(code, factor.secretRef)) {
+       throw new DomainError('MFA_FAILED', 'invalid verification code', 401);
+@@ -510,6 +512,21 @@ export class AuthService {
+     await this.identity.confirmMfaFactor(tenantId, factor.id);
+   }
+ 
++  /**
++   * M-1 (PROPOSED): an account that already has a CONFIRMED authenticator cannot enrol or confirm another one. Without this any
++   * authenticated session, including a stolen one, could add its own factor (persistence) or lock the owner out. Replacing a factor
++   * needs a separate, approved flow (operator reset or step-up).
++   */
++  private async assertNoConfirmedAuthenticator(tenantId: string, userId: string): Promise<void> {
++    if ((await this.identity.loadUserById(tenantId, userId))?.mfa) {
++      throw new DomainError(
++        'MFA_ALREADY_ENROLLED',
++        'an authenticator is already set up for this account',
++        409,
++      );
++    }
++  }
++
+   // ── helpers ──────────────────────────────────────────────────────────────
+   private ok(issued: { accessToken: string; refreshToken: string }): LoginResult {
+     return {
+diff --git a/apps/api/src/modules/identity/mfa-enrol-guard.integration.test.ts b/apps/api/src/modules/identity/mfa-enrol-guard.integration.test.ts
+new file mode 100644
+index 0000000..78ec752
+--- /dev/null
++++ b/apps/api/src/modules/identity/mfa-enrol-guard.integration.test.ts
+@@ -0,0 +1,98 @@
++import 'reflect-metadata';
++import { randomUUID } from 'node:crypto';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { authenticator } from 'otplib';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import { createSaleWorld, type SaleWorld } from '../../verification/load-sale-world.js';
++import { PasswordService } from '../../common/crypto/password.service.js';
++
++/**
++ * M-1 (PROPOSED auth-contract amendment): once an account has a CONFIRMED authenticator, `POST /v1/auth/mfa/enrol` and `/mfa/confirm` refuse
++ * with 409 MFA_ALREADY_ENROLLED. Today any authenticated session — including a stolen one — can add a second confirmed factor (a persistence
++ * path) or lock the owner out by adding an unknown one. First-time enrolment must keep working exactly as before.
++ */
++describe('M-1 — an authenticator cannot be added to an account that already has one', () => {
++  let stack: TestStack;
++  let w: SaleWorld;
++  let slug = '';
++  const EMAIL = 'm1-owner@pilot.test';
++  const PASSWORD = 'violet-meadow-slow-river-47!';
++  const post = (url: string, body: object, token?: string) =>
++    w.h.app.inject({
++      method: 'POST',
++      url: `/v1${url}`,
++      payload: body,
++      headers: token ? { authorization: `Bearer ${token}` } : {},
++    });
++  const login = async (code?: string, secret?: string): Promise<string> => {
++    const r = await post('/auth/login', { workspaceSlug: slug, email: EMAIL, password: PASSWORD });
++    expect(r.statusCode, r.payload).toBe(200);
++    const b = r.json() as { accessToken?: string; mfaChallenge?: string };
++    if (b.accessToken) return b.accessToken;
++    const v = await post('/auth/mfa/verify', {
++      mfaChallenge: b.mfaChallenge,
++      code: authenticator.generate(secret!),
++    });
++    expect(v.statusCode, v.payload).toBe(200);
++    void code;
++    return (v.json() as { accessToken: string }).accessToken;
++  };
++
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2, {
++      realClock: true,
++    });
++    slug = (await w.pool.query(`SELECT slug FROM tenant WHERE id = $1`, [w.a.tenantId])).rows[0]
++      .slug;
++    const id = randomUUID();
++    await w.pool.query(
++      `INSERT INTO "user" (id,"tenantId","accountType",email,status,"updatedAt") VALUES ($1,$2,'OWNER',$3,'ACTIVE',now())`,
++      [id, w.a.tenantId, EMAIL],
++    );
++    await w.pool.query(
++      `INSERT INTO user_role ("tenantId","userId","roleId") SELECT $1,$2,id FROM role WHERE "tenantId"=$1 AND key='owner'`,
++      [w.a.tenantId, id],
++    );
++    await w.pool.query(
++      `INSERT INTO data_scope_assignment ("tenantId","userId","companyScopeAll","companyIds","branchScopeAll","branchIds","updatedAt") VALUES ($1,$2,true,'{}',true,'{}',now())`,
++      [w.a.tenantId, id],
++    );
++    await w.pool.query(
++      `INSERT INTO credential ("tenantId","userId",kind,hash,"updatedAt") VALUES ($1,$2,'PASSWORD',$3,now())`,
++      [w.a.tenantId, id, await new PasswordService().hash(PASSWORD)],
++    );
++  }, 300_000);
++
++  afterAll(async () => {
++    await w?.h.close();
++    await w?.pool.end();
++    await stack?.stop();
++  });
++
++  it('first-time enrolment is unchanged; once confirmed, a second enrolment AND a confirm are refused 409 (session of the same user)', async () => {
++    const t1 = await login();
++    const e1 = await post('/auth/mfa/enrol', {}, t1);
++    expect(e1.statusCode, e1.payload).toBeLessThan(300);
++    const secret = (e1.json() as { secret: string }).secret;
++    expect(
++      (await post('/auth/mfa/confirm', { code: authenticator.generate(secret) }, t1)).statusCode,
++    ).toBeLessThan(300);
++
++    // a (possibly stolen) session of the SAME account tries to add its own authenticator
++    const t2 = await login(undefined, secret);
++    const again = await post('/auth/mfa/enrol', {}, t2);
++    expect(again.statusCode, again.payload).toBe(409);
++    expect((again.json() as { error: { code: string } }).error.code).toBe('MFA_ALREADY_ENROLLED');
++    expect((await post('/auth/mfa/confirm', { code: '123456' }, t2)).statusCode).toBe(409);
++
++    // exactly one confirmed factor, none pending, and the original authenticator still signs in
++    const f = await w.pool.query(
++      `SELECT status FROM mfa_factor WHERE "tenantId" = $1 ORDER BY status`,
++      [w.a.tenantId],
++    );
++    expect(f.rows).toEqual([{ status: 'CONFIRMED' }]);
++    await login(undefined, secret);
++  });
++});

@@ -1,0 +1,91 @@
+{
+  "bundle": "phase-4-7-audit-registration",
+  "status": "PREPARED_NOT_APPLIED",
+  "note": "An UNAPPLIED approval bundle. The live registry (common/audit/actions.ts) and every production service are unchanged; the registered + REQUIRED state exists only inside the rehearsal copy.",
+  "liveRegistryPatchSource": {
+    "file": "docs/decisions/proposed-migrations/patches/E1-audit-actions-registry.patch",
+    "sha256": "24071ab4cb317007e74efe54376d1b84f0dab47d8dab93cec7d1b0349e6e7bb1"
+  },
+  "artefacts": {
+    "registry": {
+      "file": "registry.patch",
+      "sha256": "24071ab4cb317007e74efe54376d1b84f0dab47d8dab93cec7d1b0349e6e7bb1"
+    },
+    "pinAmendments": {
+      "file": "pin-amendments.patch",
+      "sha256": "daa343df6162ecd347ac39b2a0331eb1c7f6ad2da57b1bf3571188b48bf8ce53"
+    },
+    "rehearsalTest": {
+      "file": "rehearsal/expense-audit.registered.rehearsal.integration.test.ts.txt",
+      "sha256": "c66971fdee7abd5a31cb216b4034789c9087e963cc782d9fe2cd97e5d3fcc0e0"
+    },
+    "requiredProvider": {
+      "file": "rehearsal/audit-required.provider.ts.txt",
+      "sha256": "d0e0c73519d953b876bae7f88159f811ad88086a73101e2c42db2229f6557f80"
+    },
+    "securityEvidence": {
+      "file": "SECURITY-REVIEW-EVIDENCE.md",
+      "sha256": "dd4473ad180f0fdeeccc1c490793aaea8e55543bca1b6da04a8dba1d2f73d7f8"
+    },
+    "runner": {
+      "file": "rehearse.mjs",
+      "sha256": "a8edb63a0680b46abd574f71c98a02696dda5b8ff37eb002e72812dfe733720c"
+    }
+  },
+  "proposedActions": [
+    "expense_record.created",
+    "expense_record.submitted",
+    "expense_record.approved",
+    "expense_record.rejected",
+    "expense_record.paid",
+    "expense_category.created",
+    "expense_category.active_changed",
+    "other_income.draft_created"
+  ],
+  "activation": {
+    "liveRegistry": false,
+    "requiredPolicyBound": false,
+    "routes": false,
+    "permissionGrants": false,
+    "glPosting": false,
+    "cashMovement": false
+  },
+  "approvals": [
+    {
+      "id": "AUDIT-ACTION-NAMES",
+      "owner": "SECURITY",
+      "what": "the eight action names",
+      "recorded": false
+    },
+    {
+      "id": "AUDIT-PAYLOAD-ALLOWLIST",
+      "owner": "SECURITY",
+      "what": "the audit payload allow-list (keys, value bounds, what is deliberately excluded)",
+      "recorded": false
+    },
+    {
+      "id": "AUDIT-SECURITY-FLAG",
+      "owner": "SECURITY",
+      "what": "security:false for all eight (they do not enter the security_event view)",
+      "recorded": false
+    },
+    {
+      "id": "AUDIT-COVERAGE",
+      "owner": "SECURITY",
+      "what": "PLATFORM-AUDIT-EVENTS: which events activation must audit beyond the eight successes (refused attempts, reads)",
+      "recorded": false
+    },
+    {
+      "id": "AUDIT-REQUIRED-ACTIVATION",
+      "owner": "SECURITY",
+      "what": "binding the REQUIRED audit policy (DI provider) — only after the registration",
+      "recorded": false
+    },
+    {
+      "id": "AUDIT-LOG-IMMUTABILITY",
+      "owner": "SECURITY",
+      "what": "closing the audit_log append-only gap (frozen schema: app role can UPDATE / DELETE audit rows) before relying on these rows as evidence",
+      "recorded": false
+    }
+  ]
+}

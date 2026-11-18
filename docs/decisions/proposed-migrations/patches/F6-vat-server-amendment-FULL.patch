@@ -1,0 +1,802 @@
+diff --git a/apps/api/src/modules/catalog/variant.repository.ts b/apps/api/src/modules/catalog/variant.repository.ts
+index 70cf927..86c9749 100644
+--- a/apps/api/src/modules/catalog/variant.repository.ts
++++ b/apps/api/src/modules/catalog/variant.repository.ts
+@@ -300,7 +300,7 @@ export class VariantRepository extends ScopedRepository {
+       if (next === 'ACTIVE') {
+         const product = await tx.product.findUnique({
+           where: { id: current.productId },
+-          select: { status: true, fulfilmentStrategy: true },
++          select: { status: true, fulfilmentStrategy: true, taxCategoryKey: true },
+         });
+         if (!product) throw new NotFoundError('product');
+         if (product.status !== 'ACTIVE') {
+@@ -325,6 +325,21 @@ export class VariantRepository extends ScopedRepository {
+             409,
+           );
+         }
++        // F-6 (PROPOSED, needs owner approval) — fail closed: a variant with NO effective tax category
++        // (variant override, else product default) is charged 0 tax by the sale path. A missing
++        // classification must never silently mean "no VAT"; ZERO_RATED / EXEMPT are explicit categories
++        // and pass. Same shape and precedent as VARIANT_BASE_UOM_REQUIRED above.
++        const variantTax = await tx.variant.findUnique({
++          where: { id },
++          select: { taxCategoryKey: true },
++        });
++        if ((variantTax?.taxCategoryKey ?? product.taxCategoryKey ?? null) === null) {
++          throw new DomainError(
++            'VARIANT_TAX_CATEGORY_REQUIRED',
++            'assign a tax category (variant or product) before activating a variant',
++            409,
++          );
++        }
+         // owner L-7 — reactivating an archived variant whose combination is now
+         // taken by another non-archived variant → 409, no mutation, no audit.
+         await assertSignatureFree(tx, current.productId, current.optionSignature, id);
+diff --git a/apps/api/src/modules/orders/order.repository.ts b/apps/api/src/modules/orders/order.repository.ts
+index 48fcd6e..c890d2e 100644
+--- a/apps/api/src/modules/orders/order.repository.ts
++++ b/apps/api/src/modules/orders/order.repository.ts
+@@ -1697,6 +1697,24 @@ export class OrderRepository extends ScopedRepository {
+         variantId: li.variantId,
+         date: today,
+       });
++      // F-6-vat-fail-closed:begin
++      // F-6 (PROPOSED, needs owner approval) — fail closed: in a VAT country a line with no effective tax
++      // category, or whose category has no in-force rate, would be recorded with 0 tax. Refuse it instead.
++      // An explicit ZERO_RATED / EXEMPT category resolves to a real 0 bps rate and passes; a country with
++      // no VAT regime (`regime === 'NONE'`) never charges tax and also passes.
++      if (
++        taxResolved.regime === 'VAT' &&
++        (taxResolved.reason === 'NO_CATEGORY_ASSIGNED' ||
++          taxResolved.reason === 'NO_RATE_FOR_CATEGORY')
++      ) {
++        throw new DomainError(
++          'ORDER_LINE_TAX_NOT_CONFIGURED',
++          `no VAT category / rate is configured for this variant (${taxResolved.reason})`,
++          422,
++          [{ field: 'variantId', issue: taxResolved.reason }],
++        );
++      }
++      // F-6-vat-fail-closed:end
+ 
+       const grossMoney = this.lineGross(unitPriceAmountMinor, unitPriceCurrencyCode, quantity);
+       const discount = this.resolveDiscount(
+diff --git a/apps/api/src/verification/load-sale-world.ts b/apps/api/src/verification/load-sale-world.ts
+index fcf61d0..4be5eff 100644
+--- a/apps/api/src/verification/load-sale-world.ts
++++ b/apps/api/src/verification/load-sale-world.ts
+@@ -171,6 +171,10 @@ export async function seedReference(pool: pg.Pool): Promise<void> {
+     SELECT uuidv7(), 'AE', '2020-01-01', 'VAT',
+            '{"priceTaxMode":"TAX_EXCLUSIVE","roundingScope":"LINE","roundingMode":"HALF_UP"}'::jsonb
+     WHERE NOT EXISTS (SELECT 1 FROM country_tax_config WHERE "countryCode" = 'AE');
++    INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES ('ZERO_RATED', 'Zero rated', 'x') ON CONFLICT (key) DO NOTHING;
++    INSERT INTO tax_rate ("countryCode", "taxCategoryKey", "rateBps", "effectiveFrom", "effectiveTo")
++    SELECT 'AE', 'ZERO_RATED', 0, '2020-01-01', NULL
++    WHERE NOT EXISTS (SELECT 1 FROM tax_rate WHERE "countryCode" = 'AE' AND "taxCategoryKey" = 'ZERO_RATED');
+     INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+     VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now()) ON CONFLICT (key) DO NOTHING;
+     INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+@@ -408,6 +412,20 @@ export async function createSaleWorld(
+   });
+   if (actP.status !== 200)
+     throw new Error(`activate product failed ${actP.status} ${JSON.stringify(actP.body)}`);
++  // F-6: an explicit ZERO_RATED category (a real 0 bps rate row) at the PRODUCT level — inherited by the variant, and still overridable by a
++  // suite that assigns its own category (a variant-level value would silently override theirs). Never a missing classification.
++  const pNow = (await req('GET', `/catalog/products/${productId}`, ownerToken)).body as {
++    version: number;
++  };
++  const taxSet = await req(
++    'PUT',
++    `/catalog/products/${productId}/tax-category`,
++    ownerToken,
++    { taxCategoryKey: 'ZERO_RATED' },
++    { 'if-match': `"${pNow.version}"` },
++  );
++  if (taxSet.status !== 200)
++    throw new Error(`product tax category failed ${taxSet.status} ${JSON.stringify(taxSet.body)}`);
+   const v1 = (await req('GET', `/catalog/variants/${variantId}`, ownerToken)).body as {
+     version: number;
+   };
+diff --git a/apps/api/src/modules/catalog/catalog-company-pricing.integration.test.ts b/apps/api/src/modules/catalog/catalog-company-pricing.integration.test.ts
+index c0572b0..7f46b6b 100644
+--- a/apps/api/src/modules/catalog/catalog-company-pricing.integration.test.ts
++++ b/apps/api/src/modules/catalog/catalog-company-pricing.integration.test.ts
+@@ -301,7 +301,22 @@ describe('company per-UOM pricing (task 3.7, integration)', () => {
+       { 'if-match': `"${v.version}"` },
+     );
+   }
++  /** F-6: a variant must carry an explicit tax category before it can be activated (ZERO_RATED = a real 0 rate, so totals are unchanged) */
++  async function classifyVariant(token: string, variantId: string) {
++    const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
++      version: number;
++    };
++    const r = await req(
++      'PUT',
++      `/catalog/variants/${variantId}/tax-category`,
++      token,
++      { taxCategoryKey: 'ZERO_RATED' },
++      { 'if-match': `"${cur.version}"` },
++    );
++    expect(r.statusCode, r.payload).toBe(200);
++  }
+   async function activateVariant(token: string, id: string) {
++    await classifyVariant(token, id);
+     const v = await getVariant(token, id);
+     return req('POST', `/catalog/variants/${id}/activate`, token, undefined, {
+       'idempotency-key': ik(),
+@@ -1275,6 +1290,7 @@ async function seed(url: string): Promise<void> {
+              ('settings:tenant:manage','TENANT','admin','v',1),
+              ('users:view','TENANT','admin','v',1),('platform:tenants:view','PLATFORM','platform','v',1)
+       ON CONFLICT (key) DO NOTHING;
++      INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES ('ZERO_RATED','Zero rated','x') ON CONFLICT (key) DO NOTHING;
+       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES
+         ('AED', 2, 'AED', 'x', 'x'), ('SAR', 2, 'SAR', 'x', 'x'), ('KWD', 3, 'KWD', 'x', 'x');
+       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
+diff --git a/apps/api/src/modules/catalog/catalog-identifiers.integration.test.ts b/apps/api/src/modules/catalog/catalog-identifiers.integration.test.ts
+index e2cc820..17b07e1 100644
+--- a/apps/api/src/modules/catalog/catalog-identifiers.integration.test.ts
++++ b/apps/api/src/modules/catalog/catalog-identifiers.integration.test.ts
+@@ -293,7 +293,22 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
+   /** task 3.6 (owner OD-G) — a STOCKED / BOM variant needs a base UOM to reach
+    *  ACTIVE. Sets the built-in `piece` base (no `multi_uom` needed) then POSTs
+    *  `/activate`. */
++  /** F-6: a variant must carry an explicit tax category before it can be activated (ZERO_RATED = a real 0 rate, so totals are unchanged) */
++  async function classifyVariant(token: string, variantId: string) {
++    const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
++      version: number;
++    };
++    const r = await req(
++      'PUT',
++      `/catalog/variants/${variantId}/tax-category`,
++      token,
++      { taxCategoryKey: 'ZERO_RATED' },
++      { 'if-match': `"${cur.version}"` },
++    );
++    expect(r.statusCode, r.payload).toBe(200);
++  }
+   async function activateVariant(token: string, variantId: string) {
++    await classifyVariant(token, variantId);
+     const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
+       version: number;
+       baseUomCode: string | null;
+@@ -893,6 +908,7 @@ describe('identifiers — SKU / barcode / QR (task 3.5, integration)', () => {
+     it('concurrent identifier DELETE vs variant activate always settles to a safe, self-consistent state', async () => {
+       for (let i = 0; i < 4; i++) {
+         const f = await activeProductWithDraftDefaultAndSku(`race1r${i}`);
++        await classifyVariant(ownerA, f.variantId);
+         const [del, act] = await Promise.all([
+           req('DELETE', `/catalog/identifiers/${f.identifierId}`, ownerA),
+           req('POST', `/catalog/variants/${f.variantId}/activate`, ownerA, undefined, {
+@@ -1272,6 +1288,7 @@ async function seed(url: string): Promise<void> {
+              ('variants:manage','TENANT','catalog','v',3),('identifiers:manage','TENANT','inventory','v',3),
+              ('users:view','TENANT','admin','v',1),('platform:tenants:view','PLATFORM','platform','v',1)
+       ON CONFLICT (key) DO NOTHING;
++      INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES ('ZERO_RATED','Zero rated','x') ON CONFLICT (key) DO NOTHING;
+       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'x', 'x');
+       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
+       VALUES ('AE', 'UAE', 'x', 'gcc', 'AED', 'SAT_SUN', true, now());
+diff --git a/apps/api/src/modules/catalog/catalog-uom.integration.test.ts b/apps/api/src/modules/catalog/catalog-uom.integration.test.ts
+index b2b0f13..44b4482 100644
+--- a/apps/api/src/modules/catalog/catalog-uom.integration.test.ts
++++ b/apps/api/src/modules/catalog/catalog-uom.integration.test.ts
+@@ -311,7 +311,22 @@ describe('UOM / pack conversion (task 3.6, integration)', () => {
+       'if-match': `"${p.version}"`,
+     });
+   }
++  /** F-6: a variant must carry an explicit tax category before it can be activated (ZERO_RATED = a real 0 rate, so totals are unchanged) */
++  async function classifyVariant(token: string, variantId: string) {
++    const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
++      version: number;
++    };
++    const r = await req(
++      'PUT',
++      `/catalog/variants/${variantId}/tax-category`,
++      token,
++      { taxCategoryKey: 'ZERO_RATED' },
++      { 'if-match': `"${cur.version}"` },
++    );
++    expect(r.statusCode, r.payload).toBe(200);
++  }
+   async function activateVariant(token: string, id: string) {
++    await classifyVariant(token, id);
+     const v = await getVariant(token, id);
+     return req('POST', `/catalog/variants/${id}/activate`, token, undefined, {
+       'idempotency-key': ik(),
+@@ -1078,6 +1093,7 @@ async function seed(url: string): Promise<void> {
+              ('variants:manage','TENANT','catalog','v',3),('identifiers:manage','TENANT','inventory','v',3),
+              ('users:view','TENANT','admin','v',1),('platform:tenants:view','PLATFORM','platform','v',1)
+       ON CONFLICT (key) DO NOTHING;
++      INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES ('ZERO_RATED','Zero rated','x') ON CONFLICT (key) DO NOTHING;
+       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'x', 'x');
+       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
+       VALUES ('AE', 'UAE', 'x', 'gcc', 'AED', 'SAT_SUN', true, now());
+diff --git a/apps/api/src/modules/catalog/catalog-variants.integration.test.ts b/apps/api/src/modules/catalog/catalog-variants.integration.test.ts
+index a3ac842..3769764 100644
+--- a/apps/api/src/modules/catalog/catalog-variants.integration.test.ts
++++ b/apps/api/src/modules/catalog/catalog-variants.integration.test.ts
+@@ -266,7 +266,22 @@ describe('variants + option groups (task 3.4, integration)', () => {
+    * it can reach ACTIVE. This helper transparently sets `baseUomCode = 'piece'`
+    * (a built-in — no `multi_uom` needed) if unset, then POSTs `/activate`.
+    */
++  /** F-6: a variant must carry an explicit tax category before it can be activated (ZERO_RATED = a real 0 rate, so totals are unchanged) */
++  async function classifyVariant(token: string, variantId: string) {
++    const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
++      version: number;
++    };
++    const r = await req(
++      'PUT',
++      `/catalog/variants/${variantId}/tax-category`,
++      token,
++      { taxCategoryKey: 'ZERO_RATED' },
++      { 'if-match': `"${cur.version}"` },
++    );
++    expect(r.statusCode, r.payload).toBe(200);
++  }
+   async function activateVariant(token: string, variantId: string) {
++    await classifyVariant(token, variantId);
+     const cur = (await req('GET', `/catalog/variants/${variantId}`, token)).json() as {
+       version: number;
+       baseUomCode: string | null;
+@@ -872,6 +887,10 @@ describe('variants + option groups (task 3.4, integration)', () => {
+       const vv = { version: (sb.json() as { version: number }).version };
+       const before = await auditRows(tenantA, 'catalog.variant_status_changed');
+       const key = ik();
++      await classifyVariant(ownerA, v.id);
++      vv.version = (
++        (await req('GET', `/catalog/variants/${v.id}`, ownerA)).json() as { version: number }
++      ).version;
+       const a = await req('POST', `/catalog/variants/${v.id}/activate`, ownerA, undefined, {
+         'idempotency-key': key,
+         'if-match': `"${vv.version}"`,
+@@ -1054,6 +1073,7 @@ describe('variants + option groups (task 3.4, integration)', () => {
+       const v1 = (a.json() as { version: number }).version;
+       const before = (await variantEvents(vid)).length;
+       // no-op activate (already ACTIVE)
++      await classifyVariant(ownerA, vid);
+       await req('POST', `/catalog/variants/${vid}/activate`, ownerA, undefined, {
+         'idempotency-key': ik(),
+         'if-match': `"${v1}"`,
+@@ -1082,6 +1102,7 @@ async function seed(url: string): Promise<void> {
+              ('variants:manage','TENANT','catalog','v',3),('users:view','TENANT','admin','v',1),
+              ('platform:tenants:view','PLATFORM','platform','v',1)
+       ON CONFLICT (key) DO NOTHING;
++      INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES ('ZERO_RATED','Zero rated','x') ON CONFLICT (key) DO NOTHING;
+       INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'x', 'x');
+       INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
+       VALUES ('AE', 'UAE', 'x', 'gcc', 'AED', 'SAT_SUN', true, now());
+diff --git a/apps/api/src/modules/orders/order.controller.integration.test.ts b/apps/api/src/modules/orders/order.controller.integration.test.ts
+index 6750547..d4c530a 100644
+--- a/apps/api/src/modules/orders/order.controller.integration.test.ts
++++ b/apps/api/src/modules/orders/order.controller.integration.test.ts
+@@ -435,6 +435,27 @@ describe('OrderController (task 3b.3 Checkpoint B, integration)', () => {
+     const vNow = (await req('GET', `/catalog/variants/${vId}`, token)).json() as {
+       version: number;
+     };
++    // F-6: an explicit ZERO_RATED category (a real 0 bps rate) before activation; never a missing classification
++    await sql(
++      `INSERT INTO tax_category (key,"nameEn","nameAr") VALUES ('ZERO_RATED','Zero rated','x') ON CONFLICT (key) DO NOTHING`,
++    );
++    await sql(
++      `INSERT INTO tax_rate ("countryCode","taxCategoryKey","rateBps","effectiveFrom")
++       SELECT 'AE','ZERO_RATED',0,'2020-01-01'
++       WHERE NOT EXISTS (SELECT 1 FROM tax_rate WHERE "countryCode"='AE' AND "taxCategoryKey"='ZERO_RATED')`,
++    );
++    // at the PRODUCT level: inherited by the variant, and a test that assigns its own category still overrides it
++    const pPre = (await req('GET', `/catalog/products/${productId}`, token)).json() as {
++      version: number;
++    };
++    const tc = await req(
++      'PUT',
++      `/catalog/products/${productId}/tax-category`,
++      token,
++      { taxCategoryKey: 'ZERO_RATED' },
++      { 'if-match': `"${pPre.version}"` },
++    );
++    expect(tc.statusCode, tc.payload).toBe(200);
+     const activateV = await req('POST', `/catalog/variants/${vId}/activate`, token, undefined, {
+       'if-match': `"${vNow.version}"`,
+       'idempotency-key': ik(),
+diff --git a/apps/api/src/modules/sales/task-3b9-checkpoint-d-structural.test.ts b/apps/api/src/modules/sales/task-3b9-checkpoint-d-structural.test.ts
+index 8d26999..88ce3a2 100644
+--- a/apps/api/src/modules/sales/task-3b9-checkpoint-d-structural.test.ts
++++ b/apps/api/src/modules/sales/task-3b9-checkpoint-d-structural.test.ts
+@@ -187,8 +187,16 @@ describe('D — every frozen surface is byte-identical (content-hash pins)', ()
+   });
+ 
+   it('order.repository.ts equals its frozen hash once the marked order-invoice lines (ONE additive read method + its import) are removed — the frozen getForBranchScoped and every cancellation path are byte-identical', () => {
+-    const { restored, blocks } = withoutMarkedBlocks(
++    // F-6 (PROPOSED amendment): the ONE marked VAT fail-closed block is removed first, so the frozen hash below still proves that every other
++    // byte of the file is unchanged. Without the F-6 amendment applied there are 0 such blocks.
++    const f6 = withoutMarkedBlocks(
+       read(join(SRC, 'modules/orders/order.repository.ts')),
++      'F-6-vat-fail-closed:begin',
++      'F-6-vat-fail-closed:end',
++    );
++    expect(f6.blocks).toBeLessThanOrEqual(1);
++    const { restored, blocks } = withoutMarkedBlocks(
++      f6.restored,
+       '3b.9-order-invoice:begin',
+       '3b.9-order-invoice:end',
+     );
+diff --git a/apps/api/src/modules/orders/f6-vat-server.integration.test.ts b/apps/api/src/modules/orders/f6-vat-server.integration.test.ts
+new file mode 100644
+index 0000000..0f87fc7
+--- /dev/null
++++ b/apps/api/src/modules/orders/f6-vat-server.integration.test.ts
+@@ -0,0 +1,159 @@
++import 'reflect-metadata';
++import { randomUUID } from 'node:crypto';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import { createSaleWorld, type SaleWorld } from '../../verification/load-sale-world.js';
++
++/**
++ * F-6 server amendment (PROPOSED) — through the PUBLIC HTTP routes only, real PostgreSQL: no client is involved, so this is what a direct
++ * API caller can do. A VAT-regime country (AE). The world's variant is classified ZERO_RATED (an explicit 0 bps rate row).
++ * Legacy state is simulated by clearing the category in SQL (the API can no longer create it).
++ */
++describe('F-6 — a direct API caller cannot create a taxable sale with a missing VAT classification', () => {
++  let stack: TestStack;
++  let w: SaleWorld;
++  const br = (): string => w.a.branches[0]!;
++  const q = async <T = Record<string, unknown>>(text: string, p: unknown[] = []): Promise<T[]> =>
++    (await w.pool.query(text, p)).rows as T[];
++  const setCat = (key: string | null): Promise<unknown> =>
++    q(`UPDATE variant SET "taxCategoryKey" = $2, version = version + 1 WHERE id = $1`, [
++      w.variantId,
++      key,
++    ]);
++  const order = (
++    lines: object[] = [
++      { productId: w.productId, variantId: w.variantId, selectedUomCode: 'piece', quantity: '1' },
++    ],
++  ) =>
++    w.req(
++      'POST',
++      `/companies/${w.a.companyId}/branches/${br()}/orders`,
++      w.ownerToken,
++      { lines },
++      { 'idempotency-key': `f6-${randomUUID()}` },
++    );
++  const orderCount = async (): Promise<number> =>
++    Number(
++      (
++        await q<{ n: number }>(`SELECT count(*)::int AS n FROM "order" WHERE "tenantId" = $1`, [
++          w.a.tenantId,
++        ])
++      )[0]!.n,
++    );
++
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2, {
++      realClock: true,
++    });
++    await q(
++      `INSERT INTO tax_category (key, "nameEn", "nameAr") VALUES ('EXEMPT','Exempt','x'),('STANDARD','Standard','x') ON CONFLICT (key) DO NOTHING`,
++    );
++    await q(
++      `INSERT INTO tax_rate ("countryCode","taxCategoryKey","rateBps","effectiveFrom","effectiveTo")
++       SELECT 'AE', k, b, '2020-01-01', NULL FROM (VALUES ('EXEMPT', 0), ('STANDARD', 500)) AS t(k, b)
++       WHERE NOT EXISTS (SELECT 1 FROM tax_rate r WHERE r."countryCode" = 'AE' AND r."taxCategoryKey" = t.k)`,
++    );
++  }, 300_000);
++
++  afterAll(async () => {
++    await w?.h.close();
++    await w?.pool.end();
++    await stack?.stop();
++  });
++
++  it('the world variant is explicitly ZERO_RATED and still sells with tax 0 (a real 0 bps rate, not a missing one)', async () => {
++    await setCat('ZERO_RATED');
++    const s = await w.sale({ co: w.a, branch: br(), token: w.ownerToken });
++    expect(s.ok, JSON.stringify(s)).toBe(true);
++    const line = (
++      await q(`SELECT "taxCategoryKey", "rateBps" FROM order_line WHERE "orderId" = $1`, [
++        s.orderId,
++      ])
++    )[0];
++    expect(line).toEqual({ taxCategoryKey: 'ZERO_RATED', rateBps: 0 });
++  });
++
++  it('EXEMPT sells with tax 0; STANDARD sells with 5% — both through complete-sale', async () => {
++    for (const [cat, tax] of [
++      ['EXEMPT', 0n],
++      ['STANDARD', 50n],
++    ] as const) {
++      await setCat(cat);
++      const c = await order();
++      expect(c.status, JSON.stringify(c.body)).toBe(201);
++      const o = (c.body as { order: { id: string; version: number } }).order;
++      const total = 1000n + tax;
++      const done = await w.req(
++        'POST',
++        `/companies/${w.a.companyId}/branches/${br()}/orders/${o.id}/complete-sale`,
++        w.ownerToken,
++        { paymentIntent: 'PAY_NOW', tenders: [{ method: 'CASH', amountMinor: total.toString() }] },
++        { 'if-match': String(o.version), 'idempotency-key': `f6s-${randomUUID()}` },
++      );
++      expect(done.status, JSON.stringify(done.body)).toBe(200);
++      const inv = (
++        await q<{ tax: string }>(
++          `SELECT i."taxTotalAmountMinor"::text AS tax FROM invoice i WHERE i."orderId" = $1`,
++          [o.id],
++        )
++      )[0]!;
++      expect(inv.tax).toBe(tax.toString());
++    }
++  });
++
++  it('a variant with NO category is refused at order creation (422), no order is created, and complete-sale is unreachable', async () => {
++    await setCat(null);
++    await q(`UPDATE product SET "taxCategoryKey" = NULL WHERE id = $1`, [w.productId]);
++    const before = await orderCount();
++    const c = await order();
++    expect(c.status).toBe(422);
++    expect((c.body as { error: { code: string } }).error.code).toBe(
++      'ORDER_LINE_TAX_NOT_CONFIGURED',
++    );
++    expect(await orderCount()).toBe(before);
++    const s = await w.sale({ co: w.a, branch: br(), token: w.ownerToken });
++    expect(s).toMatchObject({ ok: false, step: 'create', code: 'ORDER_LINE_TAX_NOT_CONFIGURED' });
++  });
++
++  it('bypass attempts fail too: UPDATE of a draft order to an unclassified line; the product default is inherited', async () => {
++    await setCat('ZERO_RATED');
++    const c = await order();
++    const o = (c.body as { order: { id: string; version: number } }).order;
++    await setCat(null); // legacy variant, product still has no category
++    const upd = await w.h.app.inject({
++      method: 'PATCH',
++      url: `/v1/companies/${w.a.companyId}/branches/${br()}/orders/${o.id}`,
++      headers: { authorization: `Bearer ${w.ownerToken}`, 'if-match': String(o.version) },
++      payload: {
++        lines: [
++          {
++            productId: w.productId,
++            variantId: w.variantId,
++            selectedUomCode: 'piece',
++            quantity: '2',
++          },
++        ],
++      },
++    });
++    expect(upd.statusCode, upd.payload).toBe(422);
++    expect((upd.json() as { error: { code: string } }).error.code).toBe(
++      'ORDER_LINE_TAX_NOT_CONFIGURED',
++    );
++    // a product-level category is inherited (variant NULL) and unblocks the sale
++    await q(`UPDATE product SET "taxCategoryKey" = 'STANDARD' WHERE id = $1`, [w.productId]);
++    const ok = await order();
++    expect(ok.status, JSON.stringify(ok.body)).toBe(201);
++  });
++
++  it('INVARIANT: no order line anywhere in the database was recorded with a missing tax category', async () => {
++    const n = (
++      await q<{ n: number }>(
++        `SELECT count(*)::int AS n FROM order_line WHERE "tenantId" = $1 AND "taxCategoryKey" IS NULL`,
++        [w.a.tenantId],
++      )
++    )[0]!.n;
++    expect(n).toBe(0);
++  });
++});
+diff --git a/apps/api/src/modules/catalog/variant-tax-fail-closed.integration.test.ts b/apps/api/src/modules/catalog/variant-tax-fail-closed.integration.test.ts
+new file mode 100644
+index 0000000..861a385
+--- /dev/null
++++ b/apps/api/src/modules/catalog/variant-tax-fail-closed.integration.test.ts
+@@ -0,0 +1,310 @@
++import 'reflect-metadata';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { Test } from '@nestjs/testing';
++import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import { PLATFORM_PERMISSIONS } from '@flower/permissions';
++import pg from 'pg';
++import { AppModule } from '../../app.module.js';
++import { AllExceptionsFilter } from '../../common/errors/all-exceptions.filter.js';
++import { installRequestContext } from '../../common/context/index.js';
++import { JwtService } from '../../common/auth/jwt.service.js';
++import { SessionStore } from '../../common/auth/session-store.js';
++import type { SessionData } from '../../common/auth/session.types.js';
++
++const PLAN_V = '00000000-0000-7000-8000-000000340001';
++const PLATFORM_USER = '00000000-0000-7000-8000-000000340002';
++const MANAGE = ['catalog:view', 'catalog:manage', 'variants:manage'];
++
++/**
++ * F-6 (PROPOSED amendment, NOT approved) - a variant with no effective tax category must not be activated: the sale path would charge it
++ * 0 tax. Explicit ZERO_RATED / EXEMPT categories remain legitimate. The product default is inherited exactly as in tax resolution.
++ */
++describe('F-6 variant activation fails closed without a tax category (integration)', () => {
++  let stack: TestStack;
++  let app: NestFastifyApplication;
++  let jwt: JwtService;
++  let store: SessionStore;
++  let superTok = '';
++  let tenantA = '';
++  let ownerA = '';
++
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    await seed(stack.postgres.url);
++    process.env['DATABASE_URL'] = stack.postgres.url;
++    process.env['PLATFORM_DATABASE_URL'] = stack.postgres.url;
++    process.env['REDIS_URL'] = stack.redis.url;
++    process.env['AUTH_JWT_SECRET'] = 'integration-test-jwt-secret-0000000000';
++    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
++    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
++    app.setGlobalPrefix('v1', { exclude: ['healthz', 'readyz'] });
++    app.useGlobalFilters(new AllExceptionsFilter());
++    installRequestContext(app.getHttpAdapter().getInstance());
++    await app.init();
++    await app.getHttpAdapter().getInstance().ready();
++    jwt = app.get(JwtService);
++    store = app.get(SessionStore);
++    superTok = await mintPlatform();
++    tenantA = await provision('vat-a', 'CUSTOM');
++    await setCap(tenantA, 'strategy.stocked', true);
++    await setCap(tenantA, 'variants', true);
++    ownerA = await mintTenant('oa', tenantA, MANAGE);
++  }, 300_000);
++
++  afterAll(async () => {
++    await app?.close();
++    await stack?.stop();
++    for (const k of ['DATABASE_URL', 'PLATFORM_DATABASE_URL', 'REDIS_URL', 'AUTH_JWT_SECRET']) {
++      delete process.env[k];
++    }
++  });
++
++  function base(sessionId: string, realm: 'tenant' | 'platform'): SessionData {
++    return {
++      sessionId,
++      realm,
++      familyId: 'f',
++      tenantId: null,
++      userId: null,
++      platformUserId: null,
++      accountType: 'USER',
++      posTerminalId: null,
++      deviceId: null,
++      mfaLevel: 'NONE',
++      stepUpUntil: null,
++      createdAt: Date.now(),
++      expiresAt: Date.now() + 3_600_000,
++      revokedAt: null,
++      revokeReason: null,
++      impersonatorPlatformUserId: null,
++      access: null,
++    };
++  }
++  async function mintPlatform(): Promise<string> {
++    const s = base('plat', 'platform');
++    s.platformUserId = PLATFORM_USER;
++    s.accountType = 'PLATFORM';
++    s.mfaLevel = 'STEP_UP';
++    s.stepUpUntil = Date.now() + 600_000;
++    s.access = {
++      effectivePermissions: [...PLATFORM_PERMISSIONS],
++      companyScope: 'ALL',
++      branchScope: 'ALL',
++      perBranchOverlay: {},
++      entitledModules: [],
++      planKey: null,
++    };
++    await store.set(s);
++    return jwt.sign({ sub: PLATFORM_USER, sid: s.sessionId, aud: 'platform' });
++  }
++  async function mintTenant(id: string, forTenant: string, perms: string[]): Promise<string> {
++    const s = base(`ten-${id}`, 'tenant');
++    s.tenantId = forTenant;
++    s.userId = '00000000-0000-7000-8000-000000000001';
++    s.accountType = 'OWNER';
++    s.access = {
++      effectivePermissions: perms,
++      companyScope: 'ALL',
++      branchScope: 'ALL',
++      perBranchOverlay: {},
++      entitledModules: [],
++      planKey: null,
++    };
++    await store.set(s);
++    return jwt.sign({ sub: s.userId, sid: s.sessionId, aud: 'tenant', tid: forTenant });
++  }
++  const req = (
++    method: 'GET' | 'POST' | 'PUT',
++    url: string,
++    token: string | null,
++    body?: Record<string, unknown>,
++    headers: Record<string, string> = {},
++  ) =>
++    app.inject({
++      method,
++      url: `/v1${url}`,
++      ...(token ? { headers: { authorization: `Bearer ${token}`, ...headers } } : { headers }),
++      ...(body ? { payload: body } : {}),
++    });
++  async function provision(slug: string, businessTypeKey: string): Promise<string> {
++    const res = await req(
++      'POST',
++      '/platform/tenants',
++      superTok,
++      {
++        slug,
++        name: slug,
++        region: 'AE',
++        companyCountryCode: 'AE',
++        businessTypeKey,
++        planVersionId: PLAN_V,
++        ownerEmail: `owner@${slug}.test`,
++      },
++      { 'idempotency-key': `prov-${slug}` },
++    );
++    expect(res.statusCode, res.payload).toBe(201);
++    return (res.json() as { tenantId: string }).tenantId;
++  }
++  async function sql<T>(text: string, params: unknown[] = []): Promise<T[]> {
++    const c = new pg.Client({ connectionString: stack.postgres.url });
++    await c.connect();
++    try {
++      return (await c.query(text, params)).rows as T[];
++    } finally {
++      await c.end();
++    }
++  }
++  async function setCap(tenantId: string, key: string, enabled: boolean): Promise<void> {
++    await sql(
++      `INSERT INTO tenant_catalog_capability ("tenantId","capabilityKey",enabled,"sourceKind","updatedAt")
++       VALUES ($1,$2,$3,'MANUAL',now())
++       ON CONFLICT ("tenantId","capabilityKey") DO UPDATE SET enabled = EXCLUDED.enabled`,
++      [tenantId, key, enabled],
++    );
++  }
++  const errCode = (r: { json: () => unknown }): string =>
++    (r.json() as { error: { code: string } }).error.code;
++  let n = 0;
++  const ik = (): string => `f6-key-${++n}`;
++
++  /** a STOCKED product (ACTIVE) with its default variant (DRAFT, base UOM set): ready to activate */
++  async function readyProduct(slug: string, productTax: string | null) {
++    const cat = await req(
++      'POST',
++      '/catalog/categories',
++      ownerA,
++      { slug: `c-${slug}`, nameEn: slug },
++      { 'idempotency-key': ik() },
++    );
++    const catId = (cat.json() as { id: string }).id;
++    const p = await req(
++      'POST',
++      '/catalog/products',
++      ownerA,
++      { categoryId: catId, nameEn: slug, slug, fulfilmentStrategy: 'STOCKED' },
++      { 'idempotency-key': ik() },
++    );
++    const prod = p.json() as { id: string; version: number };
++    let pv = prod.version;
++    if (productTax !== null) {
++      const t = await req(
++        'PUT',
++        `/catalog/products/${prod.id}/tax-category`,
++        ownerA,
++        { taxCategoryKey: productTax },
++        { 'if-match': `"${pv}"` },
++      );
++      expect(t.statusCode, t.payload).toBe(200);
++      pv = (t.json() as { version: number }).version;
++    }
++    const act = await req('POST', `/catalog/products/${prod.id}/activate`, ownerA, undefined, {
++      'idempotency-key': ik(),
++      'if-match': `"${pv}"`,
++    });
++    expect(act.statusCode, act.payload).toBe(200);
++    const vs = (await req('GET', `/catalog/products/${prod.id}/variants`, ownerA)).json() as {
++      id: string;
++    }[];
++    const vid = vs[0]!.id;
++    const cur = (await req('GET', `/catalog/variants/${vid}`, ownerA)).json() as {
++      version: number;
++    };
++    const uom = await req(
++      'PUT',
++      `/catalog/variants/${vid}/base-uom`,
++      ownerA,
++      { baseUomCode: 'piece' },
++      { 'if-match': `"${cur.version}"` },
++    );
++    expect(uom.statusCode, uom.payload).toBe(200);
++    return { productId: prod.id, variantId: vid };
++  }
++  const versionOf = async (vid: string): Promise<number> =>
++    ((await req('GET', `/catalog/variants/${vid}`, ownerA)).json() as { version: number }).version;
++  const activate = async (vid: string) =>
++    req('POST', `/catalog/variants/${vid}/activate`, ownerA, undefined, {
++      'idempotency-key': ik(),
++      'if-match': `"${await versionOf(vid)}"`,
++    });
++
++  it('refuses to activate a variant with no variant or product tax category: 409, no state change, no audit row', async () => {
++    const { variantId } = await readyProduct('no-cat', null);
++    const before = await versionOf(variantId);
++    const r = await activate(variantId);
++    expect(r.statusCode, r.payload).toBe(409);
++    expect(errCode(r)).toBe('VARIANT_TAX_CATEGORY_REQUIRED');
++    expect(await versionOf(variantId)).toBe(before);
++    const audit = await sql<{ n: string }>(
++      `SELECT count(*)::int AS n FROM audit_log WHERE "resourceId" = $1 AND action = 'catalog.variant_status_changed'`,
++      [variantId],
++    );
++    expect(Number(audit[0]!.n)).toBe(0);
++  });
++
++  it('a product-level category is inherited: the variant then activates', async () => {
++    const { variantId } = await readyProduct('prod-cat', 'STANDARD');
++    const r = await activate(variantId);
++    expect(r.statusCode, r.payload).toBe(200);
++  });
++
++  it('a variant-level category alone is enough', async () => {
++    const { variantId } = await readyProduct('var-cat', null);
++    const v = await versionOf(variantId);
++    const t = await req(
++      'PUT',
++      `/catalog/variants/${variantId}/tax-category`,
++      ownerA,
++      { taxCategoryKey: 'STANDARD' },
++      { 'if-match': `"${v}"` },
++    );
++    expect(t.statusCode, t.payload).toBe(200);
++    const r = await activate(variantId);
++    expect(r.statusCode, r.payload).toBe(200);
++  });
++
++  it.each(['ZERO_RATED', 'EXEMPT', 'REDUCED'])(
++    'an explicit %s category is a legitimate classification and activates',
++    async (key) => {
++      const { variantId } = await readyProduct(`legit-${key.toLowerCase().replace('_', '-')}`, key);
++      const r = await activate(variantId);
++      expect(r.statusCode, r.payload).toBe(200);
++    },
++  );
++});
++
++async function seed(url: string): Promise<void> {
++  const c = new pg.Client({ connectionString: url });
++  await c.connect();
++  try {
++    await c.query(`
++      INSERT INTO plan (id, key, name, "updatedAt")
++      VALUES ('00000000-0000-7000-8000-000000340000', 'starter', 'Starter', now());
++      INSERT INTO plan_version (id, "planId", version, status, "updatedAt")
++      VALUES ('${PLAN_V}', '00000000-0000-7000-8000-000000340000', 1, 'PUBLISHED', now());
++      INSERT INTO limit_default ("planVersionId", "limitKey", value)
++      VALUES ('${PLAN_V}', 'max_branches', 5), ('${PLAN_V}', 'max_sessions_per_user', 80),
++             ('${PLAN_V}', 'max_users', 80), ('${PLAN_V}', 'max_companies', 5);
++      INSERT INTO platform_user (id, email, name, "updatedAt")
++      VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
++      INSERT INTO permission_registry (key, realm, "groupKey", description, "addedInPhase")
++      VALUES ('catalog:view','TENANT','catalog','v',3),('catalog:manage','TENANT','catalog','v',3),
++             ('variants:manage','TENANT','catalog','v',3),('users:view','TENANT','admin','v',1),
++             ('platform:tenants:view','PLATFORM','platform','v',1)
++      ON CONFLICT (key) DO NOTHING;
++      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'x', 'x');
++      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
++      VALUES ('AE', 'UAE', 'x', 'gcc', 'AED', 'SAT_SUN', true, now());
++      INSERT INTO tax_category (key, "nameEn", "nameAr")
++      VALUES ('STANDARD','Standard','x'),('ZERO_RATED','Zero rated','x'),('EXEMPT','Exempt','x'),('REDUCED','Reduced','x')
++      ON CONFLICT (key) DO NOTHING;
++      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
++      VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
++      INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
++      VALUES ('CUSTOM','strategy.stocked',true,now());
++    `);
++  } finally {
++    await c.end();
++  }
++}

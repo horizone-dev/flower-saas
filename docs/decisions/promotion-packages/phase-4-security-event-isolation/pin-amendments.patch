@@ -1,0 +1,185 @@
+# SE1 PIN AMENDMENTS — STACKED after the D / Z1 / E1 promotion pin patch (phase-4-d-z1-e1/pin-amendments.patch) AND the AL1 pin patch (phase-4-audit-log-immutability/pin-amendments.patch). UNAPPLIED.
+# Authorises the SE1 candidate migration 20261205120400_phase_4_security_event_isolation (sha256 8a2f6a8671ce4efeece41dc0c83190cee30111a7fcd313aa5d03746d88e4ab50) in frozen-baseline.ts and moves every "newest migration" pin to it. NO schema change, NO model, NO frozen contract edited.
+# Apply order at promotion: D/Z1/E1 migrations + patch -> AL1 candidate + patch -> THIS candidate + patch. Regenerate with the SE1 package script if the draft changes.
+--- a/apps/api/src/verification/cash-count-gl.structural.test.ts
++++ b/apps/api/src/verification/cash-count-gl.structural.test.ts
+@@ -70,7 +70,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+     expect(
+       code(`${MOD}/cash-register.controller.ts`).match(/@(Get|Post|Put|Patch|Delete)\(/g),
+     ).toHaveLength(5);
+--- a/apps/api/src/verification/cash-in-out.structural.test.ts
++++ b/apps/api/src/verification/cash-in-out.structural.test.ts
+@@ -66,7 +66,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+   });
+ 
+   it('the repository refuses with no policy BEFORE any database access', () => {
+--- a/apps/api/src/verification/cash-register.structural.test.ts
++++ b/apps/api/src/verification/cash-register.structural.test.ts
+@@ -189,7 +189,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((x) =>
+       /^\d{14}_/.test(x),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+   });
+ });
+ 
+@@ -314,12 +314,13 @@
+       );
+     }
+     // no role template, service or controller outside the permission vocabulary and this module grants a cash_register key
+-    // the only migrations after the B5.3 one are the three PROMOTED steps (D, Z1, E1) and the AL1 audit_log hardening — none names a cash_register key (checked above)
++    // the only migrations after the B5.3 one are the three PROMOTED steps (D, Z1, E1), the AL1 audit_log hardening and the SE1 security_event isolation — none names a cash_register key (checked above)
+     expect(migs.filter((x) => x.slice(0, 14) > '20261204120000')).toEqual([
+       '20261205120000_phase_4_s5_register_session_count',
+       '20261205120100_phase_4_s5_z_report_storage',
+       '20261205120200_phase_4_7_expenses_and_other_income',
+       '20261205120300_phase_4_audit_log_immutability',
++      '20261205120400_phase_4_security_event_isolation',
+     ]);
+   });
+ });
+--- a/apps/api/src/verification/cash-sales-e5.structural.test.ts
++++ b/apps/api/src/verification/cash-sales-e5.structural.test.ts
+@@ -90,7 +90,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+   });
+ });
+ 
+--- a/apps/api/src/verification/device-guard.structural.test.ts
++++ b/apps/api/src/verification/device-guard.structural.test.ts
+@@ -267,7 +267,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+     for (const f of readdirSync(join(ROOT, MOD)).filter(
+       (x) => x.endsWith('.ts') && !/\.test\.ts$/.test(x),
+     )) {
+--- a/apps/api/src/verification/device-lifecycle.structural.test.ts
++++ b/apps/api/src/verification/device-lifecycle.structural.test.ts
+@@ -247,7 +247,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+     const perms = c.match(/@RequirePermission\('([^']+)'\)/g)!;
+     for (const p of perms) expect(p).toMatch(/devices:(activate|manage)/);
+   });
+--- a/apps/api/src/verification/device-operation-proof.structural.test.ts
++++ b/apps/api/src/verification/device-operation-proof.structural.test.ts
+@@ -214,7 +214,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+     expect(read('apps/api/src/common/audit/actions.ts')).toMatch(
+       /'device\.operation_authorised': \{ resourceType: 'pos_device', security: false \}/,
+     );
+--- a/apps/api/src/verification/device-session-binding.structural.test.ts
++++ b/apps/api/src/verification/device-session-binding.structural.test.ts
+@@ -66,7 +66,7 @@
+       /^\d{14}_/.test(d),
+     );
+     const newest = dirs.sort().at(-1)!;
+-    expect(newest).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(newest).toBe('20261205120400_phase_4_security_event_isolation');
+   });
+ 
+   it('adds no permission, role grant or permission-registry change (the S0b baseline is untouched by this stage)', () => {
+--- a/apps/api/src/verification/expense-income-model.structural.test.ts
++++ b/apps/api/src/verification/expense-income-model.structural.test.ts
+@@ -183,7 +183,7 @@
+         /(CREATE|ALTER) TABLE\s+"?(expense|expense_event|expense_category|other_income)"?/i,
+       );
+     }
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+   });
+   it('it creates exactly the four tables and alters NO existing table', () => {
+     expect([...exe.matchAll(/CREATE TABLE "(\w+)"/g)].map((m) => m[1]).sort()).toEqual([
+--- a/apps/api/src/verification/frozen-baseline.structural.test.ts
++++ b/apps/api/src/verification/frozen-baseline.structural.test.ts
+@@ -72,6 +72,7 @@
+       '20261205120100_phase_4_s5_z_report_storage',
+       '20261205120200_phase_4_7_expenses_and_other_income',
+       '20261205120300_phase_4_audit_log_immutability',
++      '20261205120400_phase_4_security_event_isolation',
+     ]);
+     expect(AUTHORIZED_ADDITIONS.models.map((m) => m.name)).toEqual([
+       'CashRegister',
+--- a/apps/api/src/verification/frozen-baseline.ts
++++ b/apps/api/src/verification/frozen-baseline.ts
+@@ -133,6 +133,11 @@
+       name: '20261205120300_phase_4_audit_log_immutability',
+       sha256: '93c748120a5fd9b764808095b014b7337047d3b10be5a2cb7ed73c5451703dcd',
+     }),
++    // Phase 4 SECURITY_EVENT ISOLATION (package phase-4-security-event-isolation, approvals recorded in its PACKAGE.json): security_invoker + the platform-only ACL on the security_event view. NO schema change, NO model.
++    Object.freeze({
++      name: '20261205120400_phase_4_security_event_isolation',
++      sha256: '8a2f6a8671ce4efeece41dc0c83190cee30111a7fcd313aa5d03746d88e4ab50',
++    }),
+   ] as AuthorizedMigration[]),
+   models: Object.freeze([
+     Object.freeze({
+--- a/apps/api/src/verification/register-provisioning.structural.test.ts
++++ b/apps/api/src/verification/register-provisioning.structural.test.ts
+@@ -57,7 +57,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+   });
+ 
+   it('the pure decisions import nothing and do no I/O, clock, context or posting', () => {
+--- a/apps/api/src/verification/x-report.structural.test.ts
++++ b/apps/api/src/verification/x-report.structural.test.ts
+@@ -63,7 +63,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+     for (const d of dirs) {
+       // the permission-family migration NAMES the x_report family (hard-disabled); only a TABLE / index / log of that name would be a violation
+       expect(read(`packages/db/prisma/migrations/${d}/migration.sql`), d).not.toMatch(
+--- a/apps/api/src/verification/z-report.structural.test.ts
++++ b/apps/api/src/verification/z-report.structural.test.ts
+@@ -61,7 +61,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+     // PROMOTED (package phase-4-d-z1-e1): z_report is created ONLY by the promoted Z1 step; post_close_adjustment still exists nowhere
+     for (const d of dirs.filter((x) => x !== '20261205120100_phase_4_s5_z_report_storage')) {
+       expect(read(`packages/db/prisma/migrations/${d}/migration.sql`), d).not.toMatch(
+--- a/apps/api/src/verification/z-sales-facts.structural.test.ts
++++ b/apps/api/src/verification/z-sales-facts.structural.test.ts
+@@ -65,7 +65,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261205120300_phase_4_audit_log_immutability');
++    expect(dirs.sort().at(-1)).toBe('20261205120400_phase_4_security_event_isolation');
+     expect(read('apps/api/src/common/audit/actions.ts')).not.toMatch(/z_adjust|sales_facts/);
+   });
+ });

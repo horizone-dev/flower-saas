@@ -1,0 +1,732 @@
+--- a/apps/api/src/verification/cash-count-gl.structural.test.ts
++++ b/apps/api/src/verification/cash-count-gl.structural.test.ts
+@@ -70,13 +70,14 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+     expect(
+       code(`${MOD}/cash-register.controller.ts`).match(/@(Get|Post|Put|Patch|Delete)\(/g),
+     ).toHaveLength(5);
+-    expect(read('packages/db/prisma/schema.prisma')).not.toMatch(
+-      /register_session_count|RegisterSessionCount/,
+-    );
++    // PROMOTED (package phase-4-d-z1-e1): the model exists exactly once, authorised in frozen-baseline.ts
++    expect(
++      read('packages/db/prisma/schema.prisma').match(/^model RegisterSessionCount \{/gm),
++    ).toHaveLength(1);
+   });
+ 
+   it('the count record keeps the rules the database draft will enforce: exact subtotals through Money, expected from the ledger rule, variance = counted − expected, supervisor ≠ counter, close only on the LATEST, FRESH, balanced CLOSE count', () => {
+@@ -112,6 +113,9 @@
+     expect(drafts.filter((d) => /^DRAFT-.*\.sql$/.test(d)).length).toBeGreaterThanOrEqual(4);
+     expect(drafts).toContain('DRAFT-D-register-session-count.sql');
+     const migs = readdirSync(join(ROOT, 'packages/db/prisma/migrations'));
+-    expect(migs.some((m) => /register_session_count|session_count/.test(m))).toBe(false);
++    // PROMOTED: exactly one migration creates it — the promoted D step
++    expect(migs.filter((m) => /register_session_count|session_count/.test(m))).toEqual([
++      '20261205120000_phase_4_s5_register_session_count',
++    ]);
+   });
+ });
+--- a/apps/api/src/verification/cash-in-out.structural.test.ts
++++ b/apps/api/src/verification/cash-in-out.structural.test.ts
+@@ -66,7 +66,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+   });
+ 
+   it('the repository refuses with no policy BEFORE any database access', () => {
+--- a/apps/api/src/verification/cash-register.structural.test.ts
++++ b/apps/api/src/verification/cash-register.structural.test.ts
+@@ -189,7 +189,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((x) =>
+       /^\d{14}_/.test(x),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+   });
+ });
+ 
+@@ -314,6 +314,11 @@
+       );
+     }
+     // no role template, service or controller outside the permission vocabulary and this module grants a cash_register key
+-    expect(migs.filter((x) => x.slice(0, 14) > '20261204120000')).toEqual([]);
++    // the only migrations after the B5.3 one are the three PROMOTED steps (D, Z1, E1) — none names a cash_register key (checked above)
++    expect(migs.filter((x) => x.slice(0, 14) > '20261204120000')).toEqual([
++      '20261205120000_phase_4_s5_register_session_count',
++      '20261205120100_phase_4_s5_z_report_storage',
++      '20261205120200_phase_4_7_expenses_and_other_income',
++    ]);
+   });
+ });
+--- a/apps/api/src/verification/cash-sales-e5.structural.test.ts
++++ b/apps/api/src/verification/cash-sales-e5.structural.test.ts
+@@ -90,7 +90,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+   });
+ });
+ 
+--- a/apps/api/src/verification/device-guard.structural.test.ts
++++ b/apps/api/src/verification/device-guard.structural.test.ts
+@@ -267,7 +267,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+     for (const f of readdirSync(join(ROOT, MOD)).filter(
+       (x) => x.endsWith('.ts') && !/\.test\.ts$/.test(x),
+     )) {
+--- a/apps/api/src/verification/device-lifecycle.structural.test.ts
++++ b/apps/api/src/verification/device-lifecycle.structural.test.ts
+@@ -247,7 +247,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+     const perms = c.match(/@RequirePermission\('([^']+)'\)/g)!;
+     for (const p of perms) expect(p).toMatch(/devices:(activate|manage)/);
+   });
+--- a/apps/api/src/verification/device-operation-proof.structural.test.ts
++++ b/apps/api/src/verification/device-operation-proof.structural.test.ts
+@@ -214,7 +214,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+     expect(read('apps/api/src/common/audit/actions.ts')).toMatch(
+       /'device\.operation_authorised': \{ resourceType: 'pos_device', security: false \}/,
+     );
+--- a/apps/api/src/verification/device-session-binding.structural.test.ts
++++ b/apps/api/src/verification/device-session-binding.structural.test.ts
+@@ -66,7 +66,7 @@
+       /^\d{14}_/.test(d),
+     );
+     const newest = dirs.sort().at(-1)!;
+-    expect(newest).toBe('20261204120000_phase_4_device_permissions');
++    expect(newest).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+   });
+ 
+   it('adds no permission, role grant or permission-registry change (the S0b baseline is untouched by this stage)', () => {
+--- a/apps/api/src/verification/expense-income-model.structural.test.ts
++++ b/apps/api/src/verification/expense-income-model.structural.test.ts
+@@ -80,14 +80,19 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    for (const d of dirs) {
++    // PROMOTED (package phase-4-d-z1-e1): the tables exist, created ONLY by the promoted E1 step
++    for (const d of dirs.filter(
++      (x) => x !== '20261205120200_phase_4_7_expenses_and_other_income',
++    )) {
+       expect(read(`packages/db/prisma/migrations/${d}/migration.sql`), d).not.toMatch(
+         /(CREATE|ALTER) TABLE\s+"?(expense|expense_category|other_income)"?/i,
+       );
+     }
+-    expect(read('packages/db/prisma/schema.prisma')).not.toMatch(
+-      /model +(Expense|ExpenseCategory|OtherIncome)\b/,
+-    );
++    expect(
++      read('packages/db/prisma/schema.prisma').match(
++        /^model (Expense|ExpenseCategory|ExpenseEvent|OtherIncome) \{/gm,
++      ),
++    ).toHaveLength(4);
+     expect(read('apps/api/src/common/audit/actions.ts')).not.toMatch(/'expense\.|'income\./);
+   });
+ });
+@@ -166,12 +171,15 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    for (const d of dirs) {
++    // PROMOTED: the draft file is unchanged, and the four tables are created ONLY by the promoted E1 step (the newest migration)
++    for (const d of dirs.filter(
++      (x) => x !== '20261205120200_phase_4_7_expenses_and_other_income',
++    )) {
+       expect(read(`packages/db/prisma/migrations/${d}/migration.sql`), d).not.toMatch(
+         /(CREATE|ALTER) TABLE\s+"?(expense|expense_event|expense_category|other_income)"?/i,
+       );
+     }
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+   });
+   it('it creates exactly the four tables and alters NO existing table', () => {
+     expect([...exe.matchAll(/CREATE TABLE "(\w+)"/g)].map((m) => m[1]).sort()).toEqual([
+@@ -273,24 +281,25 @@
+     expect(body).not.toMatch(/\b(journal|cashMovement|postedAt|postingStatus|glAccountId)\w*/i);
+     expect(/^model ExpenseCategory \{[\s\S]*?^\}/m.exec(body)?.[0] ?? '').not.toMatch(/account/i);
+     // the real schema and the real drift fixtures do not contain it
+-    expect(read('packages/db/prisma/schema.prisma')).not.toMatch(
+-      /model +(Expense|ExpenseCategory|ExpenseEvent|OtherIncome)\b/,
+-    );
++    // PROMOTED: the models are appended to the real schema (exactly once each, authorised in frozen-baseline.ts) and the drift fixtures ARE the package's amended ones
++    expect(
++      read('packages/db/prisma/schema.prisma').match(
++        /^model (Expense|ExpenseCategory|ExpenseEvent|OtherIncome) \{/gm,
++      ),
++    ).toHaveLength(4);
+     const amendment = JSON.parse(
+-      read('docs/decisions/proposed-migrations/DRAFT-E1-schema-drift-amendment.json'),
++      read('docs/decisions/promotion-packages/phase-4-d-z1-e1/drift-amendment.json'),
+     ) as {
+-      baselineSha256Before: string;
++      baselineSha256After: string;
+       baselineStatementCountAfter: number;
+-      baselineStatementCountBefore: number;
+       openFindingsAdded: number;
+     };
+     const baseline = JSON.parse(read('packages/db/test/fixtures/schema-drift-baseline.json')) as {
+       sha256: string;
+       statementCount: number;
+     };
+-    expect(amendment.baselineSha256Before).toBe(baseline.sha256); // the amendment is a DRAFT on top of the unchanged baseline
+-    expect(amendment.baselineStatementCountBefore).toBe(baseline.statementCount);
+-    expect(amendment.baselineStatementCountAfter).toBe(baseline.statementCount + 18);
++    expect(baseline.sha256).toBe(amendment.baselineSha256After);
++    expect(baseline.statementCount).toBe(amendment.baselineStatementCountAfter);
+     expect(amendment.openFindingsAdded).toBe(0);
+   });
+ 
+--- a/apps/api/src/verification/frozen-baseline.structural.test.ts
++++ b/apps/api/src/verification/frozen-baseline.structural.test.ts
+@@ -68,6 +68,9 @@
+       '20261202120000_phase_4_register_session_integrity',
+       '20261203120000_phase_4_b5_pos_device_foundation',
+       '20261204120000_phase_4_device_permissions',
++      '20261205120000_phase_4_s5_register_session_count',
++      '20261205120100_phase_4_s5_z_report_storage',
++      '20261205120200_phase_4_7_expenses_and_other_income',
+     ]);
+     expect(AUTHORIZED_ADDITIONS.models.map((m) => m.name)).toEqual([
+       'CashRegister',
+@@ -76,6 +79,12 @@
+       'PosDevice',
+       'DeviceActivationCode',
+       'DeviceProofClaim',
++      'RegisterSessionCount',
++      'ZReport',
++      'ExpenseCategory',
++      'Expense',
++      'ExpenseEvent',
++      'OtherIncome',
+     ]);
+     for (const migration of AUTHORIZED_ADDITIONS.migrations) {
+       const sql = readFileSync(join(MIGRATIONS, migration.name, 'migration.sql'), 'utf8');
+--- a/apps/api/src/verification/frozen-baseline.ts
++++ b/apps/api/src/verification/frozen-baseline.ts
+@@ -114,6 +114,20 @@
+       name: '20261204120000_phase_4_device_permissions',
+       sha256: '3d663257159690f0246efec984f01640b6a3f7ea400de2c68dad22c98ba0f974',
+     }),
++    // Phase 4 D + Z1 + E1 PROMOTION (package docs/decisions/promotion-packages/phase-4-d-z1-e1, approvals recorded in PACKAGE.json): the register-session count (with the D
++    // grant hardening + TRUNCATE guard), the Z-Report storage and the expenses / other-income tables. Each is pinned by its reviewed content hash; promoted AS A WHOLE, in this order.
++    Object.freeze({
++      name: '20261205120000_phase_4_s5_register_session_count',
++      sha256: '2bae4261acb8f0212bc3cf3beb8f2052fd3ac7ff79d543edd13b41ece570a496',
++    }),
++    Object.freeze({
++      name: '20261205120100_phase_4_s5_z_report_storage',
++      sha256: 'fa249334c86996256ac20f4e43d2e786f17036aa58e4f034a588b12a571955e9',
++    }),
++    Object.freeze({
++      name: '20261205120200_phase_4_7_expenses_and_other_income',
++      sha256: '2be18832828b8787b1414b49a4f6fe6176c0891e90622935255f6aa4b412cb88',
++    }),
+   ] as AuthorizedMigration[]),
+   models: Object.freeze([
+     Object.freeze({
+@@ -141,6 +155,31 @@
+       name: 'DeviceProofClaim',
+       sha256: '35ab68ff75bae6242da5cb17f370e1b6e17d24580cdb9efdf1dbbf51f22163d0',
+     }),
++    // Phase 4 D + Z1 + E1 promotion — scalar-only models (the composite foreign keys live in the migration SQL): no back-reference on any frozen model.
++    Object.freeze({
++      name: 'RegisterSessionCount',
++      sha256: '2f8b46f17283d839253f055ca224700f0822075c73c8dffb271b9dfa8f43a7b8',
++    }),
++    Object.freeze({
++      name: 'ZReport',
++      sha256: 'edcfd24058b64ed4ea8b9f4d95a4aad7f0619cb0993e68b925fd2410f3c9413b',
++    }),
++    Object.freeze({
++      name: 'ExpenseCategory',
++      sha256: '8021ccd9e04e69c814880c48ddeaeb334f7e071c45a791ed383a8444f4692af8',
++    }),
++    Object.freeze({
++      name: 'Expense',
++      sha256: '22a5341ed532522754a44703f1a59aedaebdc5c68e48edb7cf7b2c84882c4b29',
++    }),
++    Object.freeze({
++      name: 'ExpenseEvent',
++      sha256: '762ea2539eaff1d1aaf60c326f858b5042fb8c1fa2e9bbf14c5889ec17481a7e',
++    }),
++    Object.freeze({
++      name: 'OtherIncome',
++      sha256: '7af95ec1cc5bae97a3b7d663434d27e662064612df8bbf7b9298716d40091bcd',
++    }),
+   ] as AuthorizedModel[]),
+ });
+ 
+--- a/apps/api/src/verification/register-provisioning.structural.test.ts
++++ b/apps/api/src/verification/register-provisioning.structural.test.ts
+@@ -57,7 +57,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+   });
+ 
+   it('the pure decisions import nothing and do no I/O, clock, context or posting', () => {
+--- a/apps/api/src/verification/x-report.structural.test.ts
++++ b/apps/api/src/verification/x-report.structural.test.ts
+@@ -63,7 +63,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+     for (const d of dirs) {
+       // the permission-family migration NAMES the x_report family (hard-disabled); only a TABLE / index / log of that name would be a violation
+       expect(read(`packages/db/prisma/migrations/${d}/migration.sql`), d).not.toMatch(
+--- a/apps/api/src/verification/z-report.structural.test.ts
++++ b/apps/api/src/verification/z-report.structural.test.ts
+@@ -38,7 +38,7 @@
+         (f) =>
+           !/modules[\\/]cash-register[\\/](z-report|z-adjustment|z-source-verifier|z-report-store)\.ts$/.test(
+             f,
+-          ),
++          ) && !/verification[\\/]frozen-baseline\.ts$/.test(f), // the promoted model is authorised (named) there
+       )
+       .filter((f) =>
+         /z-report|ZReport|buildZReport|finalizeZReport|verifyZChain|Z_REPORT_DOMAIN/.test(
+@@ -61,13 +61,19 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
+-    for (const d of dirs) {
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
++    // PROMOTED (package phase-4-d-z1-e1): z_report is created ONLY by the promoted Z1 step; post_close_adjustment still exists nowhere
++    for (const d of dirs.filter((x) => x !== '20261205120100_phase_4_s5_z_report_storage')) {
+       expect(read(`packages/db/prisma/migrations/${d}/migration.sql`), d).not.toMatch(
+         /(CREATE TABLE|ALTER TABLE|CREATE INDEX)[^;]*z_report|post_close_adjustment/i,
+       );
+     }
+-    expect(read('packages/db/prisma/schema.prisma')).not.toMatch(/model +ZReport|z_report/);
++    expect(
++      read(
++        'packages/db/prisma/migrations/20261205120100_phase_4_s5_z_report_storage/migration.sql',
++      ),
++    ).not.toMatch(/post_close_adjustment/i);
++    expect(read('packages/db/prisma/schema.prisma').match(/^model ZReport \{/gm)).toHaveLength(1);
+   });
+ 
+   it('no audit action and no permission key was added for it', () => {
+--- a/apps/api/src/verification/z-sales-facts.structural.test.ts
++++ b/apps/api/src/verification/z-sales-facts.structural.test.ts
+@@ -65,7 +65,7 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
++    expect(dirs.sort().at(-1)).toBe('20261205120200_phase_4_7_expenses_and_other_income');
+     expect(read('apps/api/src/common/audit/actions.ts')).not.toMatch(/z_adjust|sales_facts/);
+   });
+ });
+@@ -310,12 +310,13 @@
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+     );
+-    for (const d of dirs) {
++    // PROMOTED: only the promoted Z1 step creates it
++    for (const d of dirs.filter((x) => x !== '20261205120100_phase_4_s5_z_report_storage')) {
+       expect(read(`packages/db/prisma/migrations/${d}/migration.sql`), d).not.toMatch(
+         /(CREATE|ALTER|DROP)s+(TABLE|TRIGGER|FUNCTION)[^;]*z_report/i,
+       );
+     }
+-    expect(read('packages/db/prisma/schema.prisma')).not.toMatch(/model +ZReport|"?z_report"?/);
++    expect(read('packages/db/prisma/schema.prisma').match(/^model ZReport \{/gm)).toHaveLength(1);
+   });
+   it('the draft states every guarantee it claims: gapless under the register lock, hash link, uniqueness, append-only, deferred atomic close, replaced close guard, variance rule, overlap, RLS', () => {
+     for (const needle of [
+--- a/packages/db/test/fixtures/schema-drift-baseline.json
++++ b/packages/db/test/fixtures/schema-drift-baseline.json
+@@ -1,8 +1,8 @@
+ {
+   "description": "Reviewed baseline of the differences between schema.prisma and the database built by the real migrations. The frozen Phase 3 portion is grandfathered; Phase 4 tables may differ only by DropForeignKey (rule R2). Regenerate ONLY in a reviewed diff: UPDATE_SCHEMA_DRIFT_BASELINE=1 pnpm --filter @flower/db exec vitest run test/schema-drift.integration.test.ts (refused when CI is set).",
+   "prismaVersion": "7.10.0",
+-  "statementCount": 227,
+-  "sha256": "985aac49dd310e28776e2f7e53dfdb882a76bf87b468953dd85bec36f7e72c17",
++  "statementCount": 254,
++  "sha256": "708b19ab6e7e38d2a3caa51b474295074980fa45ec850c041ea491855dfffd7b",
+   "statements": [
+     {
+       "kind": "RenameIndex",
+@@ -426,6 +426,54 @@
+     },
+     {
+       "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_approver_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_branch_scope_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_category_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_company_currency_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_creator_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_currency_pair_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_tenantId_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_terminal_scope_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_category\" DROP CONSTRAINT \"expense_category_tenantId_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_actor_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_expense_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_tenantId_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
+       "sql": "ALTER TABLE \"holiday\" DROP CONSTRAINT \"holiday_countryCode_fkey\";"
+     },
+     {
+@@ -566,6 +614,30 @@
+     },
+     {
+       "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_account_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_branch_scope_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_company_currency_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_creator_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_currency_pair_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_tenantId_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
+       "sql": "ALTER TABLE \"payment\" DROP CONSTRAINT \"payment_branch_tenant_company_fkey\";"
+     },
+     {
+@@ -734,6 +806,22 @@
+     },
+     {
+       "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_counter_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_session_scope_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_supervisor_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_tenantId_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
+       "sql": "ALTER TABLE \"settlement_application\" DROP CONSTRAINT \"settlement_application_batch_tenant_company_branch_fkey\";"
+     },
+     {
+@@ -861,6 +949,26 @@
+       "sql": "ALTER TABLE \"variant_option_value\" DROP CONSTRAINT \"variant_option_value_tenant_product_variant_fkey\";"
+     },
+     {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_approver_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_counter_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_creator_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_session_scope_fkey\";"
++    },
++    {
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_tenantId_fkey\";"
++    },
++    {
+       "kind": "CreateIndex",
+       "sql": "CREATE INDEX \"payment_attempt_providerCredentialId_providerReference_idx\" ON \"payment_attempt\"(\"providerCredentialId\", \"providerReference\");"
+     },
+--- a/packages/db/test/fixtures/schema-drift-review.json
++++ b/packages/db/test/fixtures/schema-drift-review.json
+@@ -1,16 +1,16 @@
+ {
+   "description": "Per-statement review of the 218 grandfathered schema-drift statements (schema-drift-baseline.json), classified from the REAL migrated database. Every baseline statement has exactly one entry here; a new or changed baseline statement fails the gate until it is classified too. NEEDS_OWNER_REVIEW entries are open findings (frozen Phase 3 — any fix is a separately approved migration).",
+-  "baselineSha256": "985aac49dd310e28776e2f7e53dfdb882a76bf87b468953dd85bec36f7e72c17",
++  "baselineSha256": "708b19ab6e7e38d2a3caa51b474295074980fa45ec850c041ea491855dfffd7b",
+   "counts": {
+-    "total": 227,
++    "total": 254,
+     "byStatus": {
+       "COSMETIC": 36,
+-      "BY_DESIGN": 188,
++      "BY_DESIGN": 215,
+       "NEEDS_OWNER_REVIEW": 3
+     },
+     "byClass": {
+       "RENAME_ONLY": 22,
+-      "COMPOSITE_FK_IN_MIGRATION_ONLY": 181,
++      "COMPOSITE_FK_IN_MIGRATION_ONLY": 208,
+       "SCHEMA_FK_EXISTS_WITH_DIFFERENT_ACTION": 3,
+       "SCHEMA_FK_SUBSUMED_BY_WIDER_COMPOSITE_FK": 3,
+       "SCHEMA_FK_ABSENT_IN_DB": 2,
+@@ -1636,6 +1636,195 @@
+       "class": "DB_INDEX_AHEAD_OF_SCHEMA",
+       "note": "a b-tree / unique index the database has and the schema does not declare",
+       "status": "COSMETIC"
++    },
++    {
++      "id": "e85634e728aba0cc",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_approver_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "3e58a4ce41c93aec",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_branch_scope_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "751c1c1f6abcdd58",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_category_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "6ed12d9b8775e05d",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_company_currency_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "15a8c2eed7981a9f",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_creator_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "c74526a7241ed53f",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_currency_pair_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "195fe32d43cebdd5",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_tenantId_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "eade50bfdd4f7865",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_terminal_scope_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "3453872cd3af8746",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_category\" DROP CONSTRAINT \"expense_category_tenantId_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "93ec741ff2090245",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_actor_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "2b33c36082a479c0",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_expense_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "00545f0312b6188c",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_tenantId_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "2d2ee1771953baa8",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_account_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "d361c3fc08249874",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_branch_scope_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "65300bec53d8567f",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_company_currency_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "3222ab241b3d4c45",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_creator_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "64bfd967f5defa54",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_currency_pair_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "414e9bf900e3c173",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_tenantId_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "e9f2015cd482f9fa",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_counter_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "c60d8a67e5f05132",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_session_scope_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "7052c83861ff7cbe",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_supervisor_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "a6bd16843ba7d34b",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_tenantId_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "0e550df4af52f52c",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_approver_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "4da3342f2ea309af",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_counter_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "7120eee328986a1d",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_creator_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "9753dcc6482bddd1",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_session_scope_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
++    },
++    {
++      "id": "f8a3e44c2a041eb8",
++      "kind": "DropForeignKey",
++      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_tenantId_fkey\";",
++      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
++      "status": "BY_DESIGN"
+     }
+   ]
+ }

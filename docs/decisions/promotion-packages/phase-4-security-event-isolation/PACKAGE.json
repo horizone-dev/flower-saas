@@ -1,0 +1,77 @@
+{
+  "package": "phase-4-security-event-isolation",
+  "status": "PREPARED_NOT_APPLIED",
+  "newestExistingMigration": "20261204120000_phase_4_device_permissions",
+  "source": {
+    "path": "docs/decisions/proposed-migrations/DRAFT-SE1-security-event-isolation.sql",
+    "sha256": "633b4c7eddde57c37bf57758e3d1934d6d337a16343f843890e4498455ed922e"
+  },
+  "candidate": {
+    "name": "20261205120400_phase_4_security_event_isolation",
+    "file": "migrations/20261205120400_phase_4_security_event_isolation/migration.sql",
+    "sha256": "8a2f6a8671ce4efeece41dc0c83190cee30111a7fcd313aa5d03746d88e4ab50"
+  },
+  "rollback": {
+    "file": "rollback.sql",
+    "sha256": "672c5581a563b313675673ad0ff263c608b39f4ba67a129c28fd61105c3b4779"
+  },
+  "pinAmendments": {
+    "status": "GENERATED",
+    "patch": "pin-amendments.patch",
+    "sha256": "bd2285eed09da9df30d4b5cb66ee3074c3692a0f5917182bc8182cc1931394ff",
+    "generator": "make-pin-amendments.mjs",
+    "stackedAfter": [
+      "docs/decisions/promotion-packages/phase-4-d-z1-e1/pin-amendments.patch",
+      "docs/decisions/promotion-packages/phase-4-audit-log-immutability/pin-amendments.patch"
+    ],
+    "requiredAtPromotion": [
+      "frozen-baseline.ts AUTHORIZED_ADDITIONS: the candidate migration name + sha256",
+      "the newest-migration pins (stack after AL1, which stacks after D / Z1 / E1)"
+    ]
+  },
+  "schemaChange": false,
+  "activation": {
+    "realMigrationAdded": false,
+    "viewChanged": false,
+    "aclChanged": false,
+    "frozenBaselineAmended": false,
+    "stagingOwnershipChanged": false
+  },
+  "approvals": [
+    {
+      "id": "SE1-APPLY",
+      "owner": "platform owner + independent security reviewer",
+      "what": "apply the view option + ACL change",
+      "recorded": false
+    },
+    {
+      "id": "SE1-FROZEN-VIEW",
+      "owner": "platform owner",
+      "what": "amend the frozen security_event view (option + grants; definition unchanged)",
+      "recorded": false
+    },
+    {
+      "id": "SE1-PIN-AMENDMENT",
+      "owner": "platform owner",
+      "what": "authorise the migration in frozen-baseline.ts and move the newest-migration pins",
+      "recorded": false
+    },
+    {
+      "id": "SE1-REVIEW",
+      "owner": "independent security reviewer",
+      "what": "independent security review of the finding, the draft and the evidence",
+      "recorded": false
+    }
+  ],
+  "separateDecisions": [
+    {
+      "id": "SE1-STAGING-OWNERSHIP",
+      "note": "infra/staging/docker-compose.staging.yml migrates as the postgres superuser, so EVERY object is superuser-owned there (FORCE RLS does not bind it, SECURITY DEFINER functions run as a superuser). Whether staging should migrate as flower_migrate is a broader, separate decision; SE1 is owner-independent and does not depend on it."
+    },
+    {
+      "id": "SE1-DEFAULT-PRIVILEGES",
+      "note": "the Phase 1 default privileges grant S/I/U/D on every new relation to the application and platform roles; a new view re-acquires them. Whether to narrow the defaults is separate."
+    }
+  ],
+  "retiredAtPromotion": []
+}
