@@ -286,15 +286,24 @@ test('owner: Olive owes 21.00 of 25.00 — balance, available credit, the receip
     'Reconciled with the accounting ledger',
   );
   await expect(o.getByTestId('rec-caveat')).toContainText('no due date');
-  // the branch view of the same company
-  await o
-    .getByTestId('rec-branch-row')
-    .filter({ hasText: '21.00' })
-    .first()
-    .getByRole('link')
-    .click();
-  await expect(o).toHaveURL(/receivables[?]branch=/);
-  await expect(o.getByTestId('rec-customer-row').filter({ hasText: OLIVE })).toHaveCount(1);
+  // the branch view of the same company: the branch that holds her invoice lists her once. When this spec runs on its own that branch's total is
+  // exactly her 21.00, but in the full run other customers owe in the same branch, so find the branch by WHO it lists, not by an exact total.
+  const branchRows = o.getByTestId('rec-branch-row');
+  const branchCount = await branchRows.count();
+  expect(branchCount).toBeGreaterThan(0);
+  let branchListsOlive = false;
+  for (let i = 0; i < branchCount && !branchListsOlive; i += 1) {
+    if (i > 0) {
+      await o.goto('/receivables');
+      await stepUpIfAsked(o, o.getByTestId('rec-totals'));
+    }
+    await branchRows.nth(i).getByRole('link').first().click();
+    await expect(o).toHaveURL(/receivables[?]branch=/);
+    await o.waitForLoadState('load');
+    branchListsOlive =
+      (await o.getByTestId('rec-customer-row').filter({ hasText: OLIVE }).count()) === 1;
+  }
+  expect(branchListsOlive, 'one branch view lists Olive exactly once').toBe(true);
   // and the customer link goes back to her page
   await o.getByTestId('rec-customer-link').filter({ hasText: OLIVE }).click();
   await expect(o.getByTestId('credit-state')).toBeVisible();
