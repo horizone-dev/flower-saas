@@ -1,0 +1,48 @@
+# Caddy for the staging stack. Automatic HTTPS (ACME / Let's Encrypt) for real public hostnames; the HTTP->HTTPS redirect is automatic.
+# For a local smoke test use Caddyfile.local (internal CA) instead: CADDYFILE=./Caddyfile.local
+
+(secure_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+	request_body {
+		max_size 2MB
+	}
+}
+
+# The till. The platform realm (operators) is NOT reachable from a shop-facing host.
+{$POS_HOST} {
+	import secure_headers
+	@platform path /v1/platform/* /v1/platform
+	respond @platform 404
+	reverse_proxy pos:3000
+}
+
+{$OWNER_HOST} {
+	import secure_headers
+	reverse_proxy owner-web:3000
+}
+
+# The operator/API host: ONLY the platform realm is served, and only from the operator network.
+# (explicit handle blocks: a bare `respond` is ordered BEFORE `reverse_proxy` in Caddy and would shadow the proxy)
+{$OPS_HOST} {
+	import secure_headers
+	@operators remote_ip {$ADMIN_CIDR}
+	handle @operators {
+		@platformApi path /v1/platform/*
+		handle @platformApi {
+			reverse_proxy api:3001
+		}
+		handle {
+			respond 404
+		}
+	}
+	handle {
+		respond 403
+	}
+}
