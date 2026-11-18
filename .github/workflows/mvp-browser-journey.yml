@@ -22,7 +22,8 @@ env:
 
 jobs:
   browser-journey:
-    runs-on: ubuntu-latest
+    # pinned like the `e2e` job in ci.yml (PR #40): Playwright 1.56 does not support chromium on ubuntu-26.04 (what `ubuntu-latest` now is)
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

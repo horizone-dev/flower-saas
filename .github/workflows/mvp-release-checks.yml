@@ -48,6 +48,7 @@ jobs:
           const r=()=>require('crypto').randomBytes(18).toString('hex');
           const e=['POS_HOST=pos.ci.flower-saas.dev','OWNER_HOST=owner.ci.flower-saas.dev','OPS_HOST=ops.ci.flower-saas.dev','ADMIN_CIDR=203.0.113.0/24','API_IMAGE=flower/api:ci','POS_IMAGE=flower/pos-pwa:ci','OWNER_IMAGE=flower/owner-web:ci','MIGRATE_IMAGE=flower/migrate:ci','MIGRATION_MODE=check','POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
           require('fs').writeFileSync('infra/staging/.env.ci',e.join('\n')+'\n')"
+          chmod 600 infra/staging/.env.ci # the preflight (correctly) refuses an env file readable by group/others
           node infra/staging/preflight.mjs infra/staging/.env.ci
           docker compose -f infra/staging/docker-compose.staging.yml --env-file infra/staging/.env.ci config -q
       - name: Start order, published ports, healthchecks and workflow references
