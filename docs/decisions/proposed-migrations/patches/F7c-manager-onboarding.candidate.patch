@@ -1,0 +1,268 @@
+diff --git a/apps/api/src/modules/access/staff-invite.controller.ts b/apps/api/src/modules/access/staff-invite.controller.ts
+index ba7872d..2aad17b 100644
+--- a/apps/api/src/modules/access/staff-invite.controller.ts
++++ b/apps/api/src/modules/access/staff-invite.controller.ts
+@@ -14,7 +14,7 @@ import { StaffOnboardingService } from './staff-onboarding.service.js';
+ const inviteStaffSchema = z
+   .object({
+     email: z.string().min(3).max(254),
+-    roleKey: z.enum(['cashier', 'sales']),
++    roleKey: z.enum(['cashier', 'sales', 'manager']),
+     companyIds: z.array(z.string().uuid()).min(1).max(20),
+     branchIds: z.array(z.string().uuid()).min(1).max(20),
+   })
+diff --git a/apps/api/src/modules/access/staff-invite.manager-onboarding.integration.test.ts b/apps/api/src/modules/access/staff-invite.manager-onboarding.integration.test.ts
+new file mode 100644
+index 0000000..bf017cc
+--- /dev/null
++++ b/apps/api/src/modules/access/staff-invite.manager-onboarding.integration.test.ts
+@@ -0,0 +1,208 @@
++import 'reflect-metadata';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { Test } from '@nestjs/testing';
++import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import { PLATFORM_PERMISSIONS, requiresStepUp } from '@flower/permissions';
++import { authenticator } from 'otplib';
++import pg from 'pg';
++import { AppModule } from '../../app.module.js';
++import { AllExceptionsFilter } from '../../common/errors/all-exceptions.filter.js';
++import { installRequestContext } from '../../common/context/index.js';
++import { JwtService } from '../../common/auth/jwt.service.js';
++import { SessionStore } from '../../common/auth/session-store.js';
++import type { SessionData } from '../../common/auth/session.types.js';
++
++// F-7c — a MANAGER invited through route A: money-out authority stays behind step-up, and step-up is impossible until the manager enrols TOTP.
++// (receivables:advance:apply and payments:collect are routine keys and are NOT step-up gated — see the F-7c note in the activation candidate doc.)
++const PLAN_V = '00000000-0000-7000-8000-000000190001';
++const PLATFORM_USER = '00000000-0000-7000-8000-000000190002';
++const PW = 'manager-pass-strong-1';
++const ZERO = '00000000-0000-7000-8000-000000000001';
++
++describe('F-7c manager onboarding via route A', () => {
++  let stack: TestStack;
++  let app: NestFastifyApplication;
++  let admin: pg.Client;
++  let T: { tenantId: string; companyId: string; branchId: string; slug: string };
++  let opToken: string;
++
++  async function platformToken(): Promise<string> {
++    const store = app.get(SessionStore);
++    const jwt = app.get(JwtService);
++    const s: SessionData = {
++      sessionId: 'mgr-op',
++      realm: 'platform',
++      familyId: 'f',
++      tenantId: null,
++      userId: null,
++      platformUserId: PLATFORM_USER,
++      accountType: 'PLATFORM',
++      posTerminalId: null,
++      deviceId: null,
++      mfaLevel: 'STEP_UP',
++      stepUpUntil: Date.now() + 600_000,
++      createdAt: Date.now(),
++      expiresAt: Date.now() + 3_600_000,
++      revokedAt: null,
++      revokeReason: null,
++      impersonatorPlatformUserId: null,
++      access: {
++        effectivePermissions: [...PLATFORM_PERMISSIONS],
++        companyScope: 'ALL',
++        branchScope: 'ALL',
++        perBranchOverlay: {},
++        entitledModules: [],
++        planKey: null,
++      },
++    };
++    await store.set(s);
++    return jwt.sign({ sub: PLATFORM_USER, sid: s.sessionId, aud: 'platform' });
++  }
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    admin = new pg.Client({ connectionString: stack.postgres.url });
++    await admin.connect();
++    await admin.query(`
++      INSERT INTO plan (id, key, name, "updatedAt") VALUES ('00000000-0000-7000-8000-000000190000', 'starter', 'Starter', now());
++      INSERT INTO plan_version (id, "planId", version, status, "updatedAt") VALUES ('${PLAN_V}', '00000000-0000-7000-8000-000000190000', 1, 'PUBLISHED', now());
++      INSERT INTO limit_default ("planVersionId", "limitKey", value) VALUES ('${PLAN_V}', 'max_branches', 5), ('${PLAN_V}', 'max_users', 20), ('${PLAN_V}', 'max_sessions_per_user', 20);
++      INSERT INTO platform_user (id, email, name, "updatedAt") VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
++      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
++      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
++      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt") VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
++      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt") VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),('CUSTOM','channel.pos',true,now());
++    `);
++    process.env['DATABASE_URL'] = stack.postgres.url;
++    process.env['PLATFORM_DATABASE_URL'] = stack.postgres.url;
++    process.env['REDIS_URL'] = stack.redis.url;
++    process.env['AUTH_JWT_SECRET'] = 'integration-test-jwt-secret-0000000000';
++    const m = await Test.createTestingModule({ imports: [AppModule] }).compile();
++    app = m.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
++    app.setGlobalPrefix('v1', { exclude: ['healthz', 'readyz'] });
++    app.useGlobalFilters(new AllExceptionsFilter());
++    installRequestContext(app.getHttpAdapter().getInstance());
++    await app.init();
++    await app.getHttpAdapter().getInstance().ready();
++    opToken = await platformToken();
++    const r = await app.inject({
++      method: 'POST',
++      url: '/v1/platform/tenants',
++      payload: {
++        slug: 'mgr1',
++        name: 'mgr1 FZE',
++        region: 'AE',
++        companyCountryCode: 'AE',
++        businessTypeKey: 'CUSTOM',
++        planVersionId: PLAN_V,
++        ownerEmail: 'owner@mgr1.test',
++      },
++      headers: { authorization: `Bearer ${opToken}`, 'idempotency-key': 'prov-mgr1' },
++    });
++    expect(r.statusCode).toBe(201);
++    const j = r.json();
++    T = { tenantId: j.tenantId, companyId: j.companyId, branchId: j.branchId, slug: 'mgr1' };
++  }, 300_000);
++  afterAll(async () => {
++    await admin?.end();
++    await app?.close();
++    await stack?.stop();
++  });
++
++  const advance = (tok: string) =>
++    app.inject({
++      method: 'POST',
++      url: `/v1/companies/${T.companyId}/branches/${T.branchId}/customers/${ZERO}/advances/${ZERO}/refunds`,
++      payload: {},
++      headers: { authorization: `Bearer ${tok}`, 'idempotency-key': `mgr-${Math.random()}` },
++    });
++  const login = (email: string) =>
++    app.inject({
++      method: 'POST',
++      url: '/v1/auth/login',
++      payload: { workspaceSlug: T.slug, email, password: PW },
++    });
++
++  it('invite -> set password -> login; step-up-gated keys refused; step-up impossible before TOTP; after enrolment login demands the code and step-up unlocks', async () => {
++    const email = 'manager@mgr1.test';
++    const inv = await app.inject({
++      method: 'POST',
++      url: `/v1/platform/tenants/${T.tenantId}/staff-invites`,
++      payload: { email, roleKey: 'manager', companyIds: [T.companyId], branchIds: [T.branchId] },
++      headers: { authorization: `Bearer ${opToken}` },
++    });
++    expect(inv.statusCode).toBe(201);
++    const j = inv.json();
++    const token = (j.token ?? j.inviteToken ?? j.setPasswordToken) as string;
++    const sp = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/set-password',
++      payload: { token, newPassword: PW },
++    });
++    expect(sp.statusCode).toBeLessThan(300);
++    const l1 = await login(email);
++    expect(l1.statusCode).toBe(200);
++    expect(l1.json().status).toBe('ok');
++    const at1 = l1.json().accessToken as string;
++    const acc = await app.inject({
++      method: 'GET',
++      url: '/v1/me/access',
++      headers: { authorization: `Bearer ${at1}` },
++    });
++    const perms: string[] = acc.json().effectivePermissions ?? acc.json().permissions ?? [];
++    const held = perms.filter((p) => requiresStepUp(p));
++    expect(held).toEqual(
++      expect.arrayContaining([
++        'refunds:execute',
++        'credit_notes:issue',
++        'cancellation_charges:issue',
++      ]),
++    );
++    const a1 = await advance(at1);
++    expect(a1.statusCode).toBe(403);
++    expect(a1.json().error.code).toBe('STEP_UP_REQUIRED');
++    const su0 = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/step-up',
++      payload: { code: '123456' },
++      headers: { authorization: `Bearer ${at1}` },
++    });
++    expect(su0.statusCode).toBe(401);
++    const en = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/mfa/enrol',
++      headers: { authorization: `Bearer ${at1}` },
++    });
++    expect(en.statusCode).toBeLessThan(300);
++    const secret = en.json().secret as string;
++    const cf = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/mfa/confirm',
++      payload: { code: authenticator.generate(secret) },
++      headers: { authorization: `Bearer ${at1}` },
++    });
++    expect(cf.statusCode).toBeLessThan(300);
++    const l2 = await login(email);
++    expect(l2.json().status).toBe('mfa_required');
++    const v = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/mfa/verify',
++      payload: { mfaChallenge: l2.json().mfaChallenge, code: authenticator.generate(secret) },
++    });
++    expect(v.statusCode).toBe(200);
++    const at2 = v.json().accessToken as string;
++    const a2 = await advance(at2);
++    expect(a2.statusCode).toBe(403);
++    expect(a2.json().error.code).toBe('STEP_UP_REQUIRED');
++    const su = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/step-up',
++      payload: { code: authenticator.generate(secret) },
++      headers: { authorization: `Bearer ${at2}` },
++    });
++    const a3 = await advance(at2);
++    expect(su.statusCode).toBeLessThan(300);
++    expect(a3.json().error?.code).not.toBe('STEP_UP_REQUIRED');
++  });
++});
+diff --git a/apps/api/src/modules/access/staff-onboarding.integration.test.ts b/apps/api/src/modules/access/staff-onboarding.integration.test.ts
+index 5697da0..4280be3 100644
+--- a/apps/api/src/modules/access/staff-onboarding.integration.test.ts
++++ b/apps/api/src/modules/access/staff-onboarding.integration.test.ts
+@@ -152,8 +152,8 @@ describe('F-7 — staff onboarding service (inert)', () => {
+   });
+ 
+   it('only allow-listed, non-owner roles can be onboarded', async () => {
+-    expect([...ONBOARDABLE_ROLE_KEYS]).toEqual(['cashier', 'sales']);
+-    for (const roleKey of ['owner', 'admin', 'manager', 'accountant', 'nonexistent']) {
++    expect([...ONBOARDABLE_ROLE_KEYS]).toEqual(['cashier', 'sales', 'manager']);
++    for (const roleKey of ['owner', 'admin', 'accountant', 'nonexistent']) {
+       const before = await userCount();
+       await expect(svc.inviteStaff(cmd({ roleKey }))).rejects.toMatchObject({
+         code: 'ROLE_NOT_ONBOARDABLE',
+diff --git a/apps/api/src/modules/access/staff-onboarding.service.ts b/apps/api/src/modules/access/staff-onboarding.service.ts
+index 23866c1..7fa58b1 100644
+--- a/apps/api/src/modules/access/staff-onboarding.service.ts
++++ b/apps/api/src/modules/access/staff-onboarding.service.ts
+@@ -10,7 +10,7 @@ import { StaffOnboardingRepository } from './staff-onboarding.repository.js';
+  *
+  * Authority is decided by the CALLER (a platform-realm route guarded by the existing `platform:tenant_users:manage`, step-up MFA, no new
+  * permission); this service enforces the rules that make the operation safe whatever the caller:
+- *  - ONLY allow-listed, non-owner roles can be onboarded ({@link ONBOARDABLE_ROLE_KEYS}); owner/admin/accountant are never created here;
++ *  - ONLY allow-listed, non-owner roles can be onboarded ({@link ONBOARDABLE_ROLE_KEYS}); owner/admin/accountant are never created here. `manager` (F-7c) holds step-up-gated money-out keys, which stay unreachable until the manager enrols TOTP (proved in staff-invite.manager-onboarding.integration.test.ts);
+  *  - the scope is EXPLICIT: at least one company and one branch, never "all"; ids are checked against the tenant in the repository;
+  *  - one email per workspace (409, and the raw invite token is NEVER returned or cached a second time);
+  *  - the plan's `max_users` limit is enforced under a tenant lock;
+@@ -18,7 +18,11 @@ import { StaffOnboardingRepository } from './staff-onboarding.repository.js';
+  *    existing `POST /v1/auth/set-password`);
+  *  - abuse protection: a per-actor and a per-workspace invite budget in Redis, FAIL-CLOSED when Redis is unavailable.
+  */
+-export const ONBOARDABLE_ROLE_KEYS: readonly string[] = Object.freeze(['cashier', 'sales']);
++export const ONBOARDABLE_ROLE_KEYS: readonly string[] = Object.freeze([
++  'cashier',
++  'sales',
++  'manager',
++]);
+ export const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+ export const ACTOR_INVITES_PER_HOUR = 20;
+ export const TENANT_INVITES_PER_DAY = 50;

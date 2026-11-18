@@ -10,12 +10,16 @@ import type { SessionData } from '../../common/auth/session.types.js';
  * database), and everything that does not need a secret keeps working — a cash + card-terminal sale (card is a recorded local tender),
  * listing credentials, and revoking. (Run in a disposable copy with the R-1 patch applied; the patch itself is unapplied.)
  */
+// the platform user id for the session AND the token subject: a constant, so the token claim is a plain string rather than `string | null`
+const PLATFORM_USER_ID = '00000000-0000-7000-8000-000000009991';
+
 describe('R-1 — the disabled secrets vault fails closed', () => {
   let stack: TestStack;
   let w: SaleWorld;
   let platform = '';
   const SECRET = 'sk_live_R1_PLAINTEXT_MUST_NEVER_BE_STORED_9f3a';
-  const q = async <T = Record<string, unknown>>(s: string, p: unknown[] = []) => (await w.pool.query(s, p)).rows as T[];
+  const q = async <T = Record<string, unknown>>(s: string, p: unknown[] = []) =>
+    (await w.pool.query(s, p)).rows as T[];
   const creds = (method: 'GET' | 'POST' | 'PUT', url: string, body?: Record<string, unknown>) =>
     w.req(method, `/platform/tenants/${w.a.tenantId}/provider-credentials${url}`, platform, body);
 
@@ -23,14 +27,16 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
     process.env['SECRETS_PROVIDER'] = 'disabled';
     stack = await startTestStack({ services: ['postgres', 'redis'] });
     migrateTestDb(stack.postgres.url);
-    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2, { realClock: true });
+    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2, {
+      realClock: true,
+    });
     const s: SessionData = {
       sessionId: 'r1-platform',
       realm: 'platform',
       familyId: 'f',
       tenantId: null,
       userId: null,
-      platformUserId: '00000000-0000-7000-8000-000000009991',
+      platformUserId: PLATFORM_USER_ID,
       accountType: 'PLATFORM',
       posTerminalId: null,
       deviceId: null,
@@ -51,7 +57,7 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
       },
     };
     await w.h.store.set(s);
-    platform = await w.h.jwt.sign({ sub: s.platformUserId, sid: s.sessionId, aud: 'platform' });
+    platform = await w.h.jwt.sign({ sub: PLATFORM_USER_ID, sid: s.sessionId, aud: 'platform' });
   }, 300_000);
 
   afterAll(async () => {
@@ -68,7 +74,9 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
     expect(JSON.stringify(r.body)).not.toContain(SECRET);
     expect(await q('SELECT 1 FROM provider_credential')).toHaveLength(0);
     // scan every text-like column of every table for the plaintext
-    const tables = await q<{ t: string }>(`SELECT table_name AS t FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
+    const tables = await q<{ t: string }>(
+      `SELECT table_name AS t FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`,
+    );
     for (const { t } of tables) {
       const hit = await q(`SELECT 1 FROM "${t}" x WHERE x::text LIKE $1 LIMIT 1`, [`%${SECRET}%`]);
       expect(hit, `plaintext found in ${t}`).toHaveLength(0);
@@ -91,7 +99,10 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
       [w.a.tenantId],
     );
     const rows = await q<{ id: string }>('SELECT id FROM provider_credential LIMIT 1');
-    expect(rows, 'the pre-existing credential row must exist for this test to mean anything').toHaveLength(1);
+    expect(
+      rows,
+      'the pre-existing credential row must exist for this test to mean anything',
+    ).toHaveLength(1);
     const r = await creds('GET', `/${rows[0]!.id}`);
     expect(r.status).toBe(503);
   });
@@ -101,7 +112,16 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
       'POST',
       `/companies/${w.a.companyId}/branches/${w.a.branches[0]!}/orders`,
       w.ownerToken,
-      { lines: [{ productId: w.productId, variantId: w.variantId, selectedUomCode: 'piece', quantity: '2' }] },
+      {
+        lines: [
+          {
+            productId: w.productId,
+            variantId: w.variantId,
+            selectedUomCode: 'piece',
+            quantity: '2',
+          },
+        ],
+      },
       { 'idempotency-key': `r1-${Date.now()}` },
     );
     expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -110,7 +130,13 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
       'POST',
       `/companies/${w.a.companyId}/branches/${w.a.branches[0]!}/orders/${o.id}/complete-sale`,
       w.ownerToken,
-      { paymentIntent: 'PAY_NOW', tenders: [{ method: 'CARD_TERMINAL', amountMinor: '1200' }, { method: 'CASH', amountMinor: '800' }] },
+      {
+        paymentIntent: 'PAY_NOW',
+        tenders: [
+          { method: 'CARD_TERMINAL', amountMinor: '1200' },
+          { method: 'CASH', amountMinor: '800' },
+        ],
+      },
       { 'if-match': String(o.version), 'idempotency-key': `r1s-${Date.now()}` },
     );
     expect(done.status, JSON.stringify(done.body)).toBe(200);
