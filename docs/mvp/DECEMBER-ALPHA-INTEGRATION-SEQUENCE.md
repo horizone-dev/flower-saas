@@ -67,3 +67,120 @@
 | 8   | **Staging end-to-end journey** on #48/#49: deploy, preflight, restore drill, J1–J9 with no seeded step                                                                                 | D-HOST                                | 2–7        | not started                                    |
 
 **Still unfinished scope (not part of the December alpha, not dropped):** cash register open/count/close (blocked on PR #41, D-ORDER, accountant/security decisions), valued inventory and COGS (S-1 blocked), B1/B2 bouquets and recipes, customer ordering and the shopper backend, delivery, online payment, collection-receipt numbering, offline-first, purchasing and supplier payables.
+
+## 6. Checkpoint 5 update (2026-11-18) — measured results, not plans
+
+Nothing below is approved, applied, merged or deployed. Scanner runs used the pinned tool versions locally against hashes of the real PR heads; the F-7b/F-7c runs used a disposable tree at the #49 tip `ace6f61` plus the #52 files.
+
+### 6.1 CI baseline (GitHub, latest run on each head)
+
+| PR  | Head      | `verify`                                                                                | `security` (failing step)                                                            | `e2e` / `realtime`                                                     |
+| --- | --------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| #42 | `46473ad` | FAIL (17.12 tests only)                                                                 | FAIL: osv (2 Next + picomatch); gitleaks would also fail (3 findings, patch fixture) | pass / pass                                                            |
+| #43 | `2bc7284` | FAIL (17.12 only)                                                                       | FAIL: osv                                                                            | pass / pass                                                            |
+| #44 | `0b6e695` | FAIL (17.12 only)                                                                       | FAIL: osv                                                                            | pass / pass                                                            |
+| #45 | `7abcdad` | FAIL (17.12 only)                                                                       | FAIL: osv, **picomatch only** (`GHSA-fc5q-39xc-vjpf`, no fixed version)              | pass / pass                                                            |
+| #46 | `e7a2352` | FAIL (17.12 only)                                                                       | FAIL: osv                                                                            | pass / pass                                                            |
+| #47 | `7edf2ff` | FAIL (17.12 only)                                                                       | FAIL: osv                                                                            | pass / pass                                                            |
+| #48 | `e57e074` | FAIL (17.12 only)                                                                       | FAIL: osv                                                                            | pass / pass                                                            |
+| #49 | `ace6f61` | FAIL (17.12 only)                                                                       | FAIL: osv                                                                            | pass / pass (+ browser-journey, migration-runner, staging-config pass) |
+| #50 | `41cb9da` | FAIL (17.12 only)                                                                       | FAIL: osv                                                                            | pass / pass                                                            |
+| #51 | `827e797` | **pass**                                                                                | FAIL: osv (2 Next + picomatch)                                                       | pass / pass                                                            |
+| #52 | `7d580a4` | FAIL: the same 10 tests in the 3 report files; the 13 + 5 new F-7a tests **pass** in CI | FAIL: osv                                                                            | pass / pass                                                            |
+
+Verified from each run's log today: every failing `verify` fails only in `sales-financial-report.query-plan` (6), `tender-totals-report.dense-window` (2) and, on #43, #44, #47, #48, #50 and #52, `sales-financial-report.dense-window` (2): 8 or 10 tests, nothing else. #51 (the 17.11 pin) passes.
+
+In every `security` run the gitleaks and both Trivy steps are skipped (osv fails first), so none of them has run in CI. `main` has no branch protection, so "green before merge" is policy only (CLAUDE.md rule 36).
+
+### 6.2 What the three scanners say once the baseline PRs are in (local, pinned versions)
+
+| Check                                                                                                                     | Result                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| osv-scanner v2.5.1 on #45's lockfile, no config                                                                           | exit 1: exactly one finding, picomatch 4.0.7 (reproduces the CI failure)                     |
+| same, with the **proposed** picomatch exception supplied from outside the repo                                            | exit 0, "No issues found"                                                                    |
+| same, CI-shaped call (`--lockfile=pnpm-lock.yaml --recursive`, no `--config`) with `osv-scanner.toml` beside the lockfile | exit 0: the file is auto-discovered, so the exception PR needs no workflow change            |
+| control: `main`'s lockfile with the same exception                                                                        | exit 1: the two Next advisories are **still reported** (the exception masks only picomatch)  |
+| gitleaks v8.24.3 over each PR's `main..head` range with `main`'s `.gitleaks.toml`                                         | #42 3 findings, #48 1, #49 1 (all patch/manifest fixtures); the other 8 clean                |
+| same ranges with #47's `.gitleaks.toml`                                                                                   | **all 11 clean**                                                                             |
+| Trivy 0.75.0 config, HIGH,CRITICAL, exit-code 1, on `infra/docker` at `main` and at the #49 tip                           | exit 0, 0 misconfigurations; `infra/migrate/Dockerfile` (#48, outside CI's scan path) also 0 |
+
+Limits: Trivy 0.75.0 is not the CI action's bundled version; gitleaks-action's commit range is `base^..head`, mine is `main..head` (a superset for these PRs); the picomatch exception is not approved and exists in no PR.
+
+### 6.3 Review and merge sequence (every merge needs the owner; stacked PRs must take `main` in afterwards)
+
+1. **#51** (pin `postgres:17.11`): turns `verify` green only for branches that contain it. The 17.12 plan regression (Finding A) stays documented in #50 and is not fixed by the pin.
+2. **#45** (Next 16.4.6): removes the two Next advisories. Lockfile conflict expected with #44.
+3. **Picomatch exception PR** (new, small, from #46's text): only after the **independent security reviewer** approves; #46 (assessment) merges before or with it.
+4. **#47** (scoped gitleaks exceptions): security review of the 27 added lines and the 12-case negative-control matrix already posted on the PR.
+5. **#42** (docs), then **#43** and **#52** (F-7a, inert), then **#44 → #48 → #49** retargeted in order. Each needs `main` merged in first and one CI cycle (about 25 min).
+
+### 6.4 F-7b and F-7c (candidates, unapplied; patches stored beside this file)
+
+| Artefact                                                                                                                                       | SHA-256         | Applies to                     |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------------------------------ |
+| `F7b-activation.candidate.v2.patch` (5 files: route A, 11 route tests, the #48 bootstrap-test rewrite, harness de-simulation; **replaces v1**) | `a1e5e441…f196` | the #49 tip plus the #52 files |
+| `F7c-manager-onboarding.candidate.patch` (allow-list + a manager test, amends 2 existing assertions)                                           | `4f3961d7…ac0`  | on top of F-7b v2              |
+| `F7c-mfa-gate.candidate.patch` (manager MFA enrolment gate: 15 files)                                                                          | `13ab801c…d51d` | on top of F-7c                 |
+
+**F-7b v1 is withdrawn.** v1 (sha256 `799faa42…765d8`) used two test passwords (`cashier-pass-strong-1/2`) that gitleaks reports as `generic-api-key` even with the PR #47 config (3 findings). v2 reuses the already-approved fixture password and additionally asserts that a reused token leaves the stored credential hash unchanged. v1 was never pushed. Its content is kept in a local-only ref (`docs/dec-alpha-integration-sequence` @ `717e735`) and is deliberately not published: a pushed commit range containing it fails any gitleaks commit-range scan. Integrity of all patches: `SHA256SUMS` beside them.
+
+F-7b must follow #48 (its bootstrap test currently asserts the invite route is **404 "stays BLOCKED"**; with the route active it would fail, so the patch rewrites that test).
+
+**Manager onboarding (measured, F-7c scratch run, then 4 files / 30 tests green with tsc, ESLint and Prettier clean):**
+
+- the operator invites a `manager`; they set a password and log in with **no MFA** and hold 21 permissions;
+- four of those are step-up gated (`refunds:execute`, `credit_notes:issue`, `cancellation_charges:issue`, `settings:branch:manage`): each is refused `403 STEP_UP_REQUIRED` before enrolment;
+- step-up with no factor is refused `401 MFA_FAILED`; after `POST /auth/mfa/enrol` + `/confirm` the next login returns `mfa_required`, and after the code plus an explicit step-up the same route passes the guard;
+- **residual risk to decide:** `receivables:advance:apply`, `payments:collect` and the customer operations are routine (not step-up) keys, so before the manager enrols they work on a password alone. Options: accept for the alpha with an operator checklist (enrol before first use), or add a force-enrol gate (a separate, larger security change).
+- the invite response key is `setPasswordToken` (24 h, single use, SHA-256 stored); it is returned once with `Cache-Control: no-store`.
+
+**Security review requirements for F-7b/F-7c** (for the independent reviewer): permission and realm (platform realm only, `platform:tenant_users:manage`, step-up), token custody (delivery channel for the one-time token is a human step today), tenant isolation (R10 route-level test, mutation-proven), per-actor 20/h and per-workspace 50/day budgets (fail-closed on Redis loss; no per-IP budget), `max_users` under tenant lock, the audit rows (`user.created`, `user.roles_changed`, `user.scope_changed`), invite revoke/re-issue (none today), and the manager residual risk above.
+
+### 6.5 F-1 Option A, alpha only
+
+`DRAFT-F1-system-roles.patch` (`system-roles.ts` `977d2e6b…` → `18a49b3e…`) and `F1-six-pin-hash-amendment.patch` (`c35e3138…93`) both apply to `main` `ea56cff` in that order. Re-run today: the six Task 3b.10 pins **fail without the amendment (6 failed, 400 passed) and pass with it (6 files, 406/406)**. A newly provisioned workspace's cashier gets `catalog:view` and reads `/catalog/products` with no migration (alpha-option scratch 2/2); a workspace provisioned **before** F-1a stays 403 until the unapplied data SQL runs. Nobody here can prove that no such workspace exists: the owner must attest it. The data migration stays outside the migrations folder.
+
+### 6.6 R-1 proof-test fix and the exact pin update
+
+The proof test's only change is one constant replacing the nullable token subject (plus Prettier); the 14 assertions and 4 tests are unchanged. It is stored in place at `patches/R1-disabled-vault.integration.test.ts.txt`:
+
+|                                                                                                                         | Before                                        | After              |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------ |
+| File SHA-256 (LF-normalised)                                                                                            | `d54a9a12…c3c6c4`                             | `98424ddd…96df412` |
+| Set hash from `hash-artifacts.mjs` (as pinned in `FINAL-APPROVAL-SHEET.md` and `DECEMBER-APPROVAL-PACKAGES-2026-11.md`) | `03e1f653…c6a619d` (reproduced exactly today) | `0a7f975d…99ba44`  |
+
+The R-1 production patch pin `a9607804…faa826f2` (file `1d6d564d…285245`) is unchanged. With the R-1 patch applied in a disposable tree: R-1 4 test files / 29 tests, `tsc` 0, ESLint 0, Prettier clean; without it the test fails at boot (`EnvValidationError`), so it still tests R-1.
+
+### 6.7 Shortest safe path to the internal alpha (engineering time after the approvals; reviewers and the host are not controlled by engineering)
+
+| #   | Outcome                                                                                        | Needs                         | Engineering time once approved     |
+| --- | ---------------------------------------------------------------------------------------------- | ----------------------------- | ---------------------------------- |
+| 1   | CI baseline: #51, #45, exception PR, #47, #42 in `main`; stacked PRs updated                   | owner + security reviewer     | 1 to 2 days (CI cycles dominate)   |
+| 2   | POS payments and credit collection, Owner Web credit and who-owes-us: #43, #44 (and #52 inert) | review + green CI             | 1 to 2 days                        |
+| 3   | Production-mode boot: R-1 with the fixed test                                                  | security reviewer             | under 1 day                        |
+| 4   | Accurate VAT sales: F-6 (frozen-contract amendment)                                            | owner + security + accountant | 1 day plus the accountant's answer |
+| 5   | Cashier catalog: F-1a + six pins (alpha workspaces only)                                       | owner + security              | under 1 day                        |
+| 6   | Real staff creation: F-7b (+ F-7c) and the de-simulated browser journey                        | security reviewer + owner     | 1 to 2 days                        |
+| 7   | M-1 MFA enrol guard                                                                            | security reviewer             | under 1 day                        |
+| 8   | Staging host, preflight, restore drill, J1 to J9                                               | **D-HOST decision**           | 2 to 3 days after a host exists    |
+| 9   | Independent security review and accountant review of the alpha scope                           | reviewers **not yet named**   | outside engineering's control      |
+
+Owner Web reconciliation here means credit and receivables (shipped in #44); cash-drawer reconciliation (E-5) is not part of the alpha. Roughly 8 to 12 engineering days follow the approvals, and the deadline is not guaranteed: it depends on the approvals arriving in the first days of December at the latest, a staging host existing, and the two reviewers being named and available.
+
+## 7. Release boundaries, machine-checked (2026-11-18, checkpoint 7)
+
+Nothing here is approved or applied. Every boundary is one patch that touches **no migration, no schema, no permission key and no route that is active today**. The script `docs/decisions/proposed-migrations/december-sequence.sh` proves the claims below: `integrity` (patch hashes against `patches/SHA256SUMS`), `check` (ordered apply on the #49 tip), `boundaries` (independence), `isolated <clean-main-worktree>` (each main-based boundary alone, with its own tests), `materialise` and `gates` (the integrated tree).
+
+| Boundary (own PR)                                            | Base                | Patch (sha256 in `SHA256SUMS`)                                       | Files | Depends on                            | Proven alone on clean `main`                                                                                | Approval                      |
+| ------------------------------------------------------------ | ------------------- | -------------------------------------------------------------------- | ----- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| R-1 production-mode fail-closed vault                        | `main`              | `R1-secrets-disabled-provider.patch` + the pinned proof test         | 6     | none                                  | 4 files / 29 tests                                                                                          | security                      |
+| F-6 VAT fail-closed                                          | `main`              | `F6-vat-server-amendment-FULL.patch`                                 | 11    | none (frozen-contract amendment)      | 8 files / 404 tests                                                                                         | owner + accountant + security |
+| M-1 MFA enrol guard                                          | `main`              | `M1-mfa-enrol-guard.patch`                                           | 2     | none                                  | identity: 4 files / 18 tests                                                                                | security                      |
+| F-1a cashier/sales `catalog:view` + six frozen-pin amendment | `main`              | `DRAFT-F1-system-roles.patch` then `F1-six-pin-hash-amendment.patch` | 1 + 6 | none                                  | without the amendment **6 pins fail (400 pass)**; with it **11 files / 467 tests pass** (6 pins + platform) | owner + security              |
+| F-7b staff-invite route A (+ #48 bootstrap-test correction)  | #49 tip + #52 files | `F7b-activation.candidate.v2.patch`                                  | 5     | #48, #52                              | integrated run                                                                                              | security + owner              |
+| F-7c manager allow-list                                      | after F-7b          | `F7c-manager-onboarding.candidate.patch`                             | 2     | F-7b                                  | integrated run                                                                                              | security + owner              |
+| Manager MFA enrolment gate                                   | after F-7c          | `F7c-mfa-gate.candidate.patch`                                       | 15    | F-7c (and M-1 for recovery behaviour) | integrated run                                                                                              | security + owner              |
+
+The four main-based boundaries do not overlap: all five patches apply together on `origin/main`. F-7b, F-7c and the gate need the #49 stack and apply in that order only.
+
+**Integrated gates on the full sequence (50 files, fresh run 2026-11-18):** `tsc` clean; structural + probes **713/713** (15 files / 691 + 22); config, secrets, identity, access **17 files / 126 tests** (includes the gate G1–G10); catalog, orders (F-6) and tooling **9 files / 359 tests**; ESLint **0 errors** (5 known `no-console` warnings); Prettier clean. The lean POS journey (13 browser + 134 database checks) and the Owner Web journey (8 browser + 14 database checks) last passed on the previous revision of the same sequence; this revision changed only the gate's integration test, so they were not re-run.
