@@ -1,0 +1,1156 @@
+--- a/apps/api/src/config/env.ts
++++ b/apps/api/src/config/env.ts
+@@ -124,6 +124,9 @@
+   DEVICE_ACTIVATION_PEPPER: z.string().min(32).optional(),
+   DEVICE_ACTIVATION_PEPPER_PREVIOUS: z.string().min(32).optional(),
+   DEVICE_TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
++  // Register provisioning feature gate (FAIL CLOSED): the Owner-only provisioning routes exist only while this is EXACTLY the string
++  // `true`. No default; unset / any other value = disabled (see modules/cash-register/provisioning-gate.ts).
++  REGISTER_PROVISIONING_ENABLED: z.string().optional(),
+ });
+ 
+ export type AppConfig = Readonly<z.infer<typeof envSchema>>;
+--- a/apps/api/src/modules/cash-register/cash-register.module.ts
++++ b/apps/api/src/modules/cash-register/cash-register.module.ts
+@@ -5,7 +5,10 @@
+ import { CashRegisterService } from './cash-register.service.js';
+ import { CashSourceReconciliationRepository } from './cash-source-reconciliation.repository.js';
+ import { CASH_IN_OUT_POLICY, CashInOutRepository } from './cash-in-out.repository.js';
++import { ProvisioningGate, RegisterProvisioningGateGuard } from './provisioning-gate.js';
++import { RegisterProvisioningController } from './register-provisioning.controller.js';
+ import { RegisterProvisioningRepository } from './register-provisioning.repository.js';
++import { RegisterProvisioningService } from './register-provisioning.service.js';
+ 
+ /**
+  * `cash-register` module (Phase 4): register-session open / read / count / close on the S1 tables (ADR-0021). Every route is guarded by
+@@ -18,13 +21,16 @@
+  * that): wiring the recorder into the sale / payment / receipt / refund transactions amends frozen Phase 3 contracts.
+  */
+ @Module({
+-  controllers: [CashRegisterController],
++  controllers: [CashRegisterController, RegisterProvisioningController],
+   providers: [
+     CashRegisterRepository,
+     CashRegisterService,
+     CashMovementRecorderRepository,
+     CashSourceReconciliationRepository,
+     RegisterProvisioningRepository,
++    RegisterProvisioningService,
++    ProvisioningGate,
++    RegisterProvisioningGateGuard,
+     CashInOutRepository,
+     // no approved cash in / out policy exists: every operation is refused POLICY_NOT_APPROVED until the owner / accountant approve one
+     { provide: CASH_IN_OUT_POLICY, useValue: null },
+--- a/apps/api/src/modules/cash-register/register-provisioning.repository.ts
++++ b/apps/api/src/modules/cash-register/register-provisioning.repository.ts
+@@ -125,31 +125,44 @@
+     });
+   }
+ 
+-  deactivate(p: { posTerminalId: string }): Promise<ToggleOutcome> {
+-    return this.toggle(p.posTerminalId, false);
++  deactivate(p: {
++    posTerminalId: string;
++    expected?: { companyId: string; branchId: string };
++  }): Promise<ToggleOutcome> {
++    return this.toggle(p.posTerminalId, false, true, p.expected);
+   }
+ 
+-  reactivate(p: { posTerminalId: string; requireActiveDevice?: boolean }): Promise<ToggleOutcome> {
+-    return this.toggle(p.posTerminalId, true, p.requireActiveDevice ?? true);
++  reactivate(p: {
++    posTerminalId: string;
++    requireActiveDevice?: boolean;
++    expected?: { companyId: string; branchId: string };
++  }): Promise<ToggleOutcome> {
++    return this.toggle(p.posTerminalId, true, p.requireActiveDevice ?? true, p.expected);
+   }
+ 
+   private toggle(
+     posTerminalId: string,
+     activate: boolean,
+     requireActiveDevice = true,
++    expected?: { companyId: string; branchId: string },
+   ): Promise<ToggleOutcome> {
+     const ctx = requireTenantContext();
+     return this.scoped(async (tx) => {
+       await this.lockTerminal(tx, posTerminalId);
+-      const found = inScope(
+-        ctx,
+-        (
+-          await tx.$queryRawUnsafe<RegisterView[]>(
+-            `SELECT ${REGISTER_COLUMNS} FROM cash_register WHERE "posTerminalId" = $1::uuid`,
+-            posTerminalId,
+-          )
+-        )[0],
+-      );
++      const read = (
++        await tx.$queryRawUnsafe<RegisterView[]>(
++          `SELECT ${REGISTER_COLUMNS} FROM cash_register WHERE "posTerminalId" = $1::uuid`,
++          posTerminalId,
++        )
++      )[0];
++      // a caller that ASSERTS a company / branch (a scoped route) must name the register's own: a mismatch is reported as absent
++      const asserted =
++        !read ||
++        !expected ||
++        (read.companyId === expected.companyId && read.branchId === expected.branchId)
++          ? read
++          : undefined;
++      const found = inScope(ctx, asserted);
+       if (found) {
+         // the SAME lock an open of this register takes before it inserts a session (see the class comment)
+         await tx.$executeRawUnsafe(
+--- a/apps/api/src/verification/register-provisioning.structural.test.ts
++++ b/apps/api/src/verification/register-provisioning.structural.test.ts
+@@ -36,8 +36,54 @@
+   return out;
+ };
+ 
+-describe('register provisioning — inert', () => {
+-  it('no production file outside the module file and the repository itself mentions it (no controller, no service, no other module)', () => {
++describe('register provisioning — reachable ONLY through the Owner-only routes', () => {
++  it('exactly three POST routes, each Owner-only by the EXISTING devices:manage key (no new permission), scoped by path, idempotent, with a strict empty body; the service enforces the Owner', () => {
++    const c = code(`${MOD}/register-provisioning.controller.ts`);
++    expect(c.match(/@(Get|Post|Put|Patch|Delete)\(/g)).toEqual(['@Post(', '@Post(', '@Post(']);
++    expect(c.match(/@RequirePermission\('devices:manage'\)/g)).toHaveLength(3);
++    expect(c.match(/@RequirePermission\(/g)).toHaveLength(3);
++    expect(c.match(/@ScopedParam\(\{ company: 'companyId', branch: 'branchId' \}\)/g)).toHaveLength(
++      3,
++    );
++    expect(c.match(/@Idempotent\(\{ scope: 'cash_register\.register\./g)).toHaveLength(3);
++    expect(c.match(/ZodBody\(emptyBodySchema\)/g)).toHaveLength(3);
++    expect(c).toMatch(
++      /@Controller\('companies\/:companyId\/branches\/:branchId\/pos-terminals\/:terminalId\/register'\)/,
++    );
++    // not a device-bound cash-register route: the Owner's web session has no terminal
++    expect(c).not.toMatch(/cash_register:/);
++    const s = code(`${MOD}/register-provisioning.service.ts`);
++    expect(s.match(/this\.requireOwner\(requireTenantContext\(\)\)/g)).toHaveLength(3);
++    expect(s).toMatch(
++      /ctx\.accountType === 'OWNER' &&\s*ctx\.companyScope === 'ALL' &&\s*ctx\.branchScope === 'ALL'/,
++    );
++    expect(s).toMatch(/'OWNER_REQUIRED'/);
++  });
++
++  it('the FEATURE GATE fails closed: the flag is optional with NO default, only the exact string "true" opens it, the controller carries the guard and EVERY service operation asserts the gate first', () => {
++    const env = read('apps/api/src/config/env.ts'); // raw: the schema file holds glob text that a comment stripper would eat
++    expect(env).toMatch(/REGISTER_PROVISIONING_ENABLED: z\.string\(\)\.optional\(\)/);
++    expect(env).not.toMatch(/REGISTER_PROVISIONING_ENABLED[^\n]*default\(/);
++    const g = code(`${MOD}/provisioning-gate.ts`);
++    expect(g).toMatch(/return raw === 'true';/);
++    expect(g).toMatch(/new NotFoundError\('route', 'ROUTE_DISABLED'\)/);
++    expect(g).not.toMatch(/process\.env|=== 'false'|!== 'false'|toLowerCase|\|\| true/);
++    const c = code(`${MOD}/register-provisioning.controller.ts`);
++    expect(c).toMatch(/@UseGuards\(RegisterProvisioningGateGuard\)\s*@Controller\(/);
++    const s = code(`${MOD}/register-provisioning.service.ts`);
++    expect(s.match(/this\.gate\.assertOpen\(\);\s*this\.requireOwner\(/g)).toHaveLength(3);
++    const m = code(`${MOD}/cash-register.module.ts`);
++    expect(m).toMatch(/ProvisioningGate,\s*RegisterProvisioningGateGuard,/);
++    // nothing in the production source sets the flag
++    for (const f of walk(API)) {
++      if (f.endsWith('config/env.ts')) continue;
++      expect(strip(readFileSync(f, 'utf8')), f).not.toMatch(
++        /REGISTER_PROVISIONING_ENABLED\s*[=:]\s*['"]true/,
++      );
++    }
++  });
++
++  it('no production file outside the module file, the repository, its service and its controller mentions it (no other module, no frozen file)', () => {
+     const users = walk(API)
+       .filter((f) =>
+         /RegisterProvisioningRepository|register-provisioning/.test(strip(readFileSync(f, 'utf8'))),
+@@ -46,7 +92,9 @@
+       .sort();
+     expect(users).toEqual([
+       'modules/cash-register/cash-register.module.ts',
++      'modules/cash-register/register-provisioning.controller.ts',
+       'modules/cash-register/register-provisioning.repository.ts',
++      'modules/cash-register/register-provisioning.service.ts',
+     ]);
+   });
+ 
+--- a/apps/api/src/verification/register-session-state-parity.structural.test.ts
++++ b/apps/api/src/verification/register-session-state-parity.structural.test.ts
+@@ -850,8 +850,13 @@
+       'count-record.ts',
+       'denomination-count.test.ts',
+       'denomination-count.ts',
++      'provisioning-gate.test.ts',
++      'provisioning-gate.ts',
++      'register-provisioning.controller.ts',
+       'register-provisioning.integration.test.ts',
+       'register-provisioning.repository.ts',
++      'register-provisioning.routes.integration.test.ts',
++      'register-provisioning.service.ts',
+       'register-provisioning.test.ts',
+       'register-provisioning.ts',
+       'register-session-state.test.ts',
+--- /dev/null
++++ b/apps/api/src/modules/cash-register/provisioning-gate.ts
+@@ -0,0 +1,42 @@
++import { CanActivate, Inject, Injectable } from '@nestjs/common';
++import { NotFoundError } from '../../common/errors/domain-error.js';
++import { APP_CONFIG, type AppConfig } from '../../config/env.js';
++
++/**
++ * Register provisioning FEATURE GATE — FAIL CLOSED. The three Owner-only provisioning routes are reachable only while the deployment sets
++ * `REGISTER_PROVISIONING_ENABLED` to EXACTLY the lower-case string `true`. Unset, empty, `false`, `TRUE`, `1`, `yes`, ` true`, a typo, any
++ * other type — all mean DISABLED. There is no default that enables it and nothing in the application code turns it on.
++ *
++ * Two independent layers (neither trusts the other): a controller guard that answers `404 ROUTE_DISABLED` before the handler runs, and the
++ * service, which refuses every operation itself — so a future second caller of the service cannot bypass the gate.
++ */
++
++/** the ONLY way the flag becomes true: the exact string `true` */
++export function parseProvisioningGate(raw: unknown): boolean {
++  return raw === 'true';
++}
++
++@Injectable()
++export class ProvisioningGate {
++  /** read once from the validated deployment configuration; tests flip it on the singleton */
++  enabled: boolean;
++
++  constructor(@Inject(APP_CONFIG) config: AppConfig) {
++    this.enabled = parseProvisioningGate(config.REGISTER_PROVISIONING_ENABLED);
++  }
++
++  /** throws 404 ROUTE_DISABLED when the gate is closed — the same answer for every terminal, existing or not (no probing) */
++  assertOpen(): void {
++    if (!this.enabled) throw new NotFoundError('route', 'ROUTE_DISABLED');
++  }
++}
++
++@Injectable()
++export class RegisterProvisioningGateGuard implements CanActivate {
++  constructor(private readonly gate: ProvisioningGate) {}
++
++  canActivate(): boolean {
++    this.gate.assertOpen();
++    return true;
++  }
++}
+--- /dev/null
++++ b/apps/api/src/modules/cash-register/provisioning-gate.test.ts
+@@ -0,0 +1,55 @@
++import { describe, expect, it } from 'vitest';
++import { NotFoundError } from '../../common/errors/domain-error.js';
++import type { AppConfig } from '../../config/env.js';
++import {
++  ProvisioningGate,
++  RegisterProvisioningGateGuard,
++  parseProvisioningGate,
++} from './provisioning-gate.js';
++
++const gateOf = (raw: unknown): ProvisioningGate =>
++  new ProvisioningGate({ REGISTER_PROVISIONING_ENABLED: raw } as unknown as AppConfig);
++
++describe('provisioning gate — fail closed', () => {
++  it('only the exact lower-case string "true" opens it', () => {
++    expect(parseProvisioningGate('true')).toBe(true);
++    for (const raw of [
++      undefined,
++      null,
++      '',
++      'false',
++      'TRUE',
++      'True',
++      '1',
++      'yes',
++      'on',
++      ' true',
++      'true ',
++      'true\n',
++      'enabled',
++      true,
++      1,
++      {},
++      [],
++      ['true'],
++    ]) {
++      expect(parseProvisioningGate(raw), String(raw)).toBe(false);
++    }
++  });
++
++  it('a closed gate answers 404 ROUTE_DISABLED from the guard AND from assertOpen; an open gate lets the request through', () => {
++    for (const raw of [undefined, 'false', 'TRUE', 'garbage']) {
++      const g = gateOf(raw);
++      expect(g.enabled).toBe(false);
++      expect(() => new RegisterProvisioningGateGuard(g).canActivate()).toThrow(NotFoundError);
++      try {
++        g.assertOpen();
++      } catch (e) {
++        expect(e).toMatchObject({ code: 'ROUTE_DISABLED', status: 404 });
++      }
++    }
++    const open = gateOf('true');
++    expect(new RegisterProvisioningGateGuard(open).canActivate()).toBe(true);
++    expect(() => open.assertOpen()).not.toThrow();
++  });
++});
+--- /dev/null
++++ b/apps/api/src/modules/cash-register/register-provisioning.controller.ts
+@@ -0,0 +1,81 @@
++import { Body, Controller, HttpCode, Param, Post, UseGuards } from '@nestjs/common';
++import { ScopedParam } from '../../common/auth/pipeline.decorators.js';
++import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
++import { Idempotent } from '../../common/idempotency/idempotent.decorator.js';
++import { requireUuidParam } from '../../common/validation/uuid-param.js';
++import { ZodBody } from '../../common/validation/zod-body.js';
++import { emptyBodySchema } from '../devices/devices.dto.js';
++import { RegisterProvisioningGateGuard } from './provisioning-gate.js';
++import {
++  RegisterProvisioningService,
++  type RegisterResponse,
++} from './register-provisioning.service.js';
++
++/**
++ * Register provisioning routes (Phase 4) — Owner-only, step-up gated, NOT device-bound: they are `devices:manage` routes (not
++ * `cash_register:*`), so the registered-device guard does not demand a terminal device from the Owner's web session. The company and
++ * branch are scoped PATH parameters (the pipeline verifies them against the session's scope); the terminal id names the object being
++ * provisioned. No body field carries a scope, an actor or a sign. Each POST requires an `Idempotency-Key`.
++ */
++@UseGuards(RegisterProvisioningGateGuard)
++@Controller('companies/:companyId/branches/:branchId/pos-terminals/:terminalId/register')
++export class RegisterProvisioningController {
++  constructor(private readonly provisioning: RegisterProvisioningService) {}
++
++  /** create the single register of a terminal (an ACTIVE terminal with an ACTIVE device); a second call is 409 ALREADY_PROVISIONED */
++  @Post()
++  @HttpCode(201)
++  @RequirePermission('devices:manage')
++  @ScopedParam({ company: 'companyId', branch: 'branchId' })
++  @Idempotent({ scope: 'cash_register.register.provision' })
++  provision(
++    @Param('companyId') companyId: string,
++    @Param('branchId') branchId: string,
++    @Param('terminalId') terminalId: string,
++    @Body(new ZodBody(emptyBodySchema)) _dto: object,
++  ): Promise<RegisterResponse> {
++    return this.provisioning.provision({
++      companyId: requireUuidParam(companyId),
++      branchId: requireUuidParam(branchId),
++      terminalId: requireUuidParam(terminalId),
++    });
++  }
++
++  /** switch the register off; refused (409) while a session is OPEN or COUNTING */
++  @Post('deactivate')
++  @HttpCode(200)
++  @RequirePermission('devices:manage')
++  @ScopedParam({ company: 'companyId', branch: 'branchId' })
++  @Idempotent({ scope: 'cash_register.register.deactivate' })
++  deactivate(
++    @Param('companyId') companyId: string,
++    @Param('branchId') branchId: string,
++    @Param('terminalId') terminalId: string,
++    @Body(new ZodBody(emptyBodySchema)) _dto: object,
++  ): Promise<RegisterResponse> {
++    return this.provisioning.deactivate({
++      companyId: requireUuidParam(companyId),
++      branchId: requireUuidParam(branchId),
++      terminalId: requireUuidParam(terminalId),
++    });
++  }
++
++  /** switch the register back on (an ACTIVE terminal with an ACTIVE device) */
++  @Post('reactivate')
++  @HttpCode(200)
++  @RequirePermission('devices:manage')
++  @ScopedParam({ company: 'companyId', branch: 'branchId' })
++  @Idempotent({ scope: 'cash_register.register.reactivate' })
++  reactivate(
++    @Param('companyId') companyId: string,
++    @Param('branchId') branchId: string,
++    @Param('terminalId') terminalId: string,
++    @Body(new ZodBody(emptyBodySchema)) _dto: object,
++  ): Promise<RegisterResponse> {
++    return this.provisioning.reactivate({
++      companyId: requireUuidParam(companyId),
++      branchId: requireUuidParam(branchId),
++      terminalId: requireUuidParam(terminalId),
++    });
++  }
++}
+--- /dev/null
++++ b/apps/api/src/modules/cash-register/register-provisioning.service.ts
+@@ -0,0 +1,113 @@
++import { Injectable } from '@nestjs/common';
++import { requireTenantContext, type RequestContext } from '../../common/context/index.js';
++import { DomainError, ForbiddenError } from '../../common/errors/domain-error.js';
++import { ProvisioningGate } from './provisioning-gate.js';
++import {
++  RegisterProvisioningRepository,
++  type ProvisionOutcome,
++  type RegisterView,
++  type ToggleOutcome,
++} from './register-provisioning.repository.js';
++
++/**
++ * Register provisioning (Phase 4) — the Owner-only operations behind the provisioning routes. Same Owner rule as registered-device
++ * administration (ADR-0022 D11): the permission key is `devices:manage` (Owner-only by migration 52, step-up gated by code), AND the
++ * account must be the OWNER with an unrestricted company / branch scope — a custom role that is later granted the key still cannot use it.
++ * Company and branch come from the scoped PATH (verified against the session by the pipeline) and are then checked against the TERMINAL's
++ * own; the tenant and actor come from the verified request context only.
++ */
++
++export interface RegisterResponse {
++  id: string;
++  posTerminalId: string;
++  companyId: string;
++  branchId: string;
++  active: boolean;
++}
++
++const NOT_FOUND = new Set(['TERMINAL_NOT_FOUND', 'REGISTER_NOT_FOUND']);
++
++@Injectable()
++export class RegisterProvisioningService {
++  constructor(
++    private readonly repo: RegisterProvisioningRepository,
++    private readonly gate: ProvisioningGate,
++  ) {}
++
++  async provision(p: {
++    companyId: string;
++    branchId: string;
++    terminalId: string;
++  }): Promise<RegisterResponse> {
++    this.gate.assertOpen();
++    this.requireOwner(requireTenantContext());
++    const out = await this.repo.provision({
++      posTerminalId: p.terminalId,
++      companyId: p.companyId,
++      branchId: p.branchId,
++    });
++    return this.respond(out);
++  }
++
++  async deactivate(p: {
++    companyId: string;
++    branchId: string;
++    terminalId: string;
++  }): Promise<RegisterResponse> {
++    this.gate.assertOpen();
++    this.requireOwner(requireTenantContext());
++    return this.respond(
++      await this.repo.deactivate({
++        posTerminalId: p.terminalId,
++        expected: { companyId: p.companyId, branchId: p.branchId },
++      }),
++    );
++  }
++
++  async reactivate(p: {
++    companyId: string;
++    branchId: string;
++    terminalId: string;
++  }): Promise<RegisterResponse> {
++    this.gate.assertOpen();
++    this.requireOwner(requireTenantContext());
++    return this.respond(
++      await this.repo.reactivate({
++        posTerminalId: p.terminalId,
++        expected: { companyId: p.companyId, branchId: p.branchId },
++      }),
++    );
++  }
++
++  private requireOwner(ctx: RequestContext): void {
++    const ok =
++      ctx.accountType === 'OWNER' &&
++      ctx.companyScope === 'ALL' &&
++      ctx.branchScope === 'ALL' &&
++      ctx.tenantId !== null &&
++      ctx.userId !== null;
++    if (!ok) {
++      throw new ForbiddenError(
++        'only the account owner may provision cash registers',
++        'OWNER_REQUIRED',
++      );
++    }
++  }
++
++  private respond(out: ProvisionOutcome | ToggleOutcome): RegisterResponse {
++    if (out.kind === 'REFUSED') {
++      if (NOT_FOUND.has(out.reason)) {
++        throw new DomainError(out.reason, 'the terminal or its register was not found', 404);
++      }
++      throw new DomainError(out.reason, `the register change was refused: ${out.reason}`, 409);
++    }
++    const r: RegisterView = out.register;
++    return {
++      id: r.id,
++      posTerminalId: r.posTerminalId,
++      companyId: r.companyId,
++      branchId: r.branchId,
++      active: r.active,
++    };
++  }
++}
+--- /dev/null
++++ b/apps/api/src/modules/cash-register/register-provisioning.routes.integration.test.ts
+@@ -0,0 +1,662 @@
++import 'reflect-metadata';
++import { randomBytes, randomUUID, type KeyObject } from 'node:crypto';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import type { SessionData } from '../../common/auth/session.types.js';
++import { RequestContext, runWithContext } from '../../common/context/index.js';
++import { ProvisioningGate } from './provisioning-gate.js';
++import { RegisterProvisioningService } from './register-provisioning.service.js';
++import { hash } from '@node-rs/argon2';
++import { Redis } from 'ioredis';
++import {
++  createSaleWorld,
++  mintTenantToken,
++  rolePerms,
++  type SaleWorld,
++} from '../../verification/load-sale-world.js';
++import {
++  PROOF_ALG,
++  PROOF_AUD,
++  PROOF_TYP,
++  PROOF_VERSION,
++} from '../device-proof/device-proof.constants.js';
++import { canonicalize } from '../device-proof/proof-canonical.js';
++import { codeDigestB64 } from '../device-proof/activation-proof.js';
++import { ProofNonceService } from '../device-proof/proof-nonce.js';
++import {
++  defaultParts,
++  makeDeviceKey,
++  signProof,
++  signRaw,
++} from '../device-proof/device-proof.test-support.js';
++
++/**
++ * Phase 4 — REGISTER PROVISIONING ROUTES (the proposed, approval-blocked wiring: `E5`-style patch PV-routes), verified end to end over HTTP on
++ * real PostgreSQL + Redis. Owner-only, step-up gated, reusing the EXISTING `devices:manage` permission (no new key, no migration); the
++ * Owner's web session is not device-bound. Meaningful only once the route patch is applied.
++ */
++
++const SECRET = 'integration-test-jwt-secret-0000000000';
++const PASSWORD = 'CorrectHorseBatteryStaple9';
++const FLOAT = 20_000n; // 200.00 AED
++
++interface Dev {
++  id: string;
++  privateKey: KeyObject;
++  terminalId: string;
++  branchId: string;
++  tenantId: string;
++}
++
++describe('Phase 4 — register provisioning ROUTES: Owner-only, scope, duplicates, devices, lifecycle, races', () => {
++  let stack: TestStack;
++  let w: SaleWorld;
++  let nonces: ProofNonceService;
++  let ownerUserId = '';
++  let slugA = '';
++  /** the REAL owner user of tenant A: device administration writes foreign keys to a real user (the harness token carries a random id) */
++  let adminToken = '';
++  let pwHash = '';
++
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    // the deployment flag (fail closed): the route suite runs with the gate explicitly OPEN; the gate suite below closes it
++    process.env['REGISTER_PROVISIONING_ENABLED'] = 'true';
++    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 3);
++    // the harness plan has no terminal / device limits; the real routes are limit-guarded (a tenant's limits are rows of its own)
++    await w.pool.query(
++      `INSERT INTO tenant_limit (id, "tenantId", "limitKey", value, "updatedAt")
++       SELECT uuidv7(), t.id, k, 100, now() FROM tenant t, unnest(ARRAY['max_pos_terminals','max_registered_devices']) k
++       WHERE NOT EXISTS (SELECT 1 FROM tenant_limit tl WHERE tl."tenantId" = t.id AND tl."limitKey" = k)`,
++    );
++    nonces = new ProofNonceService(SECRET);
++    slugA = (await rows(`SELECT slug FROM tenant WHERE id = $1`, [w.a.tenantId]))[0]![
++      'slug'
++    ] as string;
++    ownerUserId = (
++      await rows(
++        `SELECT id FROM "user" WHERE "tenantId" = $1 AND "accountType" = 'OWNER' LIMIT 1`,
++        [w.a.tenantId],
++      )
++    )[0]!['id'] as string;
++    const adminSession = {
++      sessionId: `e5-admin-${randomUUID()}`,
++      realm: 'tenant',
++      familyId: 'f',
++      tenantId: w.a.tenantId,
++      userId: ownerUserId,
++      platformUserId: null,
++      accountType: 'OWNER',
++      posTerminalId: null,
++      deviceId: null,
++      mfaLevel: 'STEP_UP',
++      stepUpUntil: Date.now() + 5 * 3_600_000,
++      createdAt: Date.now(),
++      expiresAt: Date.now() + 6 * 3_600_000,
++      revokedAt: null,
++      revokeReason: null,
++      impersonatorPlatformUserId: null,
++      access: {
++        effectivePermissions: rolePerms('owner'),
++        companyScope: 'ALL',
++        branchScope: 'ALL',
++        perBranchOverlay: {},
++        entitledModules: [],
++        planKey: null,
++      },
++    } as unknown as SessionData;
++    await w.h.store.set(adminSession);
++    adminToken = await w.h.jwt.sign({
++      sub: ownerUserId,
++      sid: adminSession.sessionId,
++      aud: 'tenant',
++      tid: w.a.tenantId,
++    });
++    pwHash = await hash(PASSWORD, { memoryCost: 19_456, timeCost: 2, parallelism: 1 });
++  }, 900_000);
++
++  afterAll(async () => {
++    delete process.env['REGISTER_PROVISIONING_ENABLED'];
++    await w?.h.close();
++    await w?.pool.end();
++    await stack?.stop();
++  });
++
++  // ── harness ───────────────────────────────────────────────────────────────
++  async function rows(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
++    return (await w.pool.query(sql, params)).rows as Record<string, unknown>[];
++  }
++  const num = async (sql: string, params: unknown[] = []): Promise<number> =>
++    Number((await rows(sql, params))[0]!['n']);
++  const errCode = (r: { body: unknown }): string | undefined =>
++    (r.body as { error?: { code?: string } })?.error?.code;
++
++  async function mkUser(branchId: string): Promise<{ userId: string; email: string }> {
++    const userId = randomUUID();
++    const email = `c-${randomBytes(4).toString('hex')}@e5.test`;
++    await rows(
++      `INSERT INTO "user" (id, "tenantId", "accountType", email, status, "updatedAt") VALUES ($1,$2,'USER',$3,'ACTIVE',now())`,
++      [userId, w.a.tenantId, email],
++    );
++    await rows(
++      `INSERT INTO user_role ("tenantId","userId","roleId") SELECT $1, $2, id FROM role WHERE "tenantId" = $1 AND key = 'cashier'`,
++      [w.a.tenantId, userId],
++    );
++    await rows(
++      `INSERT INTO data_scope_assignment ("tenantId","userId","companyScopeAll","companyIds","branchScopeAll","branchIds","updatedAt")
++       VALUES ($1,$2,false,$3,false,$4,now())`,
++      [w.a.tenantId, userId, [w.a.companyId], [branchId]],
++    );
++    await rows(
++      `INSERT INTO credential ("tenantId","userId",kind,hash,"updatedAt") VALUES ($1,$2,'PASSWORD',$3,now())`,
++      [w.a.tenantId, userId, pwHash],
++    );
++    return { userId, email };
++  }
++
++  async function activate(
++    code: string,
++    terminalId: string,
++    branchId: string,
++    tenantId: string,
++  ): Promise<Dev> {
++    const k = makeDeviceKey();
++    const proof = signRaw(
++      k.privateKey,
++      canonicalize({ alg: PROOF_ALG, kid: k.thumbprint, typ: PROOF_TYP }),
++      canonicalize({
++        aud: PROOF_AUD,
++        cdh: codeDigestB64(code.replace(/-/g, '').toUpperCase()),
++        purpose: 'activate',
++        v: PROOF_VERSION,
++      }),
++    );
++    // test-only: reset the activation abuse counters (the production limiter is untouched; 10 per minute is below this suite's need)
++    const rc = new Redis(stack.redis.url);
++    const stale = await rc.keys('*devact:src:*');
++    if (stale.length) await rc.del(...stale);
++    rc.disconnect();
++    const act = await w.h.app.inject({
++      method: 'POST',
++      url: '/v1/devices/activate',
++      payload: {
++        code,
++        publicKey: k.spki.toString('base64url'),
++        proof,
++        keyCustody: 'WEBCRYPTO_NONEXTRACTABLE',
++        platform: 'WEB',
++      },
++    });
++    expect(act.statusCode, act.body).toBe(201);
++    return {
++      id: act.json().deviceId as string,
++      privateKey: k.privateKey,
++      terminalId,
++      branchId,
++      tenantId,
++    };
++  }
++
++  /** a terminal with an ACTIVE enrolled device and (by default) a provisioned cash register */
++  async function terminal(
++    branchId = w.a.branches[0]!,
++    o: { register?: boolean } = {},
++  ): Promise<Dev> {
++    const tr = await w.req('POST', '/org/pos-terminals', adminToken, {
++      branchId,
++      code: `T-${randomBytes(3).toString('hex')}`,
++      name: 'Register',
++    });
++    expect(tr.status, JSON.stringify(tr.body)).toBe(201);
++    const terminalId = (tr.body as { id: string }).id;
++    const codeRes = await w.req(
++      'POST',
++      `/devices/terminals/${terminalId}/activation-codes`,
++      adminToken,
++      {},
++    );
++    expect(codeRes.status, JSON.stringify(codeRes.body)).toBe(201);
++    const dev = await activate(
++      (codeRes.body as { code: string }).code,
++      terminalId,
++      branchId,
++      w.a.tenantId,
++    );
++    if (o.register !== false) {
++      await rows(
++        `INSERT INTO cash_register ("tenantId","companyId","branchId","posTerminalId","active","updatedAt") VALUES ($1,$2,$3,$4,true,now())`,
++        [w.a.tenantId, w.a.companyId, branchId, terminalId],
++      );
++    }
++    return dev;
++  }
++
++  const sessionProof = (dev: Dev): string =>
++    signProof(dev.privateKey, defaultParts(dev.id, 'session', nonces.issue(dev.id, 'session'), {}));
++
++  /** a REAL device-bound login; the stored snapshot then carries the cashier role's real grants plus the cash keys (an approved enablement) */
++  async function boundToken(user: { email: string }, dev: Dev): Promise<string> {
++    const login = await w.h.app.inject({
++      method: 'POST',
++      url: '/v1/auth/login',
++      payload: { workspaceSlug: slugA, email: user.email, password: PASSWORD },
++      headers: { 'x-device-proof': sessionProof(dev) },
++    });
++    expect(login.statusCode, login.body).toBe(200);
++    const token = login.json().accessToken as string;
++    const sid = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'))
++      .sid as string;
++    const blob = (await w.h.store.get(sid))!;
++    blob.access = {
++      ...blob.access!,
++      effectivePermissions: [
++        ...new Set([
++          ...blob.access!.effectivePermissions,
++          ...rolePerms('owner').filter((k) => !k.startsWith('platform:')),
++          'cash_register:open',
++          'cash_register:view',
++          'cash_register:close',
++        ]),
++      ],
++    };
++    await w.h.store.set(blob);
++    return token;
++  }
++
++  /** a terminal + cashier + bound session + an OPEN register session (float 200.00) — a shift */
++  /** every journal row of the tenant, fingerprinted: a recorder call must leave it bit-for-bit identical */
++  const journalFingerprint = async (): Promise<{ h: string; entries: number; lines: number }> => {
++    const r = (
++      await rows(
++        `SELECT md5(coalesce(string_agg(t, '|' ORDER BY t), '')) AS h,
++                (SELECT count(*) FROM journal_entry WHERE "tenantId" = $1)::int AS entries,
++                (SELECT count(*) FROM journal_line WHERE "tenantId" = $1)::int AS lines
++           FROM (
++             SELECT je.id::text || ':' || je."sourceKind" || ':' || je."sourceId"::text || ':' || je."postingFingerprint" AS t
++               FROM journal_entry je WHERE je."tenantId" = $1
++             UNION ALL
++             SELECT jl.id::text || ':' || jl."debitMinor"::text || ':' || jl."creditMinor"::text || ':' || jl."accountId"::text
++               FROM journal_line jl WHERE jl."tenantId" = $1
++           ) x`,
++        [w.a.tenantId],
++      )
++    )[0]!;
++    return { h: r['h'] as string, entries: r['entries'] as number, lines: r['lines'] as number };
++  };
++
++  // ═════════════════ provisioning through the REAL routes ═════════════════
++  const urlOf = (
++    t: { terminalId: string; branchId: string },
++    tail = '',
++    companyId = w.a.companyId,
++  ) =>
++    `/companies/${companyId}/branches/${t.branchId}/pos-terminals/${t.terminalId}/register${tail}`;
++  const post = (
++    token: string,
++    t: { terminalId: string; branchId: string },
++    tail = '',
++    o: { key?: string | null; companyId?: string } = {},
++  ) =>
++    w.req(
++      'POST',
++      urlOf(t, tail, o.companyId),
++      token,
++      {},
++      o.key === null ? {} : { 'idempotency-key': o.key ?? randomUUID() },
++    );
++  const registerRows = (terminalId: string) =>
++    rows(`SELECT * FROM cash_register WHERE "posTerminalId" = $1`, [terminalId]);
++  const auditActions = (registerId: string) =>
++    rows(`SELECT action, "actorUserId" FROM audit_log WHERE "resourceId" = $1 ORDER BY at, id`, [
++      registerId,
++    ]);
++  const stepUp = async (token: string): Promise<string> => {
++    const sid = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'))
++      .sid as string;
++    const stored = (await w.h.store.get(sid))!;
++    await w.h.store.set({ ...stored, mfaLevel: 'STEP_UP', stepUpUntil: Date.now() + 3_600_000 });
++    return token;
++  };
++  const openVia = (token: string) =>
++    w.req(
++      'POST',
++      '/cash-register/sessions',
++      token,
++      {
++        openingFloat: { amountMinor: FLOAT.toString(), currency: 'AED', exponent: 2 },
++        denominations: [{ denominationMinor: '100', count: Number(FLOAT / 100n) }],
++      },
++      { 'idempotency-key': randomUUID() },
++    );
++  /** a terminal with an ACTIVE device, provisioned through the REAL route by the Owner, and a device-bound cashier on it */
++  async function provisionedCashier(branchId = w.a.branches[0]!) {
++    const dev = await terminal(branchId, { register: false });
++    const r = await post(adminToken, dev);
++    expect(r.status, JSON.stringify(r.body)).toBe(201);
++    const u = await mkUser(branchId);
++    return { dev, user: u, token: await boundToken(u, dev) };
++  }
++  const totals = async () => ({
++    movements: await num(`SELECT count(*)::int AS n FROM cash_movement WHERE "tenantId" = $1`, [
++      w.a.tenantId,
++    ]),
++    sessions: await num(`SELECT count(*)::int AS n FROM register_session WHERE "tenantId" = $1`, [
++      w.a.tenantId,
++    ]),
++    journal: (await journalFingerprint()).h,
++  });
++
++  describe('provision', () => {
++    it('the Owner (web session, NOT device-bound) provisions: 201 with the register, one row (scope from the terminal), one audit row by the Owner; no session, movement or journal; an idempotent replay is the same answer and no second row', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const before = await totals();
++      const key = randomUUID();
++      const r = await post(adminToken, dev, '', { key });
++      expect(r.status, JSON.stringify(r.body)).toBe(201);
++      const body = r.body as Record<string, unknown>;
++      expect(body).toMatchObject({
++        posTerminalId: dev.terminalId,
++        companyId: w.a.companyId,
++        branchId: dev.branchId,
++        active: true,
++      });
++      expect(Object.keys(body).sort()).toEqual([
++        'active',
++        'branchId',
++        'companyId',
++        'id',
++        'posTerminalId',
++      ]);
++      const regs = await registerRows(dev.terminalId);
++      expect(regs).toHaveLength(1);
++      expect(regs[0]).toMatchObject({ createdByUserId: ownerUserId, active: true });
++      const audit = await auditActions(regs[0]!['id'] as string);
++      expect(audit).toEqual([
++        { action: 'cash_register.register_provisioned', actorUserId: ownerUserId },
++      ]);
++      const replay = await post(adminToken, dev, '', { key });
++      expect(replay.status).toBe(201);
++      expect(replay.body).toEqual(r.body);
++      expect(await registerRows(dev.terminalId)).toHaveLength(1);
++      expect(await auditActions(regs[0]!['id'] as string)).toHaveLength(1);
++      expect(await totals()).toEqual(before);
++      // an Idempotency-Key is mandatory
++      expect(
++        (await post(adminToken, dev, '/deactivate', { key: null })).status,
++      ).toBeGreaterThanOrEqual(400);
++    });
++
++    it('DUPLICATES: a second provision is 409 ALREADY_PROVISIONED; 6 concurrent provisions (distinct keys) give exactly one 201, five 409, one row, one audit row', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const results = await Promise.all(Array.from({ length: 6 }, () => post(adminToken, dev)));
++      expect(results.filter((r) => r.status === 201)).toHaveLength(1);
++      const conflicts = results.filter((r) => r.status === 409);
++      expect(conflicts).toHaveLength(5);
++      for (const c of conflicts) expect(errCode(c)).toBe('ALREADY_PROVISIONED');
++      const regs = await registerRows(dev.terminalId);
++      expect(regs).toHaveLength(1);
++      expect(await auditActions(regs[0]!['id'] as string)).toHaveLength(1);
++      const again = await post(adminToken, dev);
++      expect(again.status).toBe(409);
++      expect(errCode(again)).toBe('ALREADY_PROVISIONED');
++    });
++  });
++
++  describe('who may call it', () => {
++    it('no permission → 403; no fresh step-up → 403 STEP_UP_REQUIRED; a NON-owner account that holds devices:manage and step-up → 403 OWNER_REQUIRED; nothing is written in any case', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const none = await mintTenantToken(w.h, w.a.tenantId, ['orders:view'], { stepUp: true });
++      expect((await post(none, dev)).status).toBe(403);
++      const noStep = await mintTenantToken(w.h, w.a.tenantId, rolePerms('owner'), {
++        stepUp: false,
++      });
++      const ns = await post(noStep, dev);
++      expect(ns.status).toBe(403);
++      expect(errCode(ns)).toBe('STEP_UP_REQUIRED');
++      // a device-bound cashier session carrying the owner's keys (a custom-role stand-in) with step-up
++      const dev2 = await terminal(w.a.branches[0]!, { register: false });
++      const cashier = await stepUp(await boundToken(await mkUser(dev2.branchId), dev2));
++      const forbidden = await post(cashier, dev);
++      expect(forbidden.status).toBe(403);
++      expect(errCode(forbidden)).toBe('OWNER_REQUIRED');
++      expect(await registerRows(dev.terminalId)).toHaveLength(0);
++    });
++  });
++
++  describe('company, branch, tenant isolation', () => {
++    it('another tenant’s Owner cannot provision, deactivate or reactivate this tenant’s terminal; a wrong branch or company in the path is refused; nothing changes', async () => {
++      const c = await provisionedCashier();
++      const ownerB = await mintTenantToken(w.h, w.b.tenantId, rolePerms('owner'), { stepUp: true });
++      const fresh = await terminal(w.a.branches[0]!, { register: false });
++      for (const tail of ['', '/deactivate', '/reactivate']) {
++        const r = await post(ownerB, tail === '' ? fresh : c.dev, tail);
++        expect([403, 404], `${tail}: ${JSON.stringify(r.body)}`).toContain(r.status);
++      }
++      expect(await registerRows(fresh.terminalId)).toHaveLength(0);
++      expect((await registerRows(c.dev.terminalId))[0]!['active']).toBe(true);
++      // right tenant, wrong branch / company in the path
++      const wrongBranch = { terminalId: fresh.terminalId, branchId: w.a.branches[1]! };
++      const a = await post(adminToken, wrongBranch);
++      expect(a.status).toBe(409);
++      expect(errCode(a)).toBe('TERMINAL_SCOPE_MISMATCH');
++      const b = await post(adminToken, fresh, '', { companyId: w.a2.companyId });
++      expect([403, 404, 409]).toContain(b.status);
++      const d = await post(
++        adminToken,
++        { terminalId: c.dev.terminalId, branchId: w.a.branches[1]! },
++        '/deactivate',
++      );
++      expect(d.status).toBe(404);
++      expect(errCode(d)).toBe('REGISTER_NOT_FOUND');
++      expect(await registerRows(fresh.terminalId)).toHaveLength(0);
++      expect((await registerRows(c.dev.terminalId))[0]!['active']).toBe(true);
++    });
++  });
++
++  describe('device requirements', () => {
++    it('a terminal with NO device, or whose only device was REVOKED, cannot be provisioned (409 NO_ACTIVE_DEVICE); a revoked device also blocks reactivation', async () => {
++      const bare = await w.req('POST', '/org/pos-terminals', adminToken, {
++        branchId: w.a.branches[0]!,
++        code: `V-${randomBytes(3).toString('hex')}`,
++        name: 'Bare',
++      });
++      expect(bare.status).toBe(201);
++      const bareT = { terminalId: (bare.body as { id: string }).id, branchId: w.a.branches[0]! };
++      const nd = await post(adminToken, bareT);
++      expect(nd.status).toBe(409);
++      expect(errCode(nd)).toBe('NO_ACTIVE_DEVICE');
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      expect(
++        (await w.req('POST', `/devices/${dev.id}/revoke`, adminToken, { reason: 'LOST' })).status,
++      ).toBe(200);
++      const rv = await post(adminToken, dev);
++      expect(rv.status).toBe(409);
++      expect(errCode(rv)).toBe('NO_ACTIVE_DEVICE');
++      // reactivation: provision, deactivate, revoke the device, reactivate → refused
++      const c = await provisionedCashier();
++      expect((await post(adminToken, c.dev, '/deactivate')).status).toBe(200);
++      expect(
++        (await w.req('POST', `/devices/${c.dev.id}/revoke`, adminToken, { reason: 'LOST' })).status,
++      ).toBe(200);
++      const re = await post(adminToken, c.dev, '/reactivate');
++      expect(re.status).toBe(409);
++      expect(errCode(re)).toBe('NO_ACTIVE_DEVICE');
++      expect(await registerRows(bareT.terminalId)).toHaveLength(0);
++      expect(await registerRows(dev.terminalId)).toHaveLength(0);
++    });
++  });
++
++  describe('lifecycle and the open-session interlock (through the routes)', () => {
++    it('provision → a cashier opens → deactivate is 409 UNRESOLVED_SESSION_EXISTS → close → deactivate 200 → open is 409 REGISTER_INACTIVE → reactivate 200 → open works; each change is one audit row by the Owner', async () => {
++      const c = await provisionedCashier();
++      const regId = (await registerRows(c.dev.terminalId))[0]!['id'] as string;
++      const open = await openVia(c.token);
++      expect(open.status, JSON.stringify(open.body)).toBe(201);
++      const refused = await post(adminToken, c.dev, '/deactivate');
++      expect(refused.status).toBe(409);
++      expect(errCode(refused)).toBe('UNRESOLVED_SESSION_EXISTS');
++      const close = await w.req(
++        'POST',
++        `/cash-register/sessions/${(open.body as { id: string }).id}/close`,
++        c.token,
++        { denominations: [{ denominationMinor: '10000', count: 2 }] },
++        { 'idempotency-key': randomUUID() },
++      );
++      expect(close.status, JSON.stringify(close.body)).toBe(200);
++      const off = await post(adminToken, c.dev, '/deactivate');
++      expect(off.status).toBe(200);
++      expect((off.body as { active: boolean }).active).toBe(false);
++      const blocked = await openVia(c.token);
++      expect(blocked.status).toBe(409);
++      expect(errCode(blocked)).toBe('REGISTER_INACTIVE');
++      const again = await post(adminToken, c.dev, '/deactivate');
++      expect(errCode(again)).toBe('ALREADY_INACTIVE');
++      const on = await post(adminToken, c.dev, '/reactivate');
++      expect(on.status).toBe(200);
++      expect((on.body as { active: boolean }).active).toBe(true);
++      expect((await openVia(c.token)).status).toBe(201);
++      expect(await auditActions(regId)).toEqual([
++        { action: 'cash_register.register_provisioned', actorUserId: ownerUserId },
++        { action: 'cash_register.register_deactivated', actorUserId: ownerUserId },
++        { action: 'cash_register.register_reactivated', actorUserId: ownerUserId },
++      ]);
++    });
++
++    it('RACE through the routes: an open racing a deactivation — never an inactive register with an unresolved session (4 rounds)', async () => {
++      for (let i = 0; i < 4; i++) {
++        const c = await provisionedCashier();
++        const [open, off] = await Promise.all([
++          openVia(c.token),
++          post(adminToken, c.dev, '/deactivate'),
++        ]);
++        const active = (await registerRows(c.dev.terminalId))[0]!['active'] as boolean;
++        const unresolved = await num(
++          `SELECT count(*)::int AS n FROM register_session rs JOIN cash_register cr ON cr.id = rs."cashRegisterId" WHERE cr."posTerminalId" = $1 AND rs.status <> 'CLOSED'`,
++          [c.dev.terminalId],
++        );
++        expect(!active && unresolved > 0).toBe(false);
++        if (open.status === 201) {
++          expect(off.status).toBe(409);
++          expect(errCode(off)).toBe('UNRESOLVED_SESSION_EXISTS');
++        } else {
++          expect(errCode(open)).toBe('REGISTER_INACTIVE');
++          expect(off.status).toBe(200);
++        }
++      }
++    });
++  });
++
++  describe('feature gate — fail closed', () => {
++    const gate = () => w.h.app.get(ProvisioningGate, { strict: false });
++    const withGate = async (open: boolean, fn: () => Promise<void>): Promise<void> => {
++      const g = gate();
++      const before = g.enabled;
++      g.enabled = open;
++      try {
++        await fn();
++      } finally {
++        g.enabled = before;
++      }
++    };
++
++    it('the booted application has the gate OPEN only because this suite set the flag to the exact string "true"', () => {
++      expect(gate().enabled).toBe(true);
++    });
++
++    it('CLOSED: every route answers 404 ROUTE_DISABLED to a fully authorised Owner — existing terminal or not — and writes nothing; an anonymous caller still gets 401 (the gate leaks nothing)', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const c = await provisionedCashier();
++      await withGate(false, async () => {
++        const before = await totals();
++        const auditBefore = await num(
++          `SELECT count(*)::int AS n FROM audit_log WHERE action LIKE 'cash_register.register_%'`,
++        );
++        for (const tail of ['', '/deactivate', '/reactivate']) {
++          const real = await post(adminToken, tail === '' ? dev : c.dev, tail);
++          expect(real.status, tail).toBe(404);
++          expect(errCode(real)).toBe('ROUTE_DISABLED');
++          const unknown = await post(
++            adminToken,
++            { terminalId: randomUUID(), branchId: w.a.branches[0]! },
++            tail,
++          );
++          expect(unknown.status).toBe(404);
++          expect(errCode(unknown)).toBe('ROUTE_DISABLED'); // identical answer: no probing for terminals
++          const anon = await w.req(
++            'POST',
++            urlOf(dev, tail),
++            null,
++            {},
++            { 'idempotency-key': randomUUID() },
++          );
++          expect(anon.status).toBe(401);
++        }
++        expect(await registerRows(dev.terminalId)).toHaveLength(0);
++        expect((await registerRows(c.dev.terminalId))[0]!['active']).toBe(true);
++        expect(
++          await num(
++            `SELECT count(*)::int AS n FROM audit_log WHERE action LIKE 'cash_register.register_%'`,
++          ),
++        ).toBe(auditBefore);
++        expect(await totals()).toEqual(before);
++      });
++    });
++
++    it('the SERVICE refuses by itself when the gate is closed (a second caller cannot bypass the controller guard): provision, deactivate and reactivate all throw 404 ROUTE_DISABLED', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const svc = w.h.app.get(RegisterProvisioningService, { strict: false });
++      const owner = new RequestContext({
++        requestId: randomUUID(),
++        tenantId: w.a.tenantId,
++        userId: ownerUserId,
++        accountType: 'OWNER',
++        companyScope: 'ALL',
++        branchScope: 'ALL',
++      });
++      await withGate(false, async () => {
++        const args = {
++          companyId: w.a.companyId,
++          branchId: dev.branchId,
++          terminalId: dev.terminalId,
++        };
++        for (const call of [
++          () => svc.provision(args),
++          () => svc.deactivate(args),
++          () => svc.reactivate(args),
++        ]) {
++          await expect(runWithContext(owner, call)).rejects.toMatchObject({
++            code: 'ROUTE_DISABLED',
++            status: 404,
++          });
++        }
++      });
++      expect(await registerRows(dev.terminalId)).toHaveLength(0);
++    });
++
++    it('closed → open → closed: opening the gate restores the normal behaviour exactly; closing it again stops deactivation at once and leaves the register as it was', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      await withGate(false, async () => {
++        expect((await post(adminToken, dev)).status).toBe(404);
++      });
++      const r = await post(adminToken, dev);
++      expect(r.status, JSON.stringify(r.body)).toBe(201);
++      await withGate(false, async () => {
++        expect((await post(adminToken, dev, '/deactivate')).status).toBe(404);
++      });
++      expect((await registerRows(dev.terminalId))[0]!['active']).toBe(true);
++      expect((await post(adminToken, dev, '/deactivate')).status).toBe(200);
++    });
++
++    it('an OPEN gate does not weaken anything else: a non-owner holding the key is still 403 OWNER_REQUIRED, and a missing step-up is still refused', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const noStep = await mintTenantToken(w.h, w.a.tenantId, rolePerms('owner'), {
++        stepUp: false,
++      });
++      expect(errCode(await post(noStep, dev))).toBe('STEP_UP_REQUIRED');
++      const dev2 = await terminal(w.a.branches[0]!, { register: false });
++      const cashier = await stepUp(await boundToken(await mkUser(dev2.branchId), dev2));
++      expect(errCode(await post(cashier, dev))).toBe('OWNER_REQUIRED');
++    });
++  });
++});

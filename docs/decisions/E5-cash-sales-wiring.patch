@@ -1,0 +1,321 @@
+--- a/apps/api/src/modules/cash-register/cash-register.module.ts
++++ b/apps/api/src/modules/cash-register/cash-register.module.ts
+@@ -5,6 +5,7 @@
+ import { CashRegisterService } from './cash-register.service.js';
+ import { CashSourceReconciliationRepository } from './cash-source-reconciliation.repository.js';
+ import { CASH_IN_OUT_POLICY, CashInOutRepository } from './cash-in-out.repository.js';
++import { CASH_SALES_POLICY, CashSourceWiringRepository } from './cash-source-wiring.repository.js';
+ import { RegisterProvisioningRepository } from './register-provisioning.repository.js';
+ 
+ /**
+@@ -24,6 +25,9 @@
+     CashRegisterService,
+     CashMovementRecorderRepository,
+     CashSourceReconciliationRepository,
++    CashSourceWiringRepository,
++    // the shipped default is OFF: the wiring is inert until the owner approves a policy (E-5 decision 2)
++    { provide: CASH_SALES_POLICY, useValue: 'OFF' },
+     RegisterProvisioningRepository,
+     CashInOutRepository,
+     // no approved cash in / out policy exists: every operation is refused POLICY_NOT_APPROVED until the owner / accountant approve one
+@@ -32,6 +36,7 @@
+   exports: [
+     CashMovementRecorderRepository,
+     CashSourceReconciliationRepository,
++    CashSourceWiringRepository,
+     RegisterProvisioningRepository,
+     CashInOutRepository,
+   ],
+--- a/apps/api/src/modules/payments/payment.module.ts
++++ b/apps/api/src/modules/payments/payment.module.ts
+@@ -1,4 +1,5 @@
+ import { Module } from '@nestjs/common';
++import { CashRegisterModule } from '../cash-register/cash-register.module.js';
+ import { ReceivablesModule } from '../receivables/receivables.module.js';
+ import { PaymentCollectionRepository } from './payment-collection.repository.js';
+ import { PaymentRepository } from './payment.repository.js';
+@@ -60,7 +61,7 @@
+  * running underneath it.
+  */
+ @Module({
+-  imports: [ReceivablesModule],
++  imports: [ReceivablesModule, CashRegisterModule],
+   controllers: [PaymentController, PaymentAttemptController, PaymentWebhookController],
+   providers: [
+     PaymentCollectionRepository,
+--- a/apps/api/src/modules/payments/payment.repository.ts
++++ b/apps/api/src/modules/payments/payment.repository.ts
+@@ -1,6 +1,7 @@
+ import { Injectable } from '@nestjs/common';
+ import { ScopedRepository, DbService } from '../../common/data/index.js';
+ import { getContext, requireTenantContext } from '../../common/context/index.js';
++import { CashSourceWiringRepository } from '../cash-register/cash-source-wiring.repository.js';
+ import {
+   PaymentCollectionRepository,
+   type CaptureSynchronousTendersResult,
+@@ -34,6 +35,7 @@
+   constructor(
+     db: DbService,
+     private readonly collection: PaymentCollectionRepository,
++    private readonly cashRegister: CashSourceWiringRepository,
+   ) {
+     super(db);
+   }
+@@ -43,8 +45,8 @@
+   ): Promise<CaptureSynchronousTendersResult> {
+     const { tenantId } = requireTenantContext();
+     const actorUserId = getContext()?.userId ?? null;
+-    return this.scoped((tx) =>
+-      this.collection.captureSynchronousTendersInTx(tx, {
++    return this.scoped(async (tx) => {
++      const captured = await this.collection.captureSynchronousTendersInTx(tx, {
+         tenantId,
+         companyId: input.companyId,
+         branchId: input.branchId,
+@@ -54,7 +56,17 @@
+         createdByUserId: actorUserId,
+         actingUserId: actorUserId,
+         idempotencyKey: input.idempotencyKey,
+-      }),
+-    );
++      });
++      // E-5: the drawer movement of every cash tender, in THIS transaction (no-op while the policy is OFF)
++      await this.cashRegister.recordInTx(
++        tx,
++        captured.payments.map((p) => ({
++          kind: 'PAYMENT' as const,
++          id: p.paymentId,
++          origin: 'INVOICE_PAYMENT' as const,
++        })),
++      );
++      return captured;
++    });
+   }
+ }
+--- a/apps/api/src/modules/receivables/customer-receipt.repository.ts
++++ b/apps/api/src/modules/receivables/customer-receipt.repository.ts
+@@ -6,6 +6,7 @@
+   type CollectCustomerReceiptResult,
+ } from './customer-receipt-collection.repository.js';
+ import type { TenderMethod } from '../payments/tender.js';
++import { CashSourceWiringRepository } from '../cash-register/cash-source-wiring.repository.js';
+ 
+ export interface CreateCustomerReceiptInput {
+   companyId: string;
+@@ -29,6 +30,7 @@
+   constructor(
+     db: DbService,
+     private readonly collection: CustomerReceiptCollectionRepository,
++    private readonly cashRegister: CashSourceWiringRepository,
+   ) {
+     super(db);
+   }
+@@ -38,8 +40,8 @@
+   ): Promise<CollectCustomerReceiptResult> {
+     const { tenantId } = requireTenantContext();
+     const actorUserId = getContext()?.userId ?? null;
+-    return this.scoped((tx) =>
+-      this.collection.collectInTx(tx, {
++    return this.scoped(async (tx) => {
++      const collected = await this.collection.collectInTx(tx, {
+         tenantId,
+         companyId: input.companyId,
+         branchId: input.branchId,
+@@ -49,7 +51,12 @@
+         createdByUserId: actorUserId,
+         actingUserId: actorUserId,
+         idempotencyKey: input.idempotencyKey,
+-      }),
+-    );
++      });
++      // E-5: the drawer movement of a cash receipt, in THIS transaction (no-op while the policy is OFF)
++      await this.cashRegister.recordInTx(tx, [
++        { kind: 'PAYMENT', id: collected.paymentId, origin: 'CUSTOMER_RECEIPT' },
++      ]);
++      return collected;
++    });
+   }
+ }
+--- a/apps/api/src/modules/receivables/receivables.module.ts
++++ b/apps/api/src/modules/receivables/receivables.module.ts
+@@ -1,4 +1,5 @@
+ import { Module } from '@nestjs/common';
++import { CashRegisterModule } from '../cash-register/cash-register.module.js';
+ import { SystemClock } from '../../common/clock/clock.js';
+ import { AccountingModule } from '../accounting/accounting.module.js';
+ import { AccessModule } from '../access/access.module.js';
+@@ -96,7 +97,7 @@
+  * `OrderModule`'s own local declaration — no shared `ClockModule` exists).
+  */
+ @Module({
+-  imports: [AccountingModule, AccessModule, CustomerModule, SettlementsModule],
++  imports: [AccountingModule, AccessModule, CustomerModule, SettlementsModule, CashRegisterModule],
+   controllers: [
+     CustomerReceiptController,
+     PaymentAdvanceConversionController,
+--- a/apps/api/src/modules/receivables/refund.repository.ts
++++ b/apps/api/src/modules/receivables/refund.repository.ts
+@@ -4,6 +4,7 @@
+ import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
+ import { SystemClock } from '../../common/clock/clock.js';
+ import { derivePostingDate } from '../accounting/posting-date.js';
++import { CashSourceWiringRepository } from '../cash-register/cash-source-wiring.repository.js';
+ import {
+   RefundExecutionRepository,
+   type ExecuteLocalRefundResult,
+@@ -58,6 +59,7 @@
+     db: DbService,
+     private readonly clock: SystemClock,
+     private readonly execution: RefundExecutionRepository,
++    private readonly cashRegister: CashSourceWiringRepository,
+   ) {
+     super(db);
+   }
+@@ -100,8 +102,8 @@
+     }
+     const accountingDate = derivePostingDate(this.clock.now(), timezone);
+ 
+-    return this.scoped((tx) =>
+-      this.execution.executeLocalRefundInTx(tx, {
++    return this.scoped(async (tx) => {
++      const executed = await this.execution.executeLocalRefundInTx(tx, {
+         tenantId,
+         companyId: input.companyId,
+         branchId: input.branchId,
+@@ -112,7 +114,10 @@
+         reasonCode: input.reasonCode,
+         accountingDate,
+         actorUserId,
+-      }),
+-    );
++      });
++      // E-5: the drawer deduction of a CASH refund, in THIS transaction (no-op while the policy is OFF)
++      await this.cashRegister.recordInTx(tx, [{ kind: 'REFUND', id: executed.refundId }]);
++      return executed;
++    });
+   }
+ }
+--- a/apps/api/src/modules/sales/sales.module.ts
++++ b/apps/api/src/modules/sales/sales.module.ts
+@@ -1,4 +1,5 @@
+ import { Module } from '@nestjs/common';
++import { CashRegisterModule } from '../cash-register/cash-register.module.js';
+ import { AccessModule } from '../access/access.module.js';
+ import { AccountingModule } from '../accounting/accounting.module.js';
+ import { OrderModule } from '../orders/order.module.js';
+@@ -37,7 +38,14 @@
+  * `SalesController` the thin HTTP surface.
+  */
+ @Module({
+-  imports: [OrderModule, PaymentModule, ReceivablesModule, AccountingModule, AccessModule],
++  imports: [
++    OrderModule,
++    PaymentModule,
++    ReceivablesModule,
++    AccountingModule,
++    AccessModule,
++    CashRegisterModule,
++  ],
+   controllers: [SalesController],
+   providers: [
+     AtomicWalkInSaleService,
+--- a/apps/api/src/modules/sales/sales-application.service.ts
++++ b/apps/api/src/modules/sales/sales-application.service.ts
+@@ -10,6 +10,7 @@
+ import { requireTenantContext, getContext } from '../../common/context/index.js';
+ import { ScopedRepository, DbService } from '../../common/data/index.js';
+ import { DomainError, NotFoundError } from '../../common/errors/domain-error.js';
++import { CashSourceWiringRepository } from '../cash-register/cash-source-wiring.repository.js';
+ import { AtomicWalkInSaleService } from './atomic-walk-in-sale.service.js';
+ import { toCompleteSaleResponse, type CompleteSaleResponse } from './complete-sale-response.js';
+ import type { SaleCompletedPayload, SaleEventType } from './sale-events.js';
+@@ -63,6 +64,7 @@
+     db: DbService,
+     private readonly atomicSale: AtomicWalkInSaleService,
+     private readonly outbox: OutboxWriter,
++    private readonly cashRegister: CashSourceWiringRepository,
+   ) {
+     super(db);
+   }
+@@ -117,6 +119,15 @@
+       }
+ 
+       await this.enqueueSaleCompleted(tx, tenantId, command, result.invoiceId);
++      // E-5: the drawer movement of every cash tender, in THIS transaction (no-op while the policy is OFF)
++      await this.cashRegister.recordInTx(
++        tx,
++        result.payments.map((p) => ({
++          kind: 'PAYMENT' as const,
++          id: p.paymentId,
++          origin: 'SALE_TENDER' as const,
++        })),
++      );
+       return toCompleteSaleResponse(result);
+     });
+   }
+--- /dev/null
++++ b/apps/api/src/modules/cash-register/cash-source-wiring.repository.ts
+@@ -0,0 +1,63 @@
++import { Inject, Injectable } from '@nestjs/common';
++import type { ScopedTx } from '@flower/db';
++import { requireTenantContext } from '../../common/context/index.js';
++import { DomainError } from '../../common/errors/domain-error.js';
++import {
++  CashMovementRecorderRepository,
++  type CashSourceRef,
++  type RecordOutcome,
++} from './cash-movement-recorder.repository.js';
++
++/**
++ * E-5 — the ONE entry point the frozen sale / payment / receipt / refund transactions call (inside their own transaction) once the
++ * owner approves the wiring. It builds the caller identity from the verified `RequestContext` (never a request field), runs the
++ * recorder, and applies the OWNER'S policy to a refusal.
++ *
++ *  OFF         — does nothing at all (the shipped default: the patch changes no behaviour until the owner flips it).
++ *  POS_STRICT  — a session WITHOUT a verified registered device (Owner Web, legacy attribution-only terminal) is skipped; a verified POS
++ *                terminal must have an open register session, a verified device and the right scope, or the WHOLE transaction aborts.
++ *  ALL_STRICT  — as POS_STRICT, and a cash tender from a session without a verified terminal is refused too.
++ *
++ * A non-cash tender / refund is never a refusal under any policy (the recorder says NOT_ELIGIBLE before touching the register).
++ */
++export type CashSalesPolicy = 'OFF' | 'POS_STRICT' | 'ALL_STRICT';
++export const CASH_SALES_POLICY = Symbol('CASH_SALES_POLICY');
++
++const ACCEPTED: ReadonlySet<RecordOutcome['kind']> = new Set([
++  'RECORDED',
++  'ALREADY_RECORDED',
++  'NOT_ELIGIBLE',
++]);
++
++@Injectable()
++export class CashSourceWiringRepository {
++  constructor(
++    private readonly recorder: CashMovementRecorderRepository,
++    @Inject(CASH_SALES_POLICY) private readonly policy: CashSalesPolicy,
++  ) {}
++
++  async recordInTx(tx: ScopedTx, refs: readonly CashSourceRef[]): Promise<void> {
++    if (this.policy === 'OFF' || refs.length === 0) return;
++    const ctx = requireTenantContext();
++    const outcomes = await this.recorder.recordManyInTx(
++      tx,
++      {
++        tenantId: ctx.tenantId,
++        terminalId: ctx.posTerminalId,
++        deviceId: ctx.deviceId,
++        actorUserId: ctx.userId,
++      },
++      refs,
++    );
++    for (const o of outcomes) {
++      if (ACCEPTED.has(o.kind)) continue;
++      if (o.kind === 'NO_VERIFIED_TERMINAL' && this.policy === 'POS_STRICT') continue;
++      // the refusal aborts the caller's transaction: the sale / payment / refund and its drawer movement commit together or not at all
++      throw new DomainError(
++        'CASH_REGISTER_REFUSED',
++        `the cash register refused this cash movement: ${o.kind}`,
++        409,
++      );
++    }
++  }
++}

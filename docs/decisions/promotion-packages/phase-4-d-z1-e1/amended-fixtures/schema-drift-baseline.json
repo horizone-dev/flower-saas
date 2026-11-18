@@ -1,0 +1,1024 @@
+{
+  "description": "Reviewed baseline of the differences between schema.prisma and the database built by the real migrations. The frozen Phase 3 portion is grandfathered; Phase 4 tables may differ only by DropForeignKey (rule R2). Regenerate ONLY in a reviewed diff: UPDATE_SCHEMA_DRIFT_BASELINE=1 pnpm --filter @flower/db exec vitest run test/schema-drift.integration.test.ts (refused when CI is set).",
+  "prismaVersion": "7.10.0",
+  "statementCount": 254,
+  "sha256": "708b19ab6e7e38d2a3caa51b474295074980fa45ec850c041ea491855dfffd7b",
+  "statements": [
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"branch_variant_availability_scope_key\" RENAME TO \"branch_variant_availability_tenantId_companyId_branchId_var_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"branch_variant_price_set_scope_key\" RENAME TO \"branch_variant_price_set_tenantId_companyId_branchId_varian_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"branch_variant_uom_price_scope_idx\" RENAME TO \"branch_variant_uom_price_tenantId_companyId_branchId_varian_idx\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"branch_variant_uom_price_scope_uom_key\" RENAME TO \"branch_variant_uom_price_tenantId_companyId_branchId_varian_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"company_tenantId_id_currency_key\" RENAME TO \"company_tenantId_id_defaultCurrency_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"company_variant_price_set_scope_key\" RENAME TO \"company_variant_price_set_tenantId_companyId_variantId_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"company_variant_uom_price_scope_idx\" RENAME TO \"company_variant_uom_price_tenantId_companyId_variantId_idx\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"company_variant_uom_price_scope_uom_key\" RENAME TO \"company_variant_uom_price_tenantId_companyId_variantId_uomC_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"credit_note_coverage_release_creditNoteId_sourceAdvanceApp_key\" RENAME TO \"credit_note_coverage_release_creditNoteId_sourceAdvanceAppl_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"credit_note_coverage_release_creditNoteId_sourcePaymentAll_key\" RENAME TO \"credit_note_coverage_release_creditNoteId_sourcePaymentAllo_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"customer_account_entry_customerReceivablePaymentApplicationId_k\" RENAME TO \"customer_account_entry_customerReceivablePaymentApplication_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"customer_opening_balance_init_one_per_account_branch_key\" RENAME TO \"customer_opening_balance_init_tenantId_companyId_branchId_c_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"customer_opening_balance_init_tenant_company_idx\" RENAME TO \"customer_opening_balance_init_tenantId_companyId_idx\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"customer_opening_balance_init_tenant_id_key\" RENAME TO \"customer_opening_balance_init_tenantId_id_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"customer_receivable_payment_application_customerCompanyAccountI\" RENAME TO \"customer_receivable_payment_application_customerCompanyAcco_idx\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"customer_receivable_payment_application_customerReceivableId_id\" RENAME TO \"customer_receivable_payment_application_customerReceivableI_idx\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"customer_receivable_payment_application_tenantId_companyId_id_k\" RENAME TO \"customer_receivable_payment_application_tenantId_companyId__key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"product_attribute_value_tenantId_productId_attributeDefinitionI\" RENAME TO \"product_attribute_value_tenantId_productId_attributeDefinit_key\";"
+    },
+    {
+      "kind": "RenameIndex",
+      "sql": "ALTER INDEX \"uom_conversion_tenantId_scope_idx\" RENAME TO \"uom_conversion_tenantId_scopeKind_scopeId_idx\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"attribute_definition\" DROP CONSTRAINT \"attribute_definition_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"attribute_definition\" DROP CONSTRAINT \"attribute_definition_tenant_category_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"attribute_definition\" DROP CONSTRAINT \"attribute_definition_tenant_product_type_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"attribute_option\" DROP CONSTRAINT \"attribute_option_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"attribute_option\" DROP CONSTRAINT \"attribute_option_tenant_definition_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_availability\" DROP CONSTRAINT \"branch_variant_availability_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_availability\" DROP CONSTRAINT \"branch_variant_availability_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_availability\" DROP CONSTRAINT \"branch_variant_availability_tenant_variant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_price_set\" DROP CONSTRAINT \"branch_variant_price_set_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_price_set\" DROP CONSTRAINT \"branch_variant_price_set_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_price_set\" DROP CONSTRAINT \"branch_variant_price_set_tenant_variant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_uom_price\" DROP CONSTRAINT \"branch_variant_uom_price_company_currency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_uom_price\" DROP CONSTRAINT \"branch_variant_uom_price_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_uom_price\" DROP CONSTRAINT \"branch_variant_uom_price_price_set_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"branch_variant_uom_price\" DROP CONSTRAINT \"branch_variant_uom_price_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"cash_movement\" DROP CONSTRAINT \"cash_movement_acting_user_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"cash_movement\" DROP CONSTRAINT \"cash_movement_session_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"cash_movement\" DROP CONSTRAINT \"cash_movement_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"cash_register\" DROP CONSTRAINT \"cash_register_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"cash_register\" DROP CONSTRAINT \"cash_register_terminal_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"category\" DROP CONSTRAINT \"category_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"category\" DROP CONSTRAINT \"category_tenant_parent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company\" DROP CONSTRAINT \"company_cancellation_fee_tax_category_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company\" DROP CONSTRAINT \"company_countryCode_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company\" DROP CONSTRAINT \"company_defaultCurrency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_price_set\" DROP CONSTRAINT \"company_variant_price_set_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_price_set\" DROP CONSTRAINT \"company_variant_price_set_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_price_set\" DROP CONSTRAINT \"company_variant_price_set_tenant_variant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_uom_price\" DROP CONSTRAINT \"company_variant_uom_price_company_currency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_uom_price\" DROP CONSTRAINT \"company_variant_uom_price_price_set_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_uom_price\" DROP CONSTRAINT \"company_variant_uom_price_purchase_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_uom_price\" DROP CONSTRAINT \"company_variant_uom_price_sell_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"company_variant_uom_price\" DROP CONSTRAINT \"company_variant_uom_price_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"country\" DROP CONSTRAINT \"country_defaultCurrencyCode_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"country_tax_config\" DROP CONSTRAINT \"country_tax_config_countryCode_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"credit_note\" DROP CONSTRAINT \"credit_note_invoice_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_account_entry\" DROP CONSTRAINT \"customer_account_entry_account_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_account_entry\" DROP CONSTRAINT \"customer_account_entry_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_account_entry\" DROP CONSTRAINT \"customer_account_entry_company_tenant_fkey\";"
+    },
+    {
+      "kind": "RenameForeignKey",
+      "sql": "ALTER TABLE \"customer_account_entry\" RENAME CONSTRAINT \"customer_account_entry_customerReceivablePaymentApplicationId_f\" TO \"customer_account_entry_customerReceivablePaymentApplicatio_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance\" DROP CONSTRAINT \"customer_advance_account_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance\" DROP CONSTRAINT \"customer_advance_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance\" DROP CONSTRAINT \"customer_advance_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance\" DROP CONSTRAINT \"customer_advance_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance\" DROP CONSTRAINT \"customer_advance_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance\" DROP CONSTRAINT \"customer_advance_source_payment_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance_application\" DROP CONSTRAINT \"customer_advance_application_advance_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance_application\" DROP CONSTRAINT \"customer_advance_application_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance_application\" DROP CONSTRAINT \"customer_advance_application_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance_application\" DROP CONSTRAINT \"customer_advance_application_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance_application\" DROP CONSTRAINT \"customer_advance_application_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_advance_application\" DROP CONSTRAINT \"customer_advance_application_receivable_tenant_company_branch_f\";"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"customer_company_account\" ADD CONSTRAINT \"customer_company_account_tenantId_companyId_fkey\" FOREIGN KEY (\"tenantId\", \"companyId\") REFERENCES \"company\"(\"tenantId\", \"id\") ON DELETE RESTRICT ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"customer_company_account\" ADD CONSTRAINT \"customer_company_account_tenantId_customerId_fkey\" FOREIGN KEY (\"tenantId\", \"customerId\") REFERENCES \"customer\"(\"tenantId\", \"id\") ON DELETE RESTRICT ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_company_account\" DROP CONSTRAINT \"customer_company_account_companyId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_company_account\" DROP CONSTRAINT \"customer_company_account_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_company_account\" DROP CONSTRAINT \"customer_company_account_customerId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_company_account\" DROP CONSTRAINT \"customer_company_account_customer_tenant_fkey\";"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"customer_opening_balance_init\" ADD CONSTRAINT \"customer_opening_balance_init_branchId_fkey\" FOREIGN KEY (\"branchId\") REFERENCES \"branch\"(\"id\") ON DELETE RESTRICT ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"customer_opening_balance_init\" ADD CONSTRAINT \"customer_opening_balance_init_companyId_fkey\" FOREIGN KEY (\"companyId\") REFERENCES \"company\"(\"id\") ON DELETE RESTRICT ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"customer_opening_balance_init\" ADD CONSTRAINT \"customer_opening_balance_init_customerCompanyAccountId_fkey\" FOREIGN KEY (\"customerCompanyAccountId\") REFERENCES \"customer_company_account\"(\"id\") ON DELETE RESTRICT ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"customer_opening_balance_init\" ADD CONSTRAINT \"customer_opening_balance_init_tenantId_fkey\" FOREIGN KEY (\"tenantId\") REFERENCES \"tenant\"(\"id\") ON DELETE CASCADE ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_opening_balance_init\" DROP CONSTRAINT \"customer_opening_balance_init_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_opening_balance_init\" DROP CONSTRAINT \"customer_opening_balance_init_cca_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable\" DROP CONSTRAINT \"customer_receivable_account_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable\" DROP CONSTRAINT \"customer_receivable_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable\" DROP CONSTRAINT \"customer_receivable_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable\" DROP CONSTRAINT \"customer_receivable_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable\" DROP CONSTRAINT \"customer_receivable_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable\" DROP CONSTRAINT \"customer_receivable_invoice_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" DROP CONSTRAINT \"customer_receivable_payment_application_account_tenant_company_\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" DROP CONSTRAINT \"customer_receivable_payment_application_branch_tenant_company_f\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" DROP CONSTRAINT \"customer_receivable_payment_application_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" DROP CONSTRAINT \"customer_receivable_payment_application_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" DROP CONSTRAINT \"customer_receivable_payment_application_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" DROP CONSTRAINT \"customer_receivable_payment_application_payment_tenant_company_\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" DROP CONSTRAINT \"customer_receivable_payment_application_receivable_tenant_compa\";"
+    },
+    {
+      "kind": "RenameForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" RENAME CONSTRAINT \"customer_receivable_payment_application_customerCompanyAccountI\" TO \"customer_receivable_payment_application_customerCompanyAcc_fkey\";"
+    },
+    {
+      "kind": "RenameForeignKey",
+      "sql": "ALTER TABLE \"customer_receivable_payment_application\" RENAME CONSTRAINT \"customer_receivable_payment_application_customerReceivableId_fk\" TO \"customer_receivable_payment_application_customerReceivable_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"device_activation_code\" DROP CONSTRAINT \"device_activation_code_consumed_by_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"device_activation_code\" DROP CONSTRAINT \"device_activation_code_replaces_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"device_activation_code\" DROP CONSTRAINT \"device_activation_code_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"device_activation_code\" DROP CONSTRAINT \"device_activation_code_terminal_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"device_proof_claim\" DROP CONSTRAINT \"device_proof_claim_device_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"device_proof_claim\" DROP CONSTRAINT \"device_proof_claim_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"document_number_counter\" DROP CONSTRAINT \"document_number_counter_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_approver_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_branch_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_category_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_company_currency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_creator_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_terminal_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_category\" DROP CONSTRAINT \"expense_category_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_actor_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_expense_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"holiday\" DROP CONSTRAINT \"holiday_countryCode_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"invoice\" DROP CONSTRAINT \"invoice_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"invoice\" DROP CONSTRAINT \"invoice_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"invoice\" DROP CONSTRAINT \"invoice_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"invoice\" DROP CONSTRAINT \"invoice_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"invoice\" DROP CONSTRAINT \"invoice_order_tenant_company_fkey\";"
+    },
+    {
+      "kind": "AlterTable",
+      "sql": "ALTER TABLE \"item_identifier\" DROP COLUMN \"targetVariantId\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"item_identifier\" DROP CONSTRAINT \"item_identifier_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"item_identifier\" DROP CONSTRAINT \"item_identifier_tenant_variant_fkey\";"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"journal_entry\" ADD CONSTRAINT \"journal_entry_reversalOfJournalEntryId_fkey\" FOREIGN KEY (\"reversalOfJournalEntryId\") REFERENCES \"journal_entry\"(\"id\") ON DELETE RESTRICT ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"journal_entry\" DROP CONSTRAINT \"journal_entry_reversal_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"journal_line\" DROP CONSTRAINT \"journal_line_account_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"journal_line\" DROP CONSTRAINT \"journal_line_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"journal_line\" DROP CONSTRAINT \"journal_line_journal_entry_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"journal_line\" DROP CONSTRAINT \"journal_line_pos_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"option_group\" DROP CONSTRAINT \"option_group_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"option_group\" DROP CONSTRAINT \"option_group_tenant_product_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"option_value\" DROP CONSTRAINT \"option_value_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"option_value\" DROP CONSTRAINT \"option_value_tenant_group_fkey\";"
+    },
+    {
+      "kind": "AddForeignKey",
+      "sql": "ALTER TABLE \"order\" ADD CONSTRAINT \"order_tenantId_customerId_fkey\" FOREIGN KEY (\"tenantId\", \"customerId\") REFERENCES \"customer\"(\"tenantId\", \"id\") ON DELETE RESTRICT ON UPDATE CASCADE;"
+    },
+    {
+      "kind": "AlterTable",
+      "sql": "ALTER TABLE \"order\" ALTER COLUMN \"commercialSnapshotFingerprintVersion\" DROP DEFAULT;"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order\" DROP CONSTRAINT \"order_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order\" DROP CONSTRAINT \"order_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order\" DROP CONSTRAINT \"order_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order\" DROP CONSTRAINT \"order_customer_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order\" DROP CONSTRAINT \"order_fulfilling_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order\" DROP CONSTRAINT \"order_origin_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order\" DROP CONSTRAINT \"order_pos_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order_line\" DROP CONSTRAINT \"order_line_order_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order_line\" DROP CONSTRAINT \"order_line_productId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order_line\" DROP CONSTRAINT \"order_line_product_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order_line\" DROP CONSTRAINT \"order_line_unit_price_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order_line\" DROP CONSTRAINT \"order_line_unit_price_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order_line\" DROP CONSTRAINT \"order_line_variantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"order_line\" DROP CONSTRAINT \"order_line_variant_same_product_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_account_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_branch_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_company_currency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_creator_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment\" DROP CONSTRAINT \"payment_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment\" DROP CONSTRAINT \"payment_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment\" DROP CONSTRAINT \"payment_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment\" DROP CONSTRAINT \"payment_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment\" DROP CONSTRAINT \"payment_source_attempt_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_allocation\" DROP CONSTRAINT \"payment_allocation_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_allocation\" DROP CONSTRAINT \"payment_allocation_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_allocation\" DROP CONSTRAINT \"payment_allocation_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_allocation\" DROP CONSTRAINT \"payment_allocation_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_allocation\" DROP CONSTRAINT \"payment_allocation_invoice_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_allocation\" DROP CONSTRAINT \"payment_allocation_payment_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt\" DROP CONSTRAINT \"payment_attempt_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt\" DROP CONSTRAINT \"payment_attempt_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt\" DROP CONSTRAINT \"payment_attempt_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt\" DROP CONSTRAINT \"payment_attempt_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt\" DROP CONSTRAINT \"payment_attempt_customer_company_account_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt\" DROP CONSTRAINT \"payment_attempt_order_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt\" DROP CONSTRAINT \"payment_attempt_target_invoice_order_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt_event\" DROP CONSTRAINT \"payment_attempt_event_attempt_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt_event\" DROP CONSTRAINT \"payment_attempt_event_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_attempt_event\" DROP CONSTRAINT \"payment_attempt_event_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_webhook_endpoint\" DROP CONSTRAINT \"payment_webhook_endpoint_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"payment_webhook_endpoint\" DROP CONSTRAINT \"payment_webhook_endpoint_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"pos_device\" DROP CONSTRAINT \"pos_device_replaced_by_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"pos_device\" DROP CONSTRAINT \"pos_device_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"pos_device\" DROP CONSTRAINT \"pos_device_terminal_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product\" DROP CONSTRAINT \"product_taxCategoryKey_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product\" DROP CONSTRAINT \"product_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product\" DROP CONSTRAINT \"product_tenant_category_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product\" DROP CONSTRAINT \"product_tenant_product_type_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product_attribute_value\" DROP CONSTRAINT \"product_attribute_value_enum_option_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product_attribute_value\" DROP CONSTRAINT \"product_attribute_value_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product_attribute_value\" DROP CONSTRAINT \"product_attribute_value_tenant_definition_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product_attribute_value\" DROP CONSTRAINT \"product_attribute_value_tenant_product_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"product_type\" DROP CONSTRAINT \"product_type_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"provider_payment_event\" DROP CONSTRAINT \"provider_payment_event_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"provider_payment_event\" DROP CONSTRAINT \"provider_payment_event_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session\" DROP CONSTRAINT \"register_session_cashier_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session\" DROP CONSTRAINT \"register_session_company_currency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session\" DROP CONSTRAINT \"register_session_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session\" DROP CONSTRAINT \"register_session_register_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session\" DROP CONSTRAINT \"register_session_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_counter_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_session_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_supervisor_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_application\" DROP CONSTRAINT \"settlement_application_batch_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_application\" DROP CONSTRAINT \"settlement_application_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_application\" DROP CONSTRAINT \"settlement_application_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_application\" DROP CONSTRAINT \"settlement_application_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_application\" DROP CONSTRAINT \"settlement_application_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_application\" DROP CONSTRAINT \"settlement_application_payment_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_batch\" DROP CONSTRAINT \"settlement_batch_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_batch\" DROP CONSTRAINT \"settlement_batch_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_batch\" DROP CONSTRAINT \"settlement_batch_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_batch\" DROP CONSTRAINT \"settlement_batch_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_line\" DROP CONSTRAINT \"settlement_line_batch_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_line\" DROP CONSTRAINT \"settlement_line_branch_tenant_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_line\" DROP CONSTRAINT \"settlement_line_company_tenant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_line\" DROP CONSTRAINT \"settlement_line_currency_company_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_line\" DROP CONSTRAINT \"settlement_line_currency_exponent_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"settlement_line\" DROP CONSTRAINT \"settlement_line_matched_payment_tenant_company_branch_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"tax_rate\" DROP CONSTRAINT \"tax_rate_countryCode_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"tax_rate\" DROP CONSTRAINT \"tax_rate_taxCategoryKey_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"translation\" DROP CONSTRAINT \"translation_locale_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"uom\" DROP CONSTRAINT \"uom_tenantId_fkey\";"
+    },
+    {
+      "kind": "AlterTable",
+      "sql": "ALTER TABLE \"uom_conversion\" DROP COLUMN \"scopeProductId\", DROP COLUMN \"scopeVariantId\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"uom_conversion\" DROP CONSTRAINT \"uom_conversion_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"uom_conversion\" DROP CONSTRAINT \"uom_conversion_tenant_product_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"uom_conversion\" DROP CONSTRAINT \"uom_conversion_tenant_variant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant\" DROP CONSTRAINT \"variant_taxCategoryKey_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant\" DROP CONSTRAINT \"variant_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant\" DROP CONSTRAINT \"variant_tenant_product_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant_option_value\" DROP CONSTRAINT \"variant_option_value_group_value_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant_option_value\" DROP CONSTRAINT \"variant_option_value_productId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant_option_value\" DROP CONSTRAINT \"variant_option_value_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant_option_value\" DROP CONSTRAINT \"variant_option_value_tenant_product_group_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"variant_option_value\" DROP CONSTRAINT \"variant_option_value_tenant_product_variant_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_approver_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_counter_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_creator_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_session_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_tenantId_fkey\";"
+    },
+    {
+      "kind": "CreateIndex",
+      "sql": "CREATE INDEX \"payment_attempt_providerCredentialId_providerReference_idx\" ON \"payment_attempt\"(\"providerCredentialId\", \"providerReference\");"
+    },
+    {
+      "kind": "CreateIndex",
+      "sql": "CREATE INDEX \"payment_attempt_targetInvoiceId_state_idx\" ON \"payment_attempt\"(\"targetInvoiceId\", \"state\");"
+    },
+    {
+      "kind": "CreateIndex",
+      "sql": "CREATE INDEX \"payment_attempt_tenantId_createdByUserId_idempotencyKey_idx\" ON \"payment_attempt\"(\"tenantId\", \"createdByUserId\", \"idempotencyKey\");"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"credit_note_coverage_release_sourceAdvanceApplicationId_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"credit_note_coverage_release_sourcePaymentAllocationId_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"invoice_tenantId_companyId_orderId_id_key\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"item_identifier_tenantId_targetVariantId_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"product_nameAr_trgm_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"product_nameEn_trgm_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"uom_conversion_tenantId_scopeProductId_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"uom_conversion_tenantId_scopeVariantId_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"variant_option_value_tenantId_optionGroupId_idx\";"
+    },
+    {
+      "kind": "DropIndex",
+      "sql": "DROP INDEX \"variant_option_value_tenantId_productId_idx\";"
+    }
+  ]
+}

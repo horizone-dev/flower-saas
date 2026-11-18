@@ -1,0 +1,310 @@
+import 'reflect-metadata';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Test } from '@nestjs/testing';
+import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
+import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
+import { PLATFORM_PERMISSIONS } from '@flower/permissions';
+import pg from 'pg';
+import { AppModule } from '../../app.module.js';
+import { AllExceptionsFilter } from '../../common/errors/all-exceptions.filter.js';
+import { installRequestContext } from '../../common/context/index.js';
+import { JwtService } from '../../common/auth/jwt.service.js';
+import { SessionStore } from '../../common/auth/session-store.js';
+import type { SessionData } from '../../common/auth/session.types.js';
+
+const PLAN_V = '00000000-0000-7000-8000-000000340001';
+const PLATFORM_USER = '00000000-0000-7000-8000-000000340002';
+const MANAGE = ['catalog:view', 'catalog:manage', 'variants:manage'];
+
+/**
+ * F-6 (PROPOSED amendment, NOT approved) - a variant with no effective tax category must not be activated: the sale path would charge it
+ * 0 tax. Explicit ZERO_RATED / EXEMPT categories remain legitimate. The product default is inherited exactly as in tax resolution.
+ */
+describe('F-6 variant activation fails closed without a tax category (integration)', () => {
+  let stack: TestStack;
+  let app: NestFastifyApplication;
+  let jwt: JwtService;
+  let store: SessionStore;
+  let superTok = '';
+  let tenantA = '';
+  let ownerA = '';
+
+  beforeAll(async () => {
+    stack = await startTestStack({ services: ['postgres', 'redis'] });
+    migrateTestDb(stack.postgres.url);
+    await seed(stack.postgres.url);
+    process.env['DATABASE_URL'] = stack.postgres.url;
+    process.env['PLATFORM_DATABASE_URL'] = stack.postgres.url;
+    process.env['REDIS_URL'] = stack.redis.url;
+    process.env['AUTH_JWT_SECRET'] = 'integration-test-jwt-secret-0000000000';
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    app.setGlobalPrefix('v1', { exclude: ['healthz', 'readyz'] });
+    app.useGlobalFilters(new AllExceptionsFilter());
+    installRequestContext(app.getHttpAdapter().getInstance());
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
+    jwt = app.get(JwtService);
+    store = app.get(SessionStore);
+    superTok = await mintPlatform();
+    tenantA = await provision('vat-a', 'CUSTOM');
+    await setCap(tenantA, 'strategy.stocked', true);
+    await setCap(tenantA, 'variants', true);
+    ownerA = await mintTenant('oa', tenantA, MANAGE);
+  }, 300_000);
+
+  afterAll(async () => {
+    await app?.close();
+    await stack?.stop();
+    for (const k of ['DATABASE_URL', 'PLATFORM_DATABASE_URL', 'REDIS_URL', 'AUTH_JWT_SECRET']) {
+      delete process.env[k];
+    }
+  });
+
+  function base(sessionId: string, realm: 'tenant' | 'platform'): SessionData {
+    return {
+      sessionId,
+      realm,
+      familyId: 'f',
+      tenantId: null,
+      userId: null,
+      platformUserId: null,
+      accountType: 'USER',
+      posTerminalId: null,
+      deviceId: null,
+      mfaLevel: 'NONE',
+      stepUpUntil: null,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3_600_000,
+      revokedAt: null,
+      revokeReason: null,
+      impersonatorPlatformUserId: null,
+      access: null,
+    };
+  }
+  async function mintPlatform(): Promise<string> {
+    const s = base('plat', 'platform');
+    s.platformUserId = PLATFORM_USER;
+    s.accountType = 'PLATFORM';
+    s.mfaLevel = 'STEP_UP';
+    s.stepUpUntil = Date.now() + 600_000;
+    s.access = {
+      effectivePermissions: [...PLATFORM_PERMISSIONS],
+      companyScope: 'ALL',
+      branchScope: 'ALL',
+      perBranchOverlay: {},
+      entitledModules: [],
+      planKey: null,
+    };
+    await store.set(s);
+    return jwt.sign({ sub: PLATFORM_USER, sid: s.sessionId, aud: 'platform' });
+  }
+  async function mintTenant(id: string, forTenant: string, perms: string[]): Promise<string> {
+    const s = base(`ten-${id}`, 'tenant');
+    s.tenantId = forTenant;
+    s.userId = '00000000-0000-7000-8000-000000000001';
+    s.accountType = 'OWNER';
+    s.access = {
+      effectivePermissions: perms,
+      companyScope: 'ALL',
+      branchScope: 'ALL',
+      perBranchOverlay: {},
+      entitledModules: [],
+      planKey: null,
+    };
+    await store.set(s);
+    return jwt.sign({ sub: s.userId, sid: s.sessionId, aud: 'tenant', tid: forTenant });
+  }
+  const req = (
+    method: 'GET' | 'POST' | 'PUT',
+    url: string,
+    token: string | null,
+    body?: Record<string, unknown>,
+    headers: Record<string, string> = {},
+  ) =>
+    app.inject({
+      method,
+      url: `/v1${url}`,
+      ...(token ? { headers: { authorization: `Bearer ${token}`, ...headers } } : { headers }),
+      ...(body ? { payload: body } : {}),
+    });
+  async function provision(slug: string, businessTypeKey: string): Promise<string> {
+    const res = await req(
+      'POST',
+      '/platform/tenants',
+      superTok,
+      {
+        slug,
+        name: slug,
+        region: 'AE',
+        companyCountryCode: 'AE',
+        businessTypeKey,
+        planVersionId: PLAN_V,
+        ownerEmail: `owner@${slug}.test`,
+      },
+      { 'idempotency-key': `prov-${slug}` },
+    );
+    expect(res.statusCode, res.payload).toBe(201);
+    return (res.json() as { tenantId: string }).tenantId;
+  }
+  async function sql<T>(text: string, params: unknown[] = []): Promise<T[]> {
+    const c = new pg.Client({ connectionString: stack.postgres.url });
+    await c.connect();
+    try {
+      return (await c.query(text, params)).rows as T[];
+    } finally {
+      await c.end();
+    }
+  }
+  async function setCap(tenantId: string, key: string, enabled: boolean): Promise<void> {
+    await sql(
+      `INSERT INTO tenant_catalog_capability ("tenantId","capabilityKey",enabled,"sourceKind","updatedAt")
+       VALUES ($1,$2,$3,'MANUAL',now())
+       ON CONFLICT ("tenantId","capabilityKey") DO UPDATE SET enabled = EXCLUDED.enabled`,
+      [tenantId, key, enabled],
+    );
+  }
+  const errCode = (r: { json: () => unknown }): string =>
+    (r.json() as { error: { code: string } }).error.code;
+  let n = 0;
+  const ik = (): string => `f6-key-${++n}`;
+
+  /** a STOCKED product (ACTIVE) with its default variant (DRAFT, base UOM set): ready to activate */
+  async function readyProduct(slug: string, productTax: string | null) {
+    const cat = await req(
+      'POST',
+      '/catalog/categories',
+      ownerA,
+      { slug: `c-${slug}`, nameEn: slug },
+      { 'idempotency-key': ik() },
+    );
+    const catId = (cat.json() as { id: string }).id;
+    const p = await req(
+      'POST',
+      '/catalog/products',
+      ownerA,
+      { categoryId: catId, nameEn: slug, slug, fulfilmentStrategy: 'STOCKED' },
+      { 'idempotency-key': ik() },
+    );
+    const prod = p.json() as { id: string; version: number };
+    let pv = prod.version;
+    if (productTax !== null) {
+      const t = await req(
+        'PUT',
+        `/catalog/products/${prod.id}/tax-category`,
+        ownerA,
+        { taxCategoryKey: productTax },
+        { 'if-match': `"${pv}"` },
+      );
+      expect(t.statusCode, t.payload).toBe(200);
+      pv = (t.json() as { version: number }).version;
+    }
+    const act = await req('POST', `/catalog/products/${prod.id}/activate`, ownerA, undefined, {
+      'idempotency-key': ik(),
+      'if-match': `"${pv}"`,
+    });
+    expect(act.statusCode, act.payload).toBe(200);
+    const vs = (await req('GET', `/catalog/products/${prod.id}/variants`, ownerA)).json() as {
+      id: string;
+    }[];
+    const vid = vs[0]!.id;
+    const cur = (await req('GET', `/catalog/variants/${vid}`, ownerA)).json() as {
+      version: number;
+    };
+    const uom = await req(
+      'PUT',
+      `/catalog/variants/${vid}/base-uom`,
+      ownerA,
+      { baseUomCode: 'piece' },
+      { 'if-match': `"${cur.version}"` },
+    );
+    expect(uom.statusCode, uom.payload).toBe(200);
+    return { productId: prod.id, variantId: vid };
+  }
+  const versionOf = async (vid: string): Promise<number> =>
+    ((await req('GET', `/catalog/variants/${vid}`, ownerA)).json() as { version: number }).version;
+  const activate = async (vid: string) =>
+    req('POST', `/catalog/variants/${vid}/activate`, ownerA, undefined, {
+      'idempotency-key': ik(),
+      'if-match': `"${await versionOf(vid)}"`,
+    });
+
+  it('refuses to activate a variant with no variant or product tax category: 409, no state change, no audit row', async () => {
+    const { variantId } = await readyProduct('no-cat', null);
+    const before = await versionOf(variantId);
+    const r = await activate(variantId);
+    expect(r.statusCode, r.payload).toBe(409);
+    expect(errCode(r)).toBe('VARIANT_TAX_CATEGORY_REQUIRED');
+    expect(await versionOf(variantId)).toBe(before);
+    const audit = await sql<{ n: string }>(
+      `SELECT count(*)::int AS n FROM audit_log WHERE "resourceId" = $1 AND action = 'catalog.variant_status_changed'`,
+      [variantId],
+    );
+    expect(Number(audit[0]!.n)).toBe(0);
+  });
+
+  it('a product-level category is inherited: the variant then activates', async () => {
+    const { variantId } = await readyProduct('prod-cat', 'STANDARD');
+    const r = await activate(variantId);
+    expect(r.statusCode, r.payload).toBe(200);
+  });
+
+  it('a variant-level category alone is enough', async () => {
+    const { variantId } = await readyProduct('var-cat', null);
+    const v = await versionOf(variantId);
+    const t = await req(
+      'PUT',
+      `/catalog/variants/${variantId}/tax-category`,
+      ownerA,
+      { taxCategoryKey: 'STANDARD' },
+      { 'if-match': `"${v}"` },
+    );
+    expect(t.statusCode, t.payload).toBe(200);
+    const r = await activate(variantId);
+    expect(r.statusCode, r.payload).toBe(200);
+  });
+
+  it.each(['ZERO_RATED', 'EXEMPT', 'REDUCED'])(
+    'an explicit %s category is a legitimate classification and activates',
+    async (key) => {
+      const { variantId } = await readyProduct(`legit-${key.toLowerCase().replace('_', '-')}`, key);
+      const r = await activate(variantId);
+      expect(r.statusCode, r.payload).toBe(200);
+    },
+  );
+});
+
+async function seed(url: string): Promise<void> {
+  const c = new pg.Client({ connectionString: url });
+  await c.connect();
+  try {
+    await c.query(`
+      INSERT INTO plan (id, key, name, "updatedAt")
+      VALUES ('00000000-0000-7000-8000-000000340000', 'starter', 'Starter', now());
+      INSERT INTO plan_version (id, "planId", version, status, "updatedAt")
+      VALUES ('${PLAN_V}', '00000000-0000-7000-8000-000000340000', 1, 'PUBLISHED', now());
+      INSERT INTO limit_default ("planVersionId", "limitKey", value)
+      VALUES ('${PLAN_V}', 'max_branches', 5), ('${PLAN_V}', 'max_sessions_per_user', 80),
+             ('${PLAN_V}', 'max_users', 80), ('${PLAN_V}', 'max_companies', 5);
+      INSERT INTO platform_user (id, email, name, "updatedAt")
+      VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
+      INSERT INTO permission_registry (key, realm, "groupKey", description, "addedInPhase")
+      VALUES ('catalog:view','TENANT','catalog','v',3),('catalog:manage','TENANT','catalog','v',3),
+             ('variants:manage','TENANT','catalog','v',3),('users:view','TENANT','admin','v',1),
+             ('platform:tenants:view','PLATFORM','platform','v',1)
+      ON CONFLICT (key) DO NOTHING;
+      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'x', 'x');
+      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt")
+      VALUES ('AE', 'UAE', 'x', 'gcc', 'AED', 'SAT_SUN', true, now());
+      INSERT INTO tax_category (key, "nameEn", "nameAr")
+      VALUES ('STANDARD','Standard','x'),('ZERO_RATED','Zero rated','x'),('EXEMPT','Exempt','x'),('REDUCED','Reduced','x')
+      ON CONFLICT (key) DO NOTHING;
+      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt")
+      VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
+      INSERT INTO business_type_template_capability ("templateKey","capabilityKey",enabled,"updatedAt")
+      VALUES ('CUSTOM','strategy.stocked',true,now());
+    `);
+  } finally {
+    await c.end();
+  }
+}

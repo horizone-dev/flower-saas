@@ -1,0 +1,28 @@
+// REQUIRED-POLICY ACTIVATION — REHEARSAL / REVIEW SNIPPET ONLY. This file is a `.txt` draft in the approval bundle: it is registered NOWHERE, imported by NOTHING, and the live tree has NO module for expenses.
+// It shows the ONE binding that turns the audit from NOT_ACTIVATED into REQUIRED: a DI provider for EXPENSE_AUDIT_POLICY. Without it the repositories cannot even be constructed (no default exists).
+// The rehearsal test builds exactly this wiring with `Test.createTestingModule`, and proves that omitting the policy provider fails at module compile.
+//
+// Preconditions (each is an unticked approval in BUNDLE.json): the eight actions are registered in common/audit/actions.ts (registry.patch), and the payload allow-list / security flag are approved.
+// Routes, permission grants (expense:* / income:*), the E1 migration, posting and cash movement are SEPARATE approvals and are NOT part of this binding.
+import { Module } from '@nestjs/common';
+import { AuditModule } from '../../common/audit/audit.module.js';
+import { PlatformExpenseAudit } from './expense-audit.adapter.js';
+import { EXPENSE_AUDIT_POLICY, auditRequired } from './expense-audit.js';
+import { ExpenseRepository } from './expense.repository.js';
+import { ExpenseService } from './expense.service.js';
+import { OtherIncomeRepository } from './other-income.repository.js';
+import { OtherIncomeService } from './other-income.service.js';
+
+@Module({
+  imports: [AuditModule], // provides AuditWriter
+  providers: [
+    PlatformExpenseAudit,
+    { provide: EXPENSE_AUDIT_POLICY, useFactory: (adapter: PlatformExpenseAudit) => auditRequired(adapter), inject: [PlatformExpenseAudit] },
+    ExpenseRepository,
+    OtherIncomeRepository,
+    ExpenseService,
+    OtherIncomeService,
+  ],
+  // no controller, no exports: nothing can reach the services until a route + permission grant are separately approved
+})
+export class ExpensesAuditRehearsalModule {}

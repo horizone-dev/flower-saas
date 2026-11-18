@@ -1,0 +1,331 @@
+{
+  "description": "Schema-drift amendment for the D + Z1 + E1 promotion package. NOT APPLIED: packages/db/test/fixtures/* are untouched. At promotion, regenerate BOTH fixtures in the same reviewed diff (UPDATE_SCHEMA_DRIFT_BASELINE=1 …) and confirm they equal this file.",
+  "baselineSha256Before": "985aac49dd310e28776e2f7e53dfdb882a76bf87b468953dd85bec36f7e72c17",
+  "baselineStatementCountBefore": 227,
+  "baselineSha256After": "708b19ab6e7e38d2a3caa51b474295074980fa45ec850c041ea491855dfffd7b",
+  "baselineStatementCountAfter": 254,
+  "statementsAdded": [
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_approver_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_branch_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_category_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_company_currency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_creator_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_terminal_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_category\" DROP CONSTRAINT \"expense_category_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_actor_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_expense_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_account_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_branch_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_company_currency_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_creator_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_currency_pair_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_counter_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_session_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_supervisor_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_tenantId_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_approver_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_counter_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_creator_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_session_scope_fkey\";"
+    },
+    {
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_tenantId_fkey\";"
+    }
+  ],
+  "reviewItemsAdded": [
+    {
+      "id": "e85634e728aba0cc",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_approver_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "3e58a4ce41c93aec",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_branch_scope_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "751c1c1f6abcdd58",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_category_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "6ed12d9b8775e05d",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_company_currency_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "15a8c2eed7981a9f",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_creator_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "c74526a7241ed53f",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_currency_pair_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "195fe32d43cebdd5",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_tenantId_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "eade50bfdd4f7865",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense\" DROP CONSTRAINT \"expense_terminal_scope_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "3453872cd3af8746",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_category\" DROP CONSTRAINT \"expense_category_tenantId_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "93ec741ff2090245",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_actor_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "2b33c36082a479c0",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_expense_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "00545f0312b6188c",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"expense_event\" DROP CONSTRAINT \"expense_event_tenantId_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "2d2ee1771953baa8",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_account_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "d361c3fc08249874",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_branch_scope_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "65300bec53d8567f",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_company_currency_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "3222ab241b3d4c45",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_creator_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "64bfd967f5defa54",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_currency_pair_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "414e9bf900e3c173",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"other_income\" DROP CONSTRAINT \"other_income_tenantId_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "e9f2015cd482f9fa",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_counter_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "c60d8a67e5f05132",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_session_scope_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "7052c83861ff7cbe",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_supervisor_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "a6bd16843ba7d34b",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"register_session_count\" DROP CONSTRAINT \"register_session_count_tenantId_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "0e550df4af52f52c",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_approver_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "4da3342f2ea309af",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_counter_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "7120eee328986a1d",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_creator_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "9753dcc6482bddd1",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_session_scope_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    },
+    {
+      "id": "f8a3e44c2a041eb8",
+      "kind": "DropForeignKey",
+      "sql": "ALTER TABLE \"z_report\" DROP CONSTRAINT \"z_report_tenantId_fkey\";",
+      "class": "COMPOSITE_FK_IN_MIGRATION_ONLY",
+      "status": "BY_DESIGN"
+    }
+  ],
+  "reviewCountsAfter": {
+    "total": 254,
+    "byStatus": {
+      "COSMETIC": 36,
+      "BY_DESIGN": 215,
+      "NEEDS_OWNER_REVIEW": 3
+    },
+    "byClass": {
+      "RENAME_ONLY": 22,
+      "COMPOSITE_FK_IN_MIGRATION_ONLY": 208,
+      "SCHEMA_FK_EXISTS_WITH_DIFFERENT_ACTION": 3,
+      "SCHEMA_FK_SUBSUMED_BY_WIDER_COMPOSITE_FK": 3,
+      "SCHEMA_FK_ABSENT_IN_DB": 2,
+      "GENERATED_COLUMN_NOT_MODELLED": 2,
+      "DB_DEFAULT_NOT_DECLARED": 1,
+      "SCHEMA_INDEX_COVERED_BY_EXISTING_INDEX": 2,
+      "SCHEMA_INDEX_ABSENT_IN_DB": 1,
+      "DB_INDEX_AHEAD_OF_SCHEMA": 5,
+      "INDEX_ON_GENERATED_COLUMN": 3,
+      "INDEX_NOT_MODELLABLE": 2
+    }
+  },
+  "openFindingsAdded": 0
+}
