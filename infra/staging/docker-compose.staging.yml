@@ -1,0 +1,264 @@
+# Flower SaaS — STAGING stack (single host, HTTPS via Caddy). PROPOSED — not deployed anywhere.
+#
+#   1. cp infra/staging/.env.example infra/staging/.env.staging   (fill EVERY value; the file is git-ignored, chmod 600)
+#   2. node infra/staging/preflight.mjs                            (refuses placeholders, short or repeated secrets)
+#   3. build/tag the images (see RELEASE-RUNBOOKS.md §1), then, in this order:
+#        MIGRATION_MODE=check  docker compose -f infra/staging/docker-compose.staging.yml --env-file infra/staging/.env.staging run --rm migrate
+#        MIGRATION_MODE=deploy docker compose -f … --env-file … up -d          # backup -> migrate -> roles -> seed -> api -> web -> proxy
+#   4. interactive, once:  docker compose … run --rm -it bootstrap-operator --email … --name "…"
+#
+# Project name `flower-staging`; every volume/network is namespaced. Only Caddy publishes ports (80/443). PostgreSQL, Redis, MinIO, the API
+# and both web apps are on the internal network only. No credential lives in this file: every secret is `${VAR:?}` (compose fails closed).
+name: flower-staging
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17
+    <<: *restart
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-flower}
+    command:
+      [
+        'postgres',
+        '-c',
+        'max_connections=200',
+        '-c',
+        'log_min_duration_statement=500',
+      ]
+    volumes:
+      - flower-staging-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d ${POSTGRES_DB:-flower}']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    <<: *restart
+    command:
+      [
+        'redis-server',
+        '--appendonly',
+        'yes',
+        '--requirepass',
+        '${REDIS_PASSWORD:?set REDIS_PASSWORD}',
+      ]
+    volumes:
+      - flower-staging-redis:/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+
+  # S3-compatible object storage (the API's readiness probe checks it). Docker Hub / Quay anonymous pulls of minio are refused, so it is built
+  # from the pinned upstream source that the integration tests already use.
+  minio:
+    build:
+      context: ../../packages/testing/docker/minio
+    image: flower/minio:RELEASE.2025-04-08T15-41-24Z
+    <<: *restart
+    command: ['server', '/data']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    volumes:
+      - flower-staging-minio:/data
+
+  # ── pre-deployment backup: a verified logical dump (pg_restore --list must read it) before ANY migration ──
+  backup:
+    image: postgres:17
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?}
+    entrypoint: ['sh', '-ec']
+    command:
+      - |
+        f=/backups/pre-migrate-$$(date -u +%Y%m%dT%H%M%SZ).dump
+        pg_dump -h postgres -U postgres -Fc -f "$$f" ${POSTGRES_DB:-flower}
+        pg_restore --list "$$f" > /dev/null
+        ls -l "$$f"
+        echo "backup verified: $$f"
+    volumes:
+      - flower-staging-backups:/backups
+
+  # ── migrations: approved-only, read-only unless MIGRATION_MODE=deploy; one runner at a time (advisory lock) ──
+  migrate:
+    image: ${MIGRATE_IMAGE:?set MIGRATE_IMAGE (flower/migrate:<tag>)}
+    restart: 'no'
+    depends_on:
+      backup:
+        condition: service_completed_successfully
+    environment:
+      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-flower}
+      MIGRATION_MODE: ${MIGRATION_MODE:?set MIGRATION_MODE=check or deploy}
+
+  roles:
+    image: ${MIGRATE_IMAGE:?}
+    restart: 'no'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ['node', 'infra/migrate/provision-db-roles.mjs']
+    environment:
+      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-flower}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+      PLATFORM_DB_PASSWORD: ${PLATFORM_DB_PASSWORD:?set PLATFORM_DB_PASSWORD}
+
+  seed:
+    image: ${MIGRATE_IMAGE:?}
+    restart: 'no'
+    depends_on:
+      roles:
+        condition: service_completed_successfully
+    command: ['node', 'infra/migrate/seed.mjs']
+    environment:
+      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_SUPERUSER_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-flower}
+
+  api:
+    image: ${API_IMAGE:?set API_IMAGE (flower/api:<tag>)}
+    <<: *restart
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      API_PORT: '3001'
+      API_HOST: 0.0.0.0
+      # the API connects AS the application roles (no `SET ROLE` indirection); the platform role is the audited cross-tenant path
+      DATABASE_URL: postgres://flower_app:${APP_DB_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-flower}
+      PLATFORM_DATABASE_URL: postgres://flower_platform:${PLATFORM_DB_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-flower}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379
+      REDIS_HOST: redis
+      S3_ENDPOINT: http://minio:9000
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?set AUTH_JWT_SECRET}
+      # explicit https origins only (production refuses localhost and *); single-origin POS does not need CORS but the guard still applies
+      CORS_ORIGINS: https://${POS_HOST:?},https://${OWNER_HOST:?}
+      # R-1: `disabled` needs the (unapproved) R-1 patch; `kms` is not wired. Until one exists the API refuses to boot in production mode.
+      SECRETS_PROVIDER: ${SECRETS_PROVIDER:?set SECRETS_PROVIDER (disabled requires patch R-1)}
+      # Caddy is exactly ONE trusted proxy hop in front of the API (abuse limits read X-Forwarded-For only for this many hops)
+      DEVICE_TRUSTED_PROXY_HOPS: '1'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3001/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+
+  pos:
+    image: ${POS_IMAGE:?set POS_IMAGE (built with --build-arg API_PROXY_TARGET=http://api:3001 --build-arg NEXT_PUBLIC_API_BASE_URL=)}
+    <<: *restart
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      HOSTNAME: 0.0.0.0
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 15s
+
+  owner-web:
+    image: ${OWNER_IMAGE:?set OWNER_IMAGE}
+    <<: *restart
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      HOSTNAME: 0.0.0.0
+      # server components call the API directly over the internal network
+      API_BASE_URL: http://api:3001
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 15s
+
+  # ── TLS termination + the only published ports ──
+  caddy:
+    image: caddy:2
+    <<: *restart
+    depends_on:
+      pos:
+        condition: service_healthy
+      owner-web:
+        condition: service_healthy
+    ports:
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+    environment:
+      POS_HOST: ${POS_HOST:?set POS_HOST}
+      OWNER_HOST: ${OWNER_HOST:?set OWNER_HOST}
+      OPS_HOST: ${OPS_HOST:?set OPS_HOST}
+      ADMIN_CIDR: ${ADMIN_CIDR:?set ADMIN_CIDR (the operator network allowed to reach the platform API)}
+    volumes:
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      - flower-staging-caddy-data:/data
+      - flower-staging-caddy-config:/config
+
+  # ── interactive, run on demand: the FIRST platform operator (needs a TTY; refuses to run unattended) ──
+  bootstrap-operator:
+    image: ${API_IMAGE:?}
+    profiles: ['bootstrap']
+    restart: 'no'
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    entrypoint: ['node', 'dist/tooling/bootstrap-platform-operator.cli.js']
+    stdin_open: true
+    tty: true
+    environment:
+      PLATFORM_DATABASE_URL: postgres://flower_platform:${PLATFORM_DB_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-flower}
+
+volumes:
+  flower-staging-pg:
+  flower-staging-redis:
+  flower-staging-minio:
+  flower-staging-backups:
+  flower-staging-caddy-data:
+  flower-staging-caddy-config:
