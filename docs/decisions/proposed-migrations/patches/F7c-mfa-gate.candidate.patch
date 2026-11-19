@@ -1,0 +1,1009 @@
+diff --git a/apps/api/src/modules/access/access.repository.ts b/apps/api/src/modules/access/access.repository.ts
+index a599451..bb4456a 100644
+--- a/apps/api/src/modules/access/access.repository.ts
++++ b/apps/api/src/modules/access/access.repository.ts
+@@ -4,6 +4,7 @@ import { runScoped, type ScopedTx } from '@flower/db';
+ import { DbService } from '../../common/data/index.js';
+ import { requireTenantContext } from '../../common/context/index.js';
+ import { AuditWriter } from '../../common/audit/audit.writer.js';
++import { mfaEnrolmentRequired } from './mfa-enrolment-gate.js';
+ 
+ export interface UserAccessRow {
+   accountType: 'OWNER' | 'USER';
+@@ -20,6 +21,8 @@ export interface UserAccessRow {
+   } | null;
+   /** module keys the tenant is entitled to (enabled) */
+   entitledModules: string[];
++  /** true when the user holds a mandatory-MFA system role and has no CONFIRMED TOTP factor (enrolment-only session) */
++  mfaEnrolmentRequired: boolean;
+ }
+ 
+ export interface RoleRow {
+@@ -84,10 +87,18 @@ export class AccessRepository {
+       });
+       if (!user) return null;
+ 
+-      const [userRoles, grants, scope, entitlements] = await Promise.all([
++      const [userRoles, grants, scope, entitlements, confirmedTotp] = await Promise.all([
+         tx.userRole.findMany({
+           where: { userId, role: { isActive: true } },
+-          select: { role: { select: { permissions: { select: { permissionKey: true } } } } },
++          select: {
++            role: {
++              select: {
++                key: true,
++                isSystem: true,
++                permissions: { select: { permissionKey: true } },
++              },
++            },
++          },
+         }),
+         tx.permissionGrant.findMany({
+           where: { userId },
+@@ -107,6 +118,7 @@ export class AccessRepository {
+           where: { enabled: true },
+           select: { moduleKey: true },
+         }),
++        tx.mfaFactor.count({ where: { userId, kind: 'TOTP', status: 'CONFIRMED' } }),
+       ]);
+ 
+       const rolePermissions = [
+@@ -130,6 +142,10 @@ export class AccessRepository {
+             }
+           : null,
+         entitledModules: entitlements.map((e) => e.moduleKey),
++        mfaEnrolmentRequired: mfaEnrolmentRequired({
++          roles: userRoles.map((ur) => ({ key: ur.role.key, isSystem: ur.role.isSystem })),
++          hasConfirmedTotp: confirmedTotp > 0,
++        }),
+       };
+     });
+   }
+diff --git a/apps/api/src/modules/access/mfa-enrolment-gate.integration.test.ts b/apps/api/src/modules/access/mfa-enrolment-gate.integration.test.ts
+new file mode 100644
+index 0000000..8a5d2a4
+--- /dev/null
++++ b/apps/api/src/modules/access/mfa-enrolment-gate.integration.test.ts
+@@ -0,0 +1,406 @@
++import 'reflect-metadata';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { Test } from '@nestjs/testing';
++import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import { PLATFORM_PERMISSIONS } from '@flower/permissions';
++import { authenticator } from 'otplib';
++import pg from 'pg';
++import { AppModule } from '../../app.module.js';
++import { AllExceptionsFilter } from '../../common/errors/all-exceptions.filter.js';
++import { installRequestContext } from '../../common/context/index.js';
++import { JwtService } from '../../common/auth/jwt.service.js';
++import { SessionStore } from '../../common/auth/session-store.js';
++import type { SessionData } from '../../common/auth/session.types.js';
++import { SessionAccessRefresher } from './session-access.refresher.js';
++import { PolicyService } from './policy.service.js';
++import { toAccessSnapshot } from './policy.types.js';
++
++// F-7c safeguard — a newly invited MANAGER has an enrolment-only session until a TOTP factor is CONFIRMED.
++// Real PostgreSQL + Redis, the real guard pipeline, the real login / invite / enrol / step-up routes.
++const PLAN_V = '00000000-0000-7000-8000-000000190001';
++const PLATFORM_USER = '00000000-0000-7000-8000-000000190002';
++const PW = 'staff-pass-strong-1';
++const ZERO = '00000000-0000-7000-8000-000000000001';
++
++interface Ws {
++  tenantId: string;
++  companyId: string;
++  branchId: string;
++  slug: string;
++}
++interface Staff {
++  email: string;
++  userId: string;
++  token: string;
++  refreshToken: string;
++}
++
++describe('F-7c manager MFA enrolment gate', () => {
++  let stack: TestStack;
++  let app: NestFastifyApplication;
++  let admin: pg.Client;
++  let opToken: string;
++  let A: Ws;
++  let B: Ws;
++  let mgrA: Staff;
++  let mgrB: Staff;
++  let cashA: Staff;
++  const secrets = new Map<string, string>();
++
++  async function platformToken(): Promise<string> {
++    const s: SessionData = {
++      sessionId: 'gate-op',
++      realm: 'platform',
++      familyId: 'f',
++      tenantId: null,
++      userId: null,
++      platformUserId: PLATFORM_USER,
++      accountType: 'PLATFORM',
++      posTerminalId: null,
++      deviceId: null,
++      mfaLevel: 'STEP_UP',
++      stepUpUntil: Date.now() + 600_000,
++      createdAt: Date.now(),
++      expiresAt: Date.now() + 3_600_000,
++      revokedAt: null,
++      revokeReason: null,
++      impersonatorPlatformUserId: null,
++      access: {
++        effectivePermissions: [...PLATFORM_PERMISSIONS],
++        companyScope: 'ALL',
++        branchScope: 'ALL',
++        perBranchOverlay: {},
++        entitledModules: [],
++        planKey: null,
++      },
++    };
++    await app.get(SessionStore).set(s);
++    return app.get(JwtService).sign({ sub: PLATFORM_USER, sid: s.sessionId, aud: 'platform' });
++  }
++
++  async function provision(slug: string): Promise<Ws> {
++    const r = await app.inject({
++      method: 'POST',
++      url: '/v1/platform/tenants',
++      payload: {
++        slug,
++        name: `${slug} FZE`,
++        region: 'AE',
++        companyCountryCode: 'AE',
++        businessTypeKey: 'CUSTOM',
++        planVersionId: PLAN_V,
++        ownerEmail: `owner@${slug}.test`,
++      },
++      headers: { authorization: `Bearer ${opToken}`, 'idempotency-key': `prov-${slug}` },
++    });
++    expect(r.statusCode).toBe(201);
++    const j = r.json();
++    return { tenantId: j.tenantId, companyId: j.companyId, branchId: j.branchId, slug };
++  }
++
++  const login = (w: Ws, email: string) =>
++    app.inject({
++      method: 'POST',
++      url: '/v1/auth/login',
++      payload: { workspaceSlug: w.slug, email, password: PW },
++    });
++
++  /** invite through route A, set the password, log in with the password only */
++  async function onboard(w: Ws, roleKey: 'manager' | 'cashier', name: string): Promise<Staff> {
++    const email = `${name}@${w.slug}.test`;
++    const inv = await app.inject({
++      method: 'POST',
++      url: `/v1/platform/tenants/${w.tenantId}/staff-invites`,
++      payload: { email, roleKey, companyIds: [w.companyId], branchIds: [w.branchId] },
++      headers: { authorization: `Bearer ${opToken}` },
++    });
++    expect(inv.statusCode).toBe(201);
++    const sp = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/set-password',
++      payload: { token: inv.json().setPasswordToken, newPassword: PW },
++    });
++    expect(sp.statusCode).toBeLessThan(300);
++    const l = await login(w, email);
++    expect(l.statusCode).toBe(200);
++    expect(l.json().status).toBe('ok');
++    return {
++      email,
++      userId: inv.json().userId,
++      token: l.json().accessToken,
++      refreshToken: l.json().refreshToken,
++    };
++  }
++
++  const auth = (t: string) => ({ authorization: `Bearer ${t}` });
++  const perms = async (t: string): Promise<string[]> => {
++    const r = await app.inject({ method: 'GET', url: '/v1/me/access', headers: auth(t) });
++    expect(r.statusCode).toBe(200);
++    return (r.json().effectivePermissions ?? r.json().permissions ?? []) as string[];
++  };
++  const post = (t: string, url: string) =>
++    app.inject({
++      method: 'POST',
++      url,
++      payload: {},
++      headers: { ...auth(t), 'idempotency-key': `gate-${Math.random()}` },
++    });
++  const scoped = (w: Ws) => `/v1/companies/${w.companyId}/branches/${w.branchId}`;
++  const money = (w: Ws) => ({
++    payments: `${scoped(w)}/invoices/${ZERO}/payments`,
++    receipt: `${scoped(w)}/customers/${ZERO}/receipts`,
++    advance: `${scoped(w)}/customers/${ZERO}/advances/${ZERO}/applications`,
++    conversion: `${scoped(w)}/customers/${ZERO}/advances/from-payment`,
++    refund: `${scoped(w)}/customers/${ZERO}/advances/${ZERO}/refunds`,
++  });
++  const denied = async (t: string, url: string) => {
++    const r = await post(t, url);
++    return { status: r.statusCode, code: r.json().error?.code as string | undefined };
++  };
++
++  async function enrol(t: string, userId: string): Promise<string> {
++    const en = await app.inject({ method: 'POST', url: '/v1/auth/mfa/enrol', headers: auth(t) });
++    expect(en.statusCode).toBeLessThan(300);
++    secrets.set(userId, en.json().secret);
++    return en.json().secret as string;
++  }
++  const confirm = (t: string, secret: string) =>
++    app.inject({
++      method: 'POST',
++      url: '/v1/auth/mfa/confirm',
++      payload: { code: authenticator.generate(secret) },
++      headers: auth(t),
++    });
++  /** a fresh login that now demands the code, then the code */
++  async function loginWithCode(w: Ws, s: Staff): Promise<string> {
++    const l = await login(w, s.email);
++    expect(l.json().status).toBe('mfa_required');
++    const v = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/mfa/verify',
++      payload: {
++        mfaChallenge: l.json().mfaChallenge,
++        code: authenticator.generate(secrets.get(s.userId)!),
++      },
++    });
++    expect(v.statusCode).toBe(200);
++    return v.json().accessToken as string;
++  }
++
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    admin = new pg.Client({ connectionString: stack.postgres.url });
++    await admin.connect();
++    await admin.query(`
++      INSERT INTO plan (id, key, name, "updatedAt") VALUES ('00000000-0000-7000-8000-000000190000', 'starter', 'Starter', now());
++      INSERT INTO plan_version (id, "planId", version, status, "updatedAt") VALUES ('${PLAN_V}', '00000000-0000-7000-8000-000000190000', 1, 'PUBLISHED', now());
++      INSERT INTO limit_default ("planVersionId", "limitKey", value) VALUES ('${PLAN_V}', 'max_branches', 5), ('${PLAN_V}', 'max_users', 20), ('${PLAN_V}', 'max_sessions_per_user', 20);
++      INSERT INTO platform_user (id, email, name, "updatedAt") VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
++      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
++      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
++      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt") VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
++      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt") VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),('CUSTOM','channel.pos',true,now());
++    `);
++    process.env['DATABASE_URL'] = stack.postgres.url;
++    process.env['PLATFORM_DATABASE_URL'] = stack.postgres.url;
++    process.env['REDIS_URL'] = stack.redis.url;
++    process.env['AUTH_JWT_SECRET'] = 'integration-test-jwt-secret-0000000000';
++    const m = await Test.createTestingModule({ imports: [AppModule] }).compile();
++    app = m.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
++    app.setGlobalPrefix('v1', { exclude: ['healthz', 'readyz'] });
++    app.useGlobalFilters(new AllExceptionsFilter());
++    installRequestContext(app.getHttpAdapter().getInstance());
++    await app.init();
++    await app.getHttpAdapter().getInstance().ready();
++    opToken = await platformToken();
++    A = await provision('gate-a');
++    B = await provision('gate-b');
++    mgrA = await onboard(A, 'manager', 'manager');
++    mgrB = await onboard(B, 'manager', 'manager');
++    cashA = await onboard(A, 'cashier', 'cashier');
++  }, 300_000);
++  afterAll(async () => {
++    await admin?.end();
++    await app?.close();
++    await stack?.stop();
++  });
++
++  it('G1 an invited manager who has not enrolled holds ONLY users:view; every financial route is refused 403 (not just step-up ones)', async () => {
++    expect(await perms(mgrA.token)).toEqual(['users:view']);
++    const m = money(A);
++    for (const url of [m.payments, m.receipt, m.advance, m.conversion, m.refund]) {
++      const r = await denied(mgrA.token, url);
++      expect(r.status, url).toBe(403);
++      expect(r.code, url).not.toBe('STEP_UP_REQUIRED'); // refused on the PERMISSION, before step-up is even relevant
++    }
++  });
++
++  it('G2 existing cashier onboarding and permissions are untouched (payments and receipts still reach the handler; advance:apply stays a manager-tier key)', async () => {
++    const p = await perms(cashA.token);
++    expect(p.length).toBeGreaterThan(1);
++    expect(p).toContain('payments:collect');
++    expect(p).toContain('receivables:collect');
++    expect(p).not.toContain('receivables:advance:apply');
++    const m = money(A);
++    expect((await denied(cashA.token, m.payments)).status).not.toBe(403);
++    expect((await denied(cashA.token, m.receipt)).status).not.toBe(403);
++    expect((await denied(cashA.token, m.advance)).status).toBe(403);
++  });
++
++  it('G3 the restricted manager CAN do the one thing needed: enrol; a PENDING factor does not lift the restriction; step-up is impossible without a confirmed factor', async () => {
++    const su0 = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/step-up',
++      payload: { code: '123456' },
++      headers: auth(mgrA.token),
++    });
++    expect(su0.statusCode).toBe(401);
++    const secret = await enrol(mgrA.token, mgrA.userId);
++    // PENDING only: a fresh login is still password-only (no MFA challenge) and still restricted
++    const l = await login(A, mgrA.email);
++    expect(l.json().status).toBe('ok');
++    expect(await perms(l.json().accessToken)).toEqual(['users:view']);
++    expect((await denied(l.json().accessToken, money(A).payments)).status).toBe(403);
++    expect(secret.length).toBeGreaterThan(8);
++  });
++
++  it('G4 token refresh and the post-RBAC-change session refresh can never widen a restricted session', async () => {
++    const rf = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/refresh',
++      payload: { refreshToken: mgrA.refreshToken },
++    });
++    expect(rf.statusCode).toBe(200);
++    expect(await perms(rf.json().accessToken)).toEqual(['users:view']);
++    await app.get(SessionAccessRefresher).refreshUser(A.tenantId, mgrA.userId);
++    expect(await perms(mgrA.token)).toEqual(['users:view']);
++    expect((await denied(mgrA.token, money(A).advance)).status).toBe(403);
++  });
++
++  it('G5 cross-tenant: another workspace manager who HAS enrolled does not lift this one; and the restricted token cannot touch the other tenant', async () => {
++    const secretB = await enrol(mgrB.token, mgrB.userId);
++    expect((await confirm(mgrB.token, secretB)).statusCode).toBeLessThan(300);
++    const fullB = await loginWithCode(B, mgrB);
++    expect((await perms(fullB)).length).toBeGreaterThan(10);
++    expect((await denied(fullB, money(B).payments)).status).not.toBe(403);
++    // A's manager is still restricted, and its token gets nowhere on B's company/branch
++    expect(await perms(mgrA.token)).toEqual(['users:view']);
++    const cross = await denied(mgrA.token, money(B).payments);
++    expect([401, 403, 404]).toContain(cross.status);
++    // B's enrolled manager (full permissions) cannot reach A's company either
++    const cross2 = await denied(fullB, money(A).payments);
++    expect([401, 403, 404]).toContain(cross2.status);
++    // the confirmed factor row belongs to B only
++    const rows = await admin.query(
++      `SELECT "tenantId" FROM mfa_factor WHERE "userId"=$1 AND status='CONFIRMED'`,
++      [mgrB.userId],
++    );
++    expect(rows.rows.map((r) => r.tenantId)).toEqual([B.tenantId]);
++    expect(
++      (
++        await admin.query(`SELECT 1 FROM mfa_factor WHERE "userId"=$1 AND status='CONFIRMED'`, [
++          mgrA.userId,
++        ])
++      ).rowCount,
++    ).toBe(0);
++  });
++
++  it('G6 after the factor is CONFIRMED: the old session stays restricted, a new login demands the code, and the money routes open; refunds still need an explicit step-up', async () => {
++    const secretA = secrets.get(mgrA.userId)!;
++    expect((await confirm(mgrA.token, secretA)).statusCode).toBeLessThan(300);
++    expect(await perms(mgrA.token)).toEqual(['users:view']); // not widened mid-session
++    const full = await loginWithCode(A, mgrA);
++    const p = await perms(full);
++    expect(p).toEqual(expect.arrayContaining(['payments:collect', 'receivables:advance:apply']));
++    const m = money(A);
++    for (const url of [m.payments, m.receipt, m.advance, m.conversion]) {
++      expect((await denied(full, url)).status, url).not.toBe(403);
++    }
++    const refund = await denied(full, m.refund);
++    expect(refund).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
++    const su = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/step-up',
++      payload: { code: authenticator.generate(secretA) },
++      headers: auth(full),
++    });
++    expect(su.statusCode).toBeLessThan(300);
++    expect((await denied(full, m.refund)).code).not.toBe('STEP_UP_REQUIRED');
++  });
++
++  it('G7 the gate is derived from the database every time: losing the confirmed factor re-restricts the next resolution', async () => {
++    const full = await loginWithCode(A, mgrA);
++    expect((await perms(full)).length).toBeGreaterThan(10);
++    await admin.query(`DELETE FROM mfa_factor WHERE "userId"=$1`, [mgrA.userId]);
++    await app.get(SessionAccessRefresher).refreshUser(A.tenantId, mgrA.userId);
++    expect(await perms(full)).toEqual(['users:view']);
++    expect((await denied(full, money(A).payments)).status).toBe(403);
++  });
++
++  /** simulate a session minted by a build WITHOUT the gate: rewrite its stored snapshot to the unrestricted admin view */
++  async function widen(s: Staff): Promise<void> {
++    const claims = await app.get(JwtService).verify(s.token, 'tenant');
++    const sess = (await app.get(SessionStore).get(claims.sid))!;
++    sess.access = toAccessSnapshot(
++      await app.get(PolicyService).resolveForUser(s.userId, A.tenantId),
++    );
++    await app.get(SessionStore).set(sess);
++  }
++
++  it('G8 a session minted BEFORE the gate keeps its snapshot (documented window, at most AUTH_SESSION_TTL_SECONDS); a rotation or an RBAC refresh closes it', async () => {
++    const viaRefresher = await onboard(A, 'manager', 'legacy1');
++    await widen(viaRefresher);
++    expect((await perms(viaRefresher.token)).length).toBeGreaterThan(10);
++    expect((await denied(viaRefresher.token, money(A).payments)).status).not.toBe(403);
++    await app.get(SessionAccessRefresher).refreshUser(A.tenantId, viaRefresher.userId);
++    expect(await perms(viaRefresher.token)).toEqual(['users:view']);
++    expect((await denied(viaRefresher.token, money(A).payments)).status).toBe(403);
++
++    const viaRotation = await onboard(A, 'manager', 'legacy2');
++    await widen(viaRotation);
++    expect((await perms(viaRotation.token)).length).toBeGreaterThan(10);
++    const rf = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/refresh',
++      payload: { refreshToken: viaRotation.refreshToken },
++    });
++    expect(rf.statusCode).toBe(200);
++    expect(await perms(rf.json().accessToken)).toEqual(['users:view']);
++    expect((await denied(rf.json().accessToken, money(A).payments)).status).toBe(403);
++  });
++
++  it('G9 DOCUMENTED LIMITATION: the first enrolment wins (trust on first use) — whoever completes it with the password owns the factor, and the legitimate manager cannot replace it', async () => {
++    const victim = await onboard(A, 'manager', 'tofu');
++    const attacker = (await login(A, victim.email)).json().accessToken as string; // knows the password only
++    const secret = await enrol(attacker, 'attacker');
++    expect((await confirm(attacker, secret)).statusCode).toBeLessThan(300);
++    expect((await login(A, victim.email)).json().status).toBe('mfa_required');
++    const again = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/mfa/enrol',
++      headers: auth(victim.token),
++    });
++    expect(again.statusCode).toBe(409);
++    expect(again.json().error?.code).toBe('MFA_ALREADY_ENROLLED');
++  });
++
++  it('G10 DOCUMENTED LIMITATION: once a factor is CONFIRMED there is no self-service way to replace it (M-1), so a lost authenticator needs an operator reset flow that does not exist yet', async () => {
++    const m = await onboard(A, 'manager', 'recover');
++    const secret = await enrol(m.token, m.userId);
++    expect((await confirm(m.token, secret)).statusCode).toBeLessThan(300);
++    const full = await loginWithCode(A, m);
++    for (const t of [full, m.token]) {
++      const r = await app.inject({ method: 'POST', url: '/v1/auth/mfa/enrol', headers: auth(t) });
++      expect(r.statusCode).toBe(409);
++    }
++    const c = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/mfa/confirm',
++      payload: { code: '000000' },
++      headers: auth(full),
++    });
++    expect(c.statusCode).toBe(409);
++  });
++});
+diff --git a/apps/api/src/modules/access/mfa-enrolment-gate.test.ts b/apps/api/src/modules/access/mfa-enrolment-gate.test.ts
+new file mode 100644
+index 0000000..2f60dc6
+--- /dev/null
++++ b/apps/api/src/modules/access/mfa-enrolment-gate.test.ts
+@@ -0,0 +1,87 @@
++import { describe, expect, it } from 'vitest';
++import {
++  ENROLMENT_ONLY_PERMISSIONS,
++  MFA_MANDATORY_SYSTEM_ROLE_KEYS,
++  mfaEnrolmentRequired,
++  restrictToEnrolment,
++} from './mfa-enrolment-gate.js';
++import { PolicyService } from './policy.service.js';
++import type { AccessRepository, UserAccessRow } from './access.repository.js';
++
++const role = (key: string, isSystem = true) => ({ key, isSystem });
++
++describe('mfa-enrolment-gate (pure)', () => {
++  it('the mandatory list is exactly [manager] and the enrolment-only list exactly [users:view] (changing either is a security decision)', () => {
++    expect([...MFA_MANDATORY_SYSTEM_ROLE_KEYS]).toEqual(['manager']);
++    expect([...ENROLMENT_ONLY_PERMISSIONS]).toEqual(['users:view']);
++  });
++  it('a manager without a confirmed factor must enrol; with one, not', () => {
++    expect(mfaEnrolmentRequired({ roles: [role('manager')], hasConfirmedTotp: false })).toBe(true);
++    expect(mfaEnrolmentRequired({ roles: [role('manager')], hasConfirmedTotp: true })).toBe(false);
++  });
++  it('cashier, sales, owner, admin and accountant are unaffected (existing onboarding is preserved)', () => {
++    for (const k of ['cashier', 'sales', 'owner', 'admin', 'accountant']) {
++      expect(mfaEnrolmentRequired({ roles: [role(k)], hasConfirmedTotp: false })).toBe(false);
++    }
++  });
++  it('a CUSTOM (non-system) role that happens to be called manager does not trigger the gate, and a cashier+manager holder does', () => {
++    expect(mfaEnrolmentRequired({ roles: [role('manager', false)], hasConfirmedTotp: false })).toBe(
++      false,
++    );
++    expect(
++      mfaEnrolmentRequired({ roles: [role('cashier'), role('manager')], hasConfirmedTotp: false }),
++    ).toBe(true);
++  });
++  it('restriction keeps only users:view and never adds a key the user lacked', () => {
++    expect([...restrictToEnrolment(new Set(['users:view', 'payments:collect']))]).toEqual([
++      'users:view',
++    ]);
++    expect([...restrictToEnrolment(new Set(['payments:collect']))]).toEqual([]);
++  });
++});
++
++describe('PolicyService.resolveForSession with the gate', () => {
++  const row = (over: Partial<UserAccessRow>): UserAccessRow => ({
++    accountType: 'USER',
++    rolePermissions: ['users:view', 'payments:collect', 'receivables:advance:apply'],
++    grants: [],
++    scope: {
++      companyScopeAll: false,
++      companyIds: ['c1'],
++      branchScopeAll: false,
++      branchIds: ['b1'],
++      perBranchOverlay: { b1: ['payments:collect'] },
++    },
++    entitledModules: [],
++    mfaEnrolmentRequired: false,
++    ...over,
++  });
++  const svc = (r: UserAccessRow) =>
++    new PolicyService({ loadUserAccess: () => Promise.resolve(r) } as unknown as AccessRepository);
++
++  it('required: only users:view survives, per-branch overlay is dropped, scope is kept', async () => {
++    const a = await svc(row({ mfaEnrolmentRequired: true })).resolveForSession('u', 't');
++    expect([...a.effectivePermissions]).toEqual(['users:view']);
++    expect(a.perBranchOverlay.size).toBe(0);
++    expect(a.branchScope).toEqual(['b1']);
++  });
++  it('the admin view (resolveForUser) is NOT restricted: an operator still sees what the roles grant', async () => {
++    const a = await svc(row({ mfaEnrolmentRequired: true })).resolveForUser('u', 't');
++    expect([...a.effectivePermissions].sort()).toEqual(
++      ['payments:collect', 'receivables:advance:apply', 'users:view'].sort(),
++    );
++  });
++  it('not required: the full set is returned unchanged', async () => {
++    const a = await svc(row({})).resolveForSession('u', 't');
++    expect([...a.effectivePermissions].sort()).toEqual(
++      ['payments:collect', 'receivables:advance:apply', 'users:view'].sort(),
++    );
++    expect(a.perBranchOverlay.size).toBe(1);
++  });
++  it('a failing repository (factor lookup error) fails the resolution, never an unrestricted result', async () => {
++    const bad = new PolicyService({
++      loadUserAccess: () => Promise.reject(new Error('db down')),
++    } as unknown as AccessRepository);
++    await expect(bad.resolveForSession('u', 't')).rejects.toThrow('db down');
++  });
++});
+diff --git a/apps/api/src/modules/access/mfa-enrolment-gate.ts b/apps/api/src/modules/access/mfa-enrolment-gate.ts
+new file mode 100644
+index 0000000..f7ff5c1
+--- /dev/null
++++ b/apps/api/src/modules/access/mfa-enrolment-gate.ts
+@@ -0,0 +1,39 @@
++/**
++ * F-7c safeguard (CANDIDATE, unapplied) — a holder of a mandatory-MFA system role who has no CONFIRMED TOTP factor gets an
++ * ENROLMENT-ONLY session: every permission except {@link ENROLMENT_ONLY_PERMISSIONS} is withheld until the factor is confirmed.
++ *
++ * Why: `payments:collect`, `receivables:advance:apply` and the customer operations are routine (not step-up) keys, so a freshly
++ * invited manager could otherwise move money on a password alone. Step-up cannot help before enrolment (it needs a factor).
++ *
++ * Fail-closed by construction: the decision is derived from the database on EVERY access resolution (login, token refresh, and the
++ * refresh that follows an RBAC change), so no path can hand an un-enrolled manager a full permission set; if the factor lookup
++ * throws, the resolution throws and no session is issued.
++ */
++
++/** System role keys that must hold a CONFIRMED TOTP factor before any of their permissions work. Cashier/sales are NOT in this list. */
++export const MFA_MANDATORY_SYSTEM_ROLE_KEYS: readonly string[] = Object.freeze(['manager']);
++
++/**
++ * The only key an enrolment-only session keeps. It guards exactly the routes an un-enrolled user needs
++ * (`POST /auth/mfa/enrol`, `/auth/mfa/confirm`, `/auth/step-up`, `/auth/logout`) and nothing financial.
++ */
++export const ENROLMENT_ONLY_PERMISSIONS: readonly string[] = Object.freeze(['users:view']);
++
++export interface HeldRole {
++  readonly key: string;
++  readonly isSystem: boolean;
++}
++
++/** True when the user holds an active mandatory-MFA SYSTEM role and has no confirmed TOTP factor. */
++export function mfaEnrolmentRequired(input: {
++  readonly roles: readonly HeldRole[];
++  readonly hasConfirmedTotp: boolean;
++}): boolean {
++  if (input.hasConfirmedTotp) return false;
++  return input.roles.some((r) => r.isSystem && MFA_MANDATORY_SYSTEM_ROLE_KEYS.includes(r.key));
++}
++
++/** The permission set of an enrolment-only session: the intersection with {@link ENROLMENT_ONLY_PERMISSIONS} (never wider than before). */
++export function restrictToEnrolment(permissions: ReadonlySet<string>): ReadonlySet<string> {
++  return new Set(ENROLMENT_ONLY_PERMISSIONS.filter((k) => permissions.has(k)));
++}
+diff --git a/apps/api/src/modules/access/policy.service.test.ts b/apps/api/src/modules/access/policy.service.test.ts
+index 09b9d77..0187efd 100644
+--- a/apps/api/src/modules/access/policy.service.test.ts
++++ b/apps/api/src/modules/access/policy.service.test.ts
+@@ -18,6 +18,7 @@ const OWNER: UserAccessRow = {
+   grants: [],
+   scope: null,
+   entitledModules: [],
++  mfaEnrolmentRequired: false,
+ };
+ 
+ const MANAGER: UserAccessRow = {
+@@ -32,6 +33,7 @@ const MANAGER: UserAccessRow = {
+     perBranchOverlay: { b2: ['users:view'] },
+   },
+   entitledModules: [],
++  mfaEnrolmentRequired: false,
+ };
+ 
+ describe('PolicyService.resolveForUser', () => {
+diff --git a/apps/api/src/modules/access/policy.service.ts b/apps/api/src/modules/access/policy.service.ts
+index 1ee570d..037f8bf 100644
+--- a/apps/api/src/modules/access/policy.service.ts
++++ b/apps/api/src/modules/access/policy.service.ts
+@@ -3,6 +3,7 @@ import { resolveEffectivePermissions } from '@flower/permissions';
+ import type { ScopeSet } from '../../common/context/index.js';
+ import { AccessRepository, type UserAccessRow } from './access.repository.js';
+ import type { ResolvedAccess } from './policy.types.js';
++import { restrictToEnrolment } from './mfa-enrolment-gate.js';
+ 
+ export class UserNotFoundError extends Error {
+   constructor(userId: string) {
+@@ -47,6 +48,24 @@ export class PolicyService {
+     return this.materialise(userId, row);
+   }
+ 
++  /**
++   * The access a SESSION is built from (login, token refresh, and the refresh that follows an RBAC change). Identical to
++   * `resolveForUser` except that a mandatory-MFA role without a CONFIRMED TOTP factor gets an enrolment-only session
++   * (F-7c, see mfa-enrolment-gate.ts). The admin/permission views keep using `resolveForUser`, so an operator still sees what the
++   * roles grant; the restriction applies to the live session only.
++   */
++  async resolveForSession(userId: string, tenantId?: string): Promise<ResolvedAccess> {
++    const row = await this.repo.loadUserAccess(userId, tenantId);
++    if (!row) throw new UserNotFoundError(userId);
++    const access = this.materialise(userId, row);
++    if (!row.mfaEnrolmentRequired) return access;
++    return {
++      ...access,
++      effectivePermissions: restrictToEnrolment(access.effectivePermissions),
++      perBranchOverlay: new Map(),
++    };
++  }
++
+   /** Permission-preview: what would this user's access be under `proposed`, and
+    *  how does it differ from now. Read-only — never writes. */
+   async preview(
+@@ -76,6 +95,7 @@ export class PolicyService {
+           }
+         : currentRow.scope,
+       entitledModules: currentRow.entitledModules,
++      mfaEnrolmentRequired: currentRow.mfaEnrolmentRequired,
+     };
+     const next = this.materialise(userId, proposedRow);
+ 
+diff --git a/apps/api/src/modules/access/session-access.refresher.ts b/apps/api/src/modules/access/session-access.refresher.ts
+index c7f17e0..b0e7616 100644
+--- a/apps/api/src/modules/access/session-access.refresher.ts
++++ b/apps/api/src/modules/access/session-access.refresher.ts
+@@ -27,7 +27,7 @@ export class SessionAccessRefresher {
+     const ids = await client.zrange(`usersessions:${userId}`, '0', '-1');
+     if (ids.length === 0) return;
+ 
+-    const snapshot = toAccessSnapshot(await this.policy.resolveForUser(userId, tenantId));
++    const snapshot = toAccessSnapshot(await this.policy.resolveForSession(userId, tenantId));
+     for (const id of ids) {
+       const session = await this.store.get(id);
+       if (!session || session.impersonatorPlatformUserId) continue;
+diff --git a/apps/api/src/modules/access/staff-invite.manager-onboarding.integration.test.ts b/apps/api/src/modules/access/staff-invite.manager-onboarding.integration.test.ts
+index bf017cc..05d6080 100644
+--- a/apps/api/src/modules/access/staff-invite.manager-onboarding.integration.test.ts
++++ b/apps/api/src/modules/access/staff-invite.manager-onboarding.integration.test.ts
+@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+ import { Test } from '@nestjs/testing';
+ import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
+ import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
+-import { PLATFORM_PERMISSIONS, requiresStepUp } from '@flower/permissions';
++import { PLATFORM_PERMISSIONS } from '@flower/permissions';
+ import { authenticator } from 'otplib';
+ import pg from 'pg';
+ import { AppModule } from '../../app.module.js';
+@@ -124,7 +124,7 @@ describe('F-7c manager onboarding via route A', () => {
+       payload: { workspaceSlug: T.slug, email, password: PW },
+     });
+ 
+-  it('invite -> set password -> login; step-up-gated keys refused; step-up impossible before TOTP; after enrolment login demands the code and step-up unlocks', async () => {
++  it('invite -> set password -> login (enrolment-only session); step-up impossible before TOTP; after enrolment login demands the code, the step-up keys then need an explicit step-up', async () => {
+     const email = 'manager@mgr1.test';
+     const inv = await app.inject({
+       method: 'POST',
+@@ -151,17 +151,10 @@ describe('F-7c manager onboarding via route A', () => {
+       headers: { authorization: `Bearer ${at1}` },
+     });
+     const perms: string[] = acc.json().effectivePermissions ?? acc.json().permissions ?? [];
+-    const held = perms.filter((p) => requiresStepUp(p));
+-    expect(held).toEqual(
+-      expect.arrayContaining([
+-        'refunds:execute',
+-        'credit_notes:issue',
+-        'cancellation_charges:issue',
+-      ]),
+-    );
++    // with the F-7c MFA gate an un-enrolled manager holds ONLY users:view (see mfa-enrolment-gate.integration.test.ts for the full matrix)
++    expect(perms).toEqual(['users:view']);
+     const a1 = await advance(at1);
+     expect(a1.statusCode).toBe(403);
+-    expect(a1.json().error.code).toBe('STEP_UP_REQUIRED');
+     const su0 = await app.inject({
+       method: 'POST',
+       url: '/v1/auth/step-up',
+diff --git a/apps/api/src/modules/identity/session.service.ts b/apps/api/src/modules/identity/session.service.ts
+index 20d8e9f..8dba5b9 100644
+--- a/apps/api/src/modules/identity/session.service.ts
++++ b/apps/api/src/modules/identity/session.service.ts
+@@ -210,7 +210,7 @@ export class SessionService {
+   }
+ 
+   private async resolveAccess(tenantId: string, userId: string): Promise<SessionData['access']> {
+-    return toAccessSnapshot(await this.policy.resolveForUser(userId, tenantId));
++    return toAccessSnapshot(await this.policy.resolveForSession(userId, tenantId));
+   }
+ 
+   private async resolvePlatformAccess(platformUserId: string): Promise<SessionData['access']> {
+diff --git a/apps/pos-pwa/e2e/run.mjs b/apps/pos-pwa/e2e/run.mjs
+index eba9161..9608fa7 100644
+--- a/apps/pos-pwa/e2e/run.mjs
++++ b/apps/pos-pwa/e2e/run.mjs
+@@ -228,39 +228,63 @@ try {
+   const operatorId = (await q(`SELECT id FROM platform_user ORDER BY "createdAt" LIMIT 1`))[0].id;
+   // the sale-world seeder keeps its stepped-up platform session ('g-platform') in the session store; sign a token for it
+   const operatorToken = await w.h.jwt.sign({ sub: operatorId, sid: 'g-platform', aud: 'platform' });
+-  const invite = await w.req('POST', `/platform/tenants/${w.a.tenantId}/staff-invites`, operatorToken, {
+-    email,
+-    roleKey: 'cashier',
+-    companyIds: [w.a.companyId],
+-    branchIds: [w.a.branches[0]],
+-  });
+-  if (invite.status !== 201) throw new Error(`cashier invite failed ${invite.status} ${JSON.stringify(invite.body)}`);
++  const invite = await w.req(
++    'POST',
++    `/platform/tenants/${w.a.tenantId}/staff-invites`,
++    operatorToken,
++    {
++      email,
++      roleKey: 'cashier',
++      companyIds: [w.a.companyId],
++      branchIds: [w.a.branches[0]],
++    },
++  );
++  if (invite.status !== 201)
++    throw new Error(`cashier invite failed ${invite.status} ${JSON.stringify(invite.body)}`);
+   const setPw = await w.req('POST', '/auth/set-password', null, {
+     token: invite.body.setPasswordToken,
+     newPassword: password,
+   });
+-  if (setPw.status >= 300) throw new Error(`cashier set-password failed ${setPw.status} ${JSON.stringify(setPw.body)}`);
++  if (setPw.status >= 300)
++    throw new Error(`cashier set-password failed ${setPw.status} ${JSON.stringify(setPw.body)}`);
+   const argon = { memoryCost: 19456, timeCost: 2, parallelism: 1 };
+-  // ── a MANAGER with a real password, same company + branch: applying a customer advance is a manager authority, not a cashier one ──
++  // ── a MANAGER created through the SAME operator route (F-7c) and then enrolled in TOTP through the real API: until the factor is CONFIRMED a manager's session
++  // is enrolment-only (users:view), so applying a customer advance / collecting on account is only possible after this enrolment. ──
+   const managerEmail = `manager-${randomUUID().slice(0, 6)}@pilot.test`;
+   const managerPassword = `Pilot-Manager-${randomUUID()}`;
+-  const managerUserId = randomUUID();
+-  await q(
+-    `INSERT INTO "user" (id, "tenantId", "accountType", email, status, "updatedAt") VALUES ($1,$2,'USER',$3,'ACTIVE',now())`,
+-    [managerUserId, w.a.tenantId, managerEmail],
+-  );
+-  await q(
+-    `INSERT INTO user_role ("tenantId","userId","roleId") SELECT $1,$2,id FROM role WHERE "tenantId"=$1 AND key='manager'`,
+-    [w.a.tenantId, managerUserId],
+-  );
+-  await q(
+-    `INSERT INTO data_scope_assignment ("tenantId","userId","companyScopeAll","companyIds","branchScopeAll","branchIds","updatedAt") VALUES ($1,$2,false,$3,false,$4,now())`,
+-    [w.a.tenantId, managerUserId, [w.a.companyId], [w.a.branches[0]]],
+-  );
+-  await q(
+-    `INSERT INTO credential ("tenantId","userId",kind,hash,"updatedAt") VALUES ($1,$2,'PASSWORD',$3,now())`,
+-    [w.a.tenantId, managerUserId, await hash(managerPassword, argon)],
++  const mInvite = await w.req(
++    'POST',
++    `/platform/tenants/${w.a.tenantId}/staff-invites`,
++    operatorToken,
++    {
++      email: managerEmail,
++      roleKey: 'manager',
++      companyIds: [w.a.companyId],
++      branchIds: [w.a.branches[0]],
++    },
+   );
++  if (mInvite.status !== 201)
++    throw new Error(`manager invite failed ${mInvite.status} ${JSON.stringify(mInvite.body)}`);
++  const mSetPw = await w.req('POST', '/auth/set-password', null, {
++    token: mInvite.body.setPasswordToken,
++    newPassword: managerPassword,
++  });
++  if (mSetPw.status >= 300) throw new Error(`manager set-password failed ${mSetPw.status}`);
++  const mLogin = await w.req('POST', '/auth/login', null, {
++    workspaceSlug: slug,
++    email: managerEmail,
++    password: managerPassword,
++  });
++  if (mLogin.status !== 200 || mLogin.body.status !== 'ok')
++    throw new Error(`manager first login failed ${mLogin.status}`);
++  const mEnrol = await w.req('POST', '/auth/mfa/enrol', mLogin.body.accessToken);
++  if (mEnrol.status >= 300) throw new Error(`manager enrol failed ${mEnrol.status}`);
++  const managerTotpSecret = mEnrol.body.secret;
++  const { totp } = await import('./totp.mjs');
++  const mConfirm = await w.req('POST', '/auth/mfa/confirm', mLogin.body.accessToken, {
++    code: totp(managerTotpSecret),
++  });
++  if (mConfirm.status >= 300) throw new Error(`manager confirm failed ${mConfirm.status}`);
+   // ── customers for the credit / advance journeys (names are what the cashier searches for) ──
+   let oliveId = null;
+   const mkCustomer = async (displayName, { creditEnabled, limitMinor }) => {
+@@ -386,7 +410,7 @@ try {
+         slug,
+         email,
+         password,
+-        manager: { email: managerEmail, password: managerPassword },
++        manager: { email: managerEmail, password: managerPassword, totpSecret: managerTotpSecret },
+         owner: { email: ownerEmail, password: ownerPassword, totpSecret },
+         owner2: { id: owner2Id, email: owner2Email, password: owner2Password },
+         tenantId: w.a.tenantId,
+diff --git a/apps/pos-pwa/e2e/totp.mjs b/apps/pos-pwa/e2e/totp.mjs
+new file mode 100644
+index 0000000..25438b4
+--- /dev/null
++++ b/apps/pos-pwa/e2e/totp.mjs
+@@ -0,0 +1,16 @@
++import { createHmac } from 'node:crypto';
++
++/** RFC 6238 TOTP (SHA-1, 30 s, 6 digits) for a base32 secret — identical to totp.ts (the specs import that one). */
++export function totp(secretBase32, at = Date.now()) {
++  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
++  let bits = '';
++  for (const ch of secretBase32.replace(/=+$/, ''))
++    bits += alphabet.indexOf(ch).toString(2).padStart(5, '0');
++  const key = Buffer.from(bits.match(/.{8}/g).map((b) => parseInt(b, 2)));
++  const counter = Buffer.alloc(8);
++  counter.writeBigUInt64BE(BigInt(Math.floor(at / 30_000)));
++  const h = createHmac('sha1', key).update(counter).digest();
++  const off = h[h.length - 1] & 0xf;
++  const n = ((h[off] & 0x7f) << 24) | (h[off + 1] << 16) | (h[off + 2] << 8) | h[off + 3];
++  return String(n % 1_000_000).padStart(6, '0');
++}
+diff --git a/apps/pos-pwa/e2e/totp.ts b/apps/pos-pwa/e2e/totp.ts
+new file mode 100644
+index 0000000..28d06ec
+--- /dev/null
++++ b/apps/pos-pwa/e2e/totp.ts
+@@ -0,0 +1,16 @@
++import { createHmac } from 'node:crypto';
++
++/** RFC 6238 TOTP (SHA-1, 30 s, 6 digits) — the same code an authenticator app would show for a base32 secret. */
++export function totp(secretBase32: string, at: number = Date.now()): string {
++  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
++  let bits = '';
++  for (const ch of secretBase32.replace(/=+$/, ''))
++    bits += alphabet.indexOf(ch).toString(2).padStart(5, '0');
++  const key = Buffer.from(bits.match(/.{8}/g)!.map((b) => parseInt(b, 2)));
++  const counter = Buffer.alloc(8);
++  counter.writeBigUInt64BE(BigInt(Math.floor(at / 30_000)));
++  const h = createHmac('sha1', key).update(counter).digest();
++  const off = h[h.length - 1]! & 0xf;
++  const n = ((h[off]! & 0x7f) << 24) | (h[off + 1]! << 16) | (h[off + 2]! << 8) | h[off + 3]!;
++  return String(n % 1_000_000).padStart(6, '0');
++}
+diff --git a/apps/pos-pwa/e2e/zz-credit-advance.spec.ts b/apps/pos-pwa/e2e/zz-credit-advance.spec.ts
+index 7e538ab..56041db 100644
+--- a/apps/pos-pwa/e2e/zz-credit-advance.spec.ts
++++ b/apps/pos-pwa/e2e/zz-credit-advance.spec.ts
+@@ -1,5 +1,6 @@
+ import { readFileSync, writeFileSync } from 'node:fs';
+ import { expect, test, type Page } from '@playwright/test';
++import { totp } from './totp';
+ 
+ /**
+  * CUSTOMER CREDIT + ADVANCE PAYMENTS in a real browser against the real API and database (see run.mjs). It runs after the pilot journey, so the
+@@ -12,7 +13,7 @@ const creds = JSON.parse(readFileSync(process.env['E2E_CREDS_FILE']!, 'utf8')) a
+   slug: string;
+   email: string;
+   password: string;
+-  manager: { email: string; password: string };
++  manager: { email: string; password: string; totpSecret: string };
+ };
+ 
+ interface CreditSale {
+@@ -50,11 +51,18 @@ async function record(
+ 
+ test.describe.configure({ mode: 'serial' });
+ 
+-async function login(page: Page, email: string, password: string): Promise<void> {
++async function login(
++  page: Page,
++  email: string,
++  password: string,
++  totpSecret?: string,
++): Promise<void> {
+   await page.goto('/login');
+   await page.getByLabel('Workspace').fill(creds.slug);
+   await page.getByLabel('Email').fill(email);
+   await page.getByLabel('Password').fill(password);
++  // a manager has a CONFIRMED authenticator (F-7c): the sign-in needs the 6-digit code
++  if (totpSecret) await page.getByLabel('Authenticator code').fill(totp(totpSecret));
+   await page.getByRole('button', { name: 'Sign in' }).click();
+   await expect(page).toHaveURL(/\/sell$/);
+   await expect(page.getByTestId('tiles')).toBeVisible();
+@@ -276,7 +284,7 @@ test('a cashier cannot apply a customer advance: the till names the missing auth
+ test('a manager spends part of the advance and pays the rest in cash; then an advance-only sale', async ({
+   page,
+ }) => {
+-  await login(page, creds.manager.email, creds.manager.password);
++  await login(page, creds.manager.email, creds.manager.password, creds.manager.totpSecret);
+ 
+   // ── part advance + cash ──
+   await roses(page, 2);
+diff --git a/apps/pos-pwa/e2e/zz-customer-account.spec.ts b/apps/pos-pwa/e2e/zz-customer-account.spec.ts
+index 86436d4..f4b8964 100644
+--- a/apps/pos-pwa/e2e/zz-customer-account.spec.ts
++++ b/apps/pos-pwa/e2e/zz-customer-account.spec.ts
+@@ -1,5 +1,6 @@
+ import { readFileSync, writeFileSync } from 'node:fs';
+ import { expect, test, type Page } from '@playwright/test';
++import { totp } from './totp';
+ 
+ /**
+  * CUSTOMER ACCOUNT + CREDIT COLLECTION in a real browser against the real API and database (see run.mjs). Runs after the pilot / owner journeys (their
+@@ -12,7 +13,7 @@ const creds = JSON.parse(readFileSync(process.env['E2E_CREDS_FILE']!, 'utf8')) a
+   slug: string;
+   email: string;
+   password: string;
+-  manager: { email: string; password: string };
++  manager: { email: string; password: string; totpSecret: string };
+ };
+ 
+ interface Collected {
+@@ -37,11 +38,18 @@ const text = async (page: Page, id: string) =>
+ 
+ test.describe.configure({ mode: 'serial' });
+ 
+-async function login(page: Page, email: string, password: string): Promise<void> {
++async function login(
++  page: Page,
++  email: string,
++  password: string,
++  totpSecret?: string,
++): Promise<void> {
+   await page.goto('/login');
+   await page.getByLabel('Workspace').fill(creds.slug);
+   await page.getByLabel('Email').fill(email);
+   await page.getByLabel('Password').fill(password);
++  // a manager has a CONFIRMED authenticator (F-7c): the sign-in needs the 6-digit code
++  if (totpSecret) await page.getByLabel('Authenticator code').fill(totp(totpSecret));
+   await page.getByRole('button', { name: 'Sign in' }).click();
+   await expect(page).toHaveURL(/\/sell$/);
+   await expect(page.getByTestId('tiles')).toBeVisible();
+@@ -270,7 +278,7 @@ test('cashier collects 15.00 cash: oldest invoice first, a lost response retried
+ test('a manager collects the rest (16.50) by bank transfer: both invoices are settled, balance 0.00; the previous user’s receipts are gone', async ({
+   page,
+ }) => {
+-  await login(page, creds.manager.email, creds.manager.password);
++  await login(page, creds.manager.email, creds.manager.password, creds.manager.totpSecret);
+   await openAccount(page, 'Dora Debtor', 'Dora');
+   const [inv1, inv2] = result.sales.map((s) => s.invoiceNumber);
+   await expect(page.getByTestId('acct-owes')).toHaveText('16.50');
+diff --git a/apps/pos-pwa/e2e/zzz-owner-credit.spec.ts b/apps/pos-pwa/e2e/zzz-owner-credit.spec.ts
+index 6788943..1a638ab 100644
+--- a/apps/pos-pwa/e2e/zzz-owner-credit.spec.ts
++++ b/apps/pos-pwa/e2e/zzz-owner-credit.spec.ts
+@@ -19,7 +19,7 @@ const creds = JSON.parse(readFileSync(process.env['E2E_CREDS_FILE']!, 'utf8')) a
+   email: string;
+   password: string;
+   companyId: string;
+-  manager: { email: string; password: string };
++  manager: { email: string; password: string; totpSecret: string };
+   owner: { email: string; password: string; totpSecret: string };
+ };
+ const OWNER = 'http://localhost:3400';
+@@ -394,6 +394,7 @@ test('manager: Owner Web is not for this role — the server refuses the organis
+   await m.getByLabel('Workspace').fill(creds.slug);
+   await m.getByLabel('Email').fill(creds.manager.email);
+   await m.getByLabel('Password').fill(creds.manager.password);
++  await m.getByLabel('Authenticator code').fill(totp(creds.manager.totpSecret));
+   await m.getByRole('button', { name: 'Sign in' }).click();
+   await expect(m).toHaveURL(/products$/);
+   await m.goto(oliveUrl);
