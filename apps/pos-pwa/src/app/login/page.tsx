@@ -40,7 +40,7 @@ export default function PosLoginPage() {
       // access token → memory only; the refresh token was set as an HttpOnly
       // cookie by the API and is never visible here.
       setAccessToken(accessToken);
-      router.replace('/access');
+      router.replace('/sell');
     } catch (err) {
       setError(errorMessage(err));
       setPending(false);

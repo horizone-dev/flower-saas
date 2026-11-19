@@ -55,3 +55,17 @@ infra/docker/data/
 # generated scan artifacts
 sbom*.json
 trivy-results*
+
+# MVP browser journey (apps/pos-pwa/e2e) — generated per run
+apps/pos-pwa/e2e/.e2e-result.json
+apps/pos-pwa/e2e/.e2e-creds.json
+apps/pos-pwa/e2e/.e2e-*.json
+
+# staging secrets (never commit)
+infra/staging/.env.staging
+infra/staging/.env.smoke
+infra/staging/.env.ci
+infra/staging/.env.cfgtest
+
+# local staging smoke artefacts (disposable credentials)
+infra/staging/.smoke-*

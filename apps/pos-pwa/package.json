@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests",
-    "clean": "rimraf .next node_modules .turbo"
+    "clean": "rimraf .next node_modules .turbo",
+    "test:e2e": "node e2e/run.mjs"
   },
   "dependencies": {
     "@flower/api-client": "workspace:*",
@@ -23,6 +24,8 @@
   },
   "devDependencies": {
     "@flower/config": "workspace:*",
+    "@flower/testing": "workspace:*",
+    "@playwright/test": "1.56.0",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
