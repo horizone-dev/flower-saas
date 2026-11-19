@@ -4,5 +4,5 @@ import { getAccessToken } from '@/lib/session';
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  redirect((await getAccessToken()) ? '/access' : '/login');
+  redirect((await getAccessToken()) ? '/products' : '/login');
 }

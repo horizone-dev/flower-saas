@@ -1,6 +1,7 @@
 'use client';
 
 import { createApiClient, type ApiClient, ApiError } from '@flower/api-client';
+import { clearCollections, sessionKeyValueStore } from './collection-store';
 
 export { ApiError };
 
@@ -16,7 +17,10 @@ export { ApiError };
  *   'include'` + `x-auth-transport: cookie` opt the auth calls into the cookie
  *   flow; the header also blocks CSRF on the cookie-authenticated refresh.
  */
-const BASE_URL = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:3001';
+// NOTE: Next.js inlines `NEXT_PUBLIC_*` into the BROWSER bundle only for the literal dotted form `process.env.NEXT_PUBLIC_X` — the bracket form
+// is left as a runtime lookup that is always undefined in a browser (the till would silently call localhost:3001). An EMPTY value means
+// "same origin" (the `/v1` proxy in next.config.ts).
+const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:3001';
 
 let accessToken: string | null = null; // in-memory only
 
@@ -68,6 +72,8 @@ export async function signOut(): Promise<void> {
     /* best effort — the cookie also expires on its own */
   }
   accessToken = null;
+  // the collection receipts kept for reprinting belong to the session that made them
+  clearCollections(sessionKeyValueStore());
 }
 
 export function errorMessage(err: unknown): string {
