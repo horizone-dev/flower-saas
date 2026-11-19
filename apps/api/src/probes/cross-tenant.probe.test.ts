@@ -1797,6 +1797,19 @@ describe('cross-tenant isolation probe suite', () => {
           ownerBOrderTok,
         ),
       },
+      // MVP F-3 — the seller identity a cashier prints on a receipt (legal name, TRN, address). Tenant B, holding `orders:view`, can
+      // never read tenant A's REAL company / branch identity (same branch-nested scope rules; the field allow-list, sibling-branch and
+      // other-company refusals are proven against real rows in `modules/org/receipt-identity.integration.test.ts`).
+      {
+        name: "GET A's receipt identity as ownerB",
+        axis: 'tenant',
+        expectDenied: [403, 404],
+        attempt: asStatus(
+          'GET',
+          `/v1/companies/${A.companyId}/branches/${A.branchId}/receipt-identity`,
+          ownerBOrderTok,
+        ),
+      },
       // task 3b.6 (Checkpoints C-G) — tenant B (full receivables:* owner
       // permission set) can never reach tenant A's customer-account
       // resources through this branch-nested route family, even against a
@@ -2507,6 +2520,8 @@ describe('cross-tenant isolation probe suite', () => {
       // task 3b.3 Checkpoint C — probed above (tenant B cannot read tenant
       // A's issued Invoice, same branch-nested scope rules).
       '/v1/companies/:companyId/branches/:branchId/invoices',
+      // MVP F-3 — probed above (tenant B cannot read tenant A's receipt identity).
+      '/v1/companies/:companyId/branches/:branchId/receipt-identity',
       // task 3b.6 (Checkpoints C-G) — probed above (tenant B, holding the
       // full receivables:* owner permission tier, cannot create a receipt/
       // Advance-conversion/Advance-application/Opening-Balance/customer-
