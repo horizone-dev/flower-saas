@@ -1,0 +1,23 @@
+--- a/apps/api/src/common/audit/actions.ts
++++ b/apps/api/src/common/audit/actions.ts
+@@ -397,6 +397,20 @@
+   // audit row: no table). Bounded numeric / enumerated evidence only; reads the drawer, changes nothing, no GL effect.
+   'cash_register.x_report_generated': { resourceType: 'register_session', security: false },
+ 
++  // ── expenses & other income (Phase 4.7 — registered ONLY with security-review approval of patches/E1-audit-actions-registry.patch) ──
++  // One row per money-relevant lifecycle fact, written in the SAME transaction as the change AND its `expense_event` (a rolled-back operation leaves no row; a replay writes none).
++  // `expense_event` is the expense's own history and is NOT a substitute for these rows. Bounded payload only (ids, enumerations, minor-unit amounts as decimal strings, the
++  // linked event id): never a description, reference, rejection reason, idempotency key, payee, tax code, token or any free text. `security:false`: financial-domain precedent
++  // (settlement.*, cash_register.*); the `security_event` view is unchanged. No GL posting and no cash movement exists for any of them.
++  'expense_record.created': { resourceType: 'expense', security: false },
++  'expense_record.submitted': { resourceType: 'expense', security: false },
++  'expense_record.approved': { resourceType: 'expense', security: false },
++  'expense_record.rejected': { resourceType: 'expense', security: false },
++  'expense_record.paid': { resourceType: 'expense', security: false },
++  'expense_category.created': { resourceType: 'expense_category', security: false },
++  'expense_category.active_changed': { resourceType: 'expense_category', security: false },
++  'other_income.draft_created': { resourceType: 'other_income', security: false },
++
+   // ── sessions + impersonation ──────────────────────────────────────────
+   'session.revoked': { resourceType: 'session', security: true },
+   'IMPERSONATION:started': { resourceType: 'tenant', security: true },

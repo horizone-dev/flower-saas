@@ -1,0 +1,73 @@
+{
+  "package": "phase-4-audit-log-immutability",
+  "status": "PREPARED_NOT_APPLIED",
+  "note": "A security-hardening candidate. NOT a real migration. Promote only after the D / Z1 / E1 package (its pin amendments are stacked on that promotion) and only after every approval below is RECORDED by a human.",
+  "newestExistingMigration": "20261204120000_phase_4_device_permissions",
+  "source": {
+    "path": "docs/decisions/proposed-migrations/DRAFT-AL1-audit-log-immutability.sql",
+    "sha256": "534c36f62671ad78c9991fc92173a508b93ffb49d53e82e1c3e7c4df9c332b71"
+  },
+  "candidate": {
+    "name": "20261205120300_phase_4_audit_log_immutability",
+    "file": "migrations/20261205120300_phase_4_audit_log_immutability/migration.sql",
+    "sha256": "93c748120a5fd9b764808095b014b7337047d3b10be5a2cb7ed73c5451703dcd"
+  },
+  "rollback": {
+    "file": "rollback.sql",
+    "sha256": "c8d2b36a657f3ec341352b77e1ce405a591176c6fafc6ec03d0be4c1bcd89ef3"
+  },
+  "pinAmendments": {
+    "patch": "pin-amendments.patch",
+    "sha256": "4969211b3f1c27750db54b9116425f3e49d387a131724c765b9dd3fb783ca338",
+    "stackedAfter": "docs/decisions/promotion-packages/phase-4-d-z1-e1/pin-amendments.patch"
+  },
+  "schemaChange": false,
+  "activation": {
+    "productionMigration": false,
+    "routes": false,
+    "permissionGrants": false,
+    "glPosting": false,
+    "auditPolicyActivated": false,
+    "auditActionsRegistered": false
+  },
+  "approvals": [
+    {
+      "id": "AL1-APPLY",
+      "owner": "SECURITY",
+      "what": "applying the audit_log immutability hardening (privileges, append-only guard, TRUNCATE guards, ENABLE ALWAYS, self-check)",
+      "recorded": false
+    },
+    {
+      "id": "AL1-RESIDUAL-RISKS",
+      "owner": "SECURITY",
+      "what": "accepting the residual risks: owner / superuser DDL (DISABLE TRIGGER, DETACH / DROP partition) and the new-partition procedure",
+      "recorded": false
+    },
+    {
+      "id": "AL1-LEGACY-TEST-AMENDMENT",
+      "owner": "SECURITY",
+      "what": "amending the Phase 1 isolation test (a cross-tenant DELETE on audit_log is now refused instead of returning zero rows)",
+      "recorded": false
+    },
+    {
+      "id": "AL1-PARTITION-PROCEDURE",
+      "owner": "OPS",
+      "what": "the procedure every future audit_log partition creation must follow (revoke, TRUNCATE guard, ENABLE ALWAYS, gated on fn_audit_log_protection_gaps())",
+      "recorded": false
+    }
+  ],
+  "separateDecisions": [
+    {
+      "id": "AL1-REFUSED-ATTEMPT-AUDITING",
+      "note": "whether refused attempts (self-approval, missing permission, illegal transition) must be recorded, and where; NOT decided by this hardening"
+    },
+    {
+      "id": "AL1-HASH-CHAIN",
+      "note": "the per-tenant prevHash / entryHash chain (OD-P2-1): must be computed AT INSERT (a BEFORE INSERT trigger or the app) because this guard refuses any later UPDATE; NOT decided here"
+    },
+    {
+      "id": "AL1-RETENTION",
+      "note": "a retention / purge mechanism would need its OWN approved privileged procedure; none exists and none is authorised"
+    }
+  ]
+}

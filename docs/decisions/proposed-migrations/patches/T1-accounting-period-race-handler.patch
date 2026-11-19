@@ -1,0 +1,15 @@
+# T1 — accounting-period race test: attach the rejection handler immediately. UNAPPLIED. Test-hygiene only — no production code, no frozen financial contract touched.
+# Evidence: docs/decisions/AL1-SE1-INDEPENDENT-REVIEW-HANDOFF.md §7 (unhandled rejection reproduced with and without AL1; this fix removes it under a forced 500 ms delay).
+--- a/apps/api/src/modules/accounting/accounting-period.integration.test.ts
++++ b/apps/api/src/modules/accounting/accounting-period.integration.test.ts
+@@ -335,6 +335,10 @@
+           }),
+         );
+ 
++        // observe the rejection NOW: it is asserted below, but it can arrive before that line runs (the lock is released at COMMIT);
++        // without a handler attached by then Node reports an unhandled rejection and the run exits 1 although every test passed
++        postingAttempt.catch(() => undefined);
++
+         // give the posting attempt time to block on the held FOR UPDATE lock
+         await new Promise((r) => setTimeout(r, 600));
+         await holder.query(

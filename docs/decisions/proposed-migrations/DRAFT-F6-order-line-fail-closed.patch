@@ -1,0 +1,27 @@
+diff --git a/apps/api/src/modules/orders/order.repository.ts b/apps/api/src/modules/orders/order.repository.ts
+index 48fcd6e..694b385 100644
+--- a/apps/api/src/modules/orders/order.repository.ts
++++ b/apps/api/src/modules/orders/order.repository.ts
+@@ -1697,6 +1697,22 @@ export class OrderRepository extends ScopedRepository {
+         variantId: li.variantId,
+         date: today,
+       });
++      // F-6 (PROPOSED, needs owner approval) — fail closed: in a VAT country a line with no effective tax
++      // category, or whose category has no in-force rate, would be recorded with 0 tax. Refuse it instead.
++      // An explicit ZERO_RATED / EXEMPT category resolves to a real 0 bps rate and passes; a country with
++      // no VAT regime (`regime === 'NONE'`) never charges tax and also passes.
++      if (
++        taxResolved.regime === 'VAT' &&
++        (taxResolved.reason === 'NO_CATEGORY_ASSIGNED' ||
++          taxResolved.reason === 'NO_RATE_FOR_CATEGORY')
++      ) {
++        throw new DomainError(
++          'ORDER_LINE_TAX_NOT_CONFIGURED',
++          `no VAT category / rate is configured for this variant (${taxResolved.reason})`,
++          422,
++          [{ field: 'variantId', issue: taxResolved.reason }],
++        );
++      }
+ 
+       const grossMoney = this.lineGross(unitPriceAmountMinor, unitPriceCurrencyCode, quantity);
+       const discount = this.resolveDiscount(

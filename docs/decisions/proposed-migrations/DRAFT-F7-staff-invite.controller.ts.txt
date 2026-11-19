@@ -1,0 +1,43 @@
+// DRAFT — NOT in apps/api/src, NOT registered, NOT approved. F-7 route for "create a staff user + one-time invite".
+// To enable (after owner + security approval): copy to apps/api/src/modules/access/staff-invite.controller.ts, register the controller and the
+// three providers (StaffOnboardingRepository, StaffOnboardingService + LimitService access) in AccessModule, and add a cross-tenant probe + a route
+// inventory pin. NO new permission and NO migration: it reuses `platform:tenant_users:manage` (step-up) and the existing set_password_token table.
+import { Body, Controller, Header, Param, Post } from '@nestjs/common';
+import { z } from 'zod';
+import { PlatformRealm } from '../../common/auth/pipeline.decorators.js';
+import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
+import { ZodBody } from '../../common/validation/zod-body.js';
+import { getContext } from '../../common/context/index.js';
+import { DomainError } from '../../common/errors/domain-error.js';
+import { StaffOnboardingService } from './staff-onboarding.service.js';
+
+const inviteStaffSchema = z
+  .object({
+    email: z.string().min(3).max(254),
+    roleKey: z.enum(['cashier', 'sales']),
+    companyIds: z.array(z.string().uuid()).min(1).max(20),
+    branchIds: z.array(z.string().uuid()).min(1).max(20),
+  })
+  .strict();
+
+@Controller('platform/tenants/:tenantId')
+@PlatformRealm()
+export class StaffInviteController {
+  constructor(private readonly staff: StaffOnboardingService) {}
+
+  /**
+   * The raw invite token is in the response BODY ONCE (never logged, never cached by a proxy). The operator hands the link to the new
+   * cashier, who sets a password through the existing `POST /v1/auth/set-password`. 24 h, single use.
+   */
+  @Post('staff-invites')
+  @RequirePermission('platform:tenant_users:manage')
+  @Header('Cache-Control', 'no-store')
+  async invite(
+    @Param('tenantId') tenantId: string,
+    @Body(new ZodBody(inviteStaffSchema)) dto: z.infer<typeof inviteStaffSchema>,
+  ) {
+    const actor = getContext()?.platformUserId ?? null;
+    if (!actor) throw new DomainError('ACTOR_REQUIRED', 'platform actor required', 401);
+    return this.staff.inviteStaff({ tenantId, ...dto, actorPlatformUserId: actor });
+  }
+}

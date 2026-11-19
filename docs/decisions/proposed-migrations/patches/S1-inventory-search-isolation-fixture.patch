@@ -1,0 +1,49 @@
+--- a/apps/api/src/modules/stock/reads/inventory-search.integration.test.ts
++++ b/apps/api/src/modules/stock/reads/inventory-search.integration.test.ts
+@@ -98,13 +98,32 @@
+     );
+     await s.owner.query('COMMIT');
+     other = await s.mkCo('LOT_ACTUAL'); // a second company of the SAME tenant, with its own (small) stock of the SAME catalog
+-    await s
+-      .q(
+-        `INSERT INTO branch_stock_balance ("tenantId","companyId","branchId","variantId","costingMethod","uomCode","currencyCode","currencyExponent","quantityOnHand","valueMinor","ledgerQuantity","ledgerValueMinor","lotQuantity","lotValueMinor")
+-               SELECT $1,$2,$3,"variantId",'LOT_ACTUAL','stem','AED',2,1,1,1,1,1,1 FROM branch_stock_balance WHERE "branchId" = $4 ORDER BY "variantId" LIMIT 40`,
+-        [other.tenantId, other.companyId, other.branches[0], co.branches[0]],
++    // The other company's 40 balances are chosen DETERMINISTICALLY: 20 that match 'rose' and 20 that do not. (The bench variant ids are random v4 UUIDs, so "the 40 lowest ids" was a random
++    // sample in which only ~9 % of variants match 'rose': with probability ≈ 2 % it held NO rose at all and the isolation test below failed on `theirs.length > 0` although the search was right.)
++    // The insert is no longer allowed to fail silently, and the fixture proves its own shape before any assertion relies on it.
++    await s.q(
++      `INSERT INTO branch_stock_balance ("tenantId","companyId","branchId","variantId","costingMethod","uomCode","currencyCode","currencyExponent","quantityOnHand","valueMinor","ledgerQuantity","ledgerValueMinor","lotQuantity","lotValueMinor")
++       SELECT $1,$2,$3,x."variantId",'LOT_ACTUAL','stem','AED',2,1,1,1,1,1,1
++         FROM (SELECT bal."variantId",
++                      row_number() OVER (PARTITION BY (p."nameEn" ILIKE '%rose%' OR v."nameEn" ILIKE '%rose%') ORDER BY bal."variantId") AS rn
++                 FROM branch_stock_balance bal
++                 JOIN variant v ON v."tenantId" = bal."tenantId" AND v.id = bal."variantId"
++                 JOIN product p ON p."tenantId" = v."tenantId" AND p.id = v."productId"
++                WHERE bal."branchId" = $4) x
++        WHERE x.rn <= 20`,
++      [other.tenantId, other.companyId, other.branches[0], co.branches[0]],
++    );
++    const shape = (
++      await s.q<{ n: string; roses: string }>(
++        `SELECT count(*) AS n, count(*) FILTER (WHERE p."nameEn" ILIKE '%rose%' OR v."nameEn" ILIKE '%rose%') AS roses
++           FROM branch_stock_balance bal
++           JOIN variant v ON v."tenantId" = bal."tenantId" AND v.id = bal."variantId"
++           JOIN product p ON p."tenantId" = v."tenantId" AND p.id = v."productId"
++          WHERE bal."companyId" = $1`,
++        [other.companyId],
+       )
+-      .catch(() => undefined);
++    )[0]!;
++    expect([Number(shape.n), Number(shape.roses)]).toEqual([40, 20]);
+     await s.owner.query('ANALYZE');
+   }, 900_000);
+   afterAll(async () => {
+@@ -371,6 +390,7 @@
+     }
+     expect(theirs.length).toBeLessThanOrEqual(40);
+     expect(theirs.length).toBeGreaterThan(0);
++    expect(theirs.length).toBe(20); // exactly the other company's 20 'rose' balances (the fixture is deterministic): neither more (a leak) nor fewer
+     const otherIds = new Set(
+       (
+         await s.q<{ id: string }>(
