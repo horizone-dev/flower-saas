@@ -1,0 +1,20 @@
+diff --git a/apps/api/src/modules/platform/system-roles.ts b/apps/api/src/modules/platform/system-roles.ts
+index 1f8b2ce..4a624b5 100644
+--- a/apps/api/src/modules/platform/system-roles.ts
++++ b/apps/api/src/modules/platform/system-roles.ts
+@@ -256,6 +256,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
+     name: 'Cashier',
+     permissions: [
+       'users:view',
++      CATALOG_VIEW,
+       ...CUSTOMERS_OPERATIONAL,
+       ...PAYMENTS,
+       ...RECEIVABLES_OPERATIONAL,
+@@ -267,6 +268,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
+     name: 'Sales',
+     permissions: [
+       'users:view',
++      CATALOG_VIEW,
+       ...CUSTOMERS_OPERATIONAL,
+       ...PAYMENTS,
+       ...RECEIVABLES_OPERATIONAL,

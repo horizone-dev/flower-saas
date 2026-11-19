@@ -1,0 +1,85 @@
+diff --git a/apps/api/src/modules/platform/system-roles.ts b/apps/api/src/modules/platform/system-roles.ts
+index 1f8b2ce..4a624b5 100644
+--- a/apps/api/src/modules/platform/system-roles.ts
++++ b/apps/api/src/modules/platform/system-roles.ts
+@@ -256,6 +256,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
+     name: 'Cashier',
+     permissions: [
+       'users:view',
++      CATALOG_VIEW,
+       ...CUSTOMERS_OPERATIONAL,
+       ...PAYMENTS,
+       ...RECEIVABLES_OPERATIONAL,
+@@ -267,6 +268,7 @@ export const SYSTEM_ROLE_TEMPLATES: readonly SystemRoleTemplate[] = Object.freez
+     name: 'Sales',
+     permissions: [
+       'users:view',
++      CATALOG_VIEW,
+       ...CUSTOMERS_OPERATIONAL,
+       ...PAYMENTS,
+       ...RECEIVABLES_OPERATIONAL,
+diff --git a/apps/api/src/verification/permission-baseline.ts b/apps/api/src/verification/permission-baseline.ts
+index a23f8a4..b83fe85 100644
+--- a/apps/api/src/verification/permission-baseline.ts
++++ b/apps/api/src/verification/permission-baseline.ts
+@@ -82,6 +82,15 @@ export const AUTHORIZED_PERMISSION_CHANGES: AuthorizedPermissionChanges = Object
+         systemRoles: '501dba22a1f8312b0285e0908f8700d52cca74a0fa283873bad83d6db6b82eec',
+       }),
+     } as AuthorizedPermissionChange),
++    // MVP F-1 (PROPOSED): read-only catalog access for the cashier and sales roles — nothing else changes
++    Object.freeze({
++      id: 'mvp-f1-cashier-sales-catalog-view',
++      facts: Object.freeze(['grant:cashier:catalog:view', 'grant:sales:catalog:view']),
++      factsSha256: 'e9f3a7ae3d8649ea932472a4e8f359332685a14e84663fb2f94dc9a2c99ee44b',
++      files: Object.freeze({
++        systemRoles: 'dce2ea16ab6e54c80d33e03d06d9f691c56bd27f084177cb746f7888c1c54a42',
++      }),
++    } as AuthorizedPermissionChange),
+   ]),
+ });
+ 
+diff --git a/apps/api/src/verification/permission-baseline.structural.test.ts b/apps/api/src/verification/permission-baseline.structural.test.ts
+index 38894ac..73de289 100644
+--- a/apps/api/src/verification/permission-baseline.structural.test.ts
++++ b/apps/api/src/verification/permission-baseline.structural.test.ts
+@@ -109,6 +109,7 @@ const authorizing = (...changes: AuthorizedPermissionChange[]): AuthorizedPermis
+ });
+ 
+ /** the ONE authorised change, as reviewed (Phase 4 B5.3, owner-limited approval 2026-11-11) */
++const F1_FACTS = ['grant:cashier:catalog:view', 'grant:sales:catalog:view'];
+ const B53_FACTS = [
+   'PHASE_4_B5_3_TENANT_PERMISSIONS[]:devices:activate',
+   'PHASE_4_B5_3_TENANT_PERMISSIONS[]:devices:manage',
+@@ -127,12 +128,16 @@ describe('S0b — the real permission / system-role baseline is intact', () => {
+     ).toEqual([]);
+     expect(diffFacts(FROZEN_PERMISSION_FACTS, factsOfSurface(runtimePermissionSurface()))).toEqual({
+       removed: [],
+-      added: [...B53_FACTS].sort(),
++      added: [...B53_FACTS, ...F1_FACTS].sort(),
+     });
+   });
+ 
+-  it('exactly ONE change is authorised — Owner-only devices:activate / devices:manage — and the authorisation list is frozen at runtime', () => {
+-    expect(AUTHORIZED_PERMISSION_CHANGES.changes).toHaveLength(1);
++  it('exactly TWO changes are authorised — Owner-only devices:activate / devices:manage, and the MVP F-1 read-only cashier / sales catalog:view — and the authorisation list is frozen at runtime', () => {
++    expect(AUTHORIZED_PERMISSION_CHANGES.changes).toHaveLength(2);
++    expect(AUTHORIZED_PERMISSION_CHANGES.changes[1]!.facts).toEqual([
++      'grant:cashier:catalog:view',
++      'grant:sales:catalog:view',
++    ]);
+     const c = AUTHORIZED_PERMISSION_CHANGES.changes[0]!;
+     expect(c.id).toBe('phase-4-b5-3-owner-only-device-permissions');
+     expect([...c.facts].sort()).toEqual([...B53_FACTS].sort());
+@@ -183,7 +188,11 @@ describe('S0b — the real permission / system-role baseline is intact', () => {
+   });
+ 
+   it('the two source files equal the REVIEWED hashes of the one authorised change (not the Phase 3B frozen ones), and the pin-site helpers still return the frozen value', () => {
+-    const reviewed = AUTHORIZED_PERMISSION_CHANGES.changes[0]!.files;
++    // the reviewed hash of a file is the LATEST authorised change that names it: index.ts <- B5.3, system-roles.ts <- MVP F-1
++    const reviewed = {
++      permissionsIndex: AUTHORIZED_PERMISSION_CHANGES.changes[0]!.files.permissionsIndex,
++      systemRoles: AUTHORIZED_PERMISSION_CHANGES.changes[1]!.files.systemRoles,
++    };
+     expect(lfSha256(readFileSync(INDEX_TS, 'utf8'))).toBe(reviewed.permissionsIndex);
+     expect(lfSha256(readFileSync(ROLES_TS, 'utf8'))).toBe(reviewed.systemRoles);
+     // the files DID change relative to Phase 3B, so the helper accepts them only through the authorisation

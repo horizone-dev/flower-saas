@@ -1,0 +1,1283 @@
+--- a/apps/api/src/modules/sales/task-3b9-checkpoint-e-structural.test.ts
++++ b/apps/api/src/modules/sales/task-3b9-checkpoint-e-structural.test.ts
+@@ -296,13 +296,14 @@
+ describe('E — SalesModule wiring: the minimum imports, no duplicate provider, no cycle', () => {
+   const code = stripComments(read(MODULE));
+ 
+-  it('imports exactly the five modules that own the frozen collaborators, and declares exactly its own providers', () => {
++  it('imports exactly the five modules that own the frozen collaborators PLUS CashRegisterModule (E-5, the register wiring helper), and declares exactly its own providers', () => {
+     expect(listOf(code, 'imports')).toEqual([
+       'OrderModule',
+       'PaymentModule',
+       'ReceivablesModule',
+       'AccountingModule',
+       'AccessModule',
++      'CashRegisterModule',
+     ]);
+     expect(listOf(code, 'controllers')).toEqual(['SalesController']);
+     expect(listOf(code, 'providers')).toEqual([
+--- a/apps/api/src/verification/register-session-state-parity.structural.test.ts
++++ b/apps/api/src/verification/register-session-state-parity.structural.test.ts
+@@ -840,12 +840,14 @@
+       'cash-register.service.ts',
+       'cash-register.vocabulary.test.ts',
+       'cash-register.vocabulary.ts',
++      'cash-sales-wired.integration.test.ts',
+       'cash-sales.integration.test.ts',
+       'cash-source-mapping.test.ts',
+       'cash-source-mapping.ts',
+       'cash-source-reconciliation.repository.ts',
+       'cash-source-reconciliation.test.ts',
+       'cash-source-reconciliation.ts',
++      'cash-source-wiring.repository.ts',
+       'count-record.test.ts',
+       'count-record.ts',
+       'denomination-count.test.ts',
+--- a/apps/api/src/verification/cash-sales-e5.structural.test.ts
++++ b/apps/api/src/verification/cash-sales-e5.structural.test.ts
+@@ -4,9 +4,9 @@
+ import { describe, expect, it } from 'vitest';
+ 
+ /**
+- * Phase 4 E-5 — structural pins for the cash-sales components. They pin that the recorder / mapping / reconciliation are NOT wired into
+- * any production path (wiring = the approval-blocked patch), that no frozen Phase 3 financial file mentions the register, and the
+- * properties the proposed wiring relies on (one row per source, source facts read from the source row, lock order, read-only reconciliation).
++ * Phase 4 E-5 — structural pins for the cash-sales components AS WIRED by the approved patch: exactly four frozen call sites reach the
++ * register, each through the one policy-gated helper inside its own transaction; every other frozen financial file still does not mention it;
++ * plus the properties the wiring relies on (one row per source, source facts read from the source row, lock order, read-only reconciliation).
+  */
+ const HERE = dirname(fileURLToPath(import.meta.url));
+ const ROOT = resolve(HERE, '../../../..');
+@@ -39,7 +39,7 @@
+   return out;
+ };
+ 
+-describe('E-5 — NOT wired into production', () => {
++describe('E-5 — the approved wiring is exactly the minimum (patched source)', () => {
+   it('no production file outside the cash-register module imports the recorder, the mapping or the reconciliation', () => {
+     const users = walk(API)
+       .filter((f) => !f.replace(/\\/g, '/').includes('/modules/cash-register/'))
+@@ -52,7 +52,7 @@
+     expect(users).toEqual([]);
+   });
+ 
+-  it('inside the module, only the module file registers them; no controller or service uses the recorder', () => {
++  it('inside the module, only the module file, the wiring helper and the recorder itself use the recorder / reconciliation; no controller or service uses them', () => {
+     const users = readdirSync(join(ROOT, MOD))
+       .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+       .filter((f) =>
+@@ -65,18 +65,71 @@
+       'cash-movement-recorder.repository.ts',
+       'cash-register.module.ts',
+       'cash-source-reconciliation.repository.ts',
++      'cash-source-wiring.repository.ts',
+     ]);
+   });
+ 
+-  it('the frozen sale / payment / receipt / refund files do not mention the register, its sessions or its movements (the wiring is the approval-blocked patch)', () => {
++  const CALL_SITES: Array<[string, RegExp]> = [
++    ['sales/sales-application.service.ts', /origin: 'SALE_TENDER' as const/],
++    ['payments/payment.repository.ts', /origin: 'INVOICE_PAYMENT' as const/],
++    ['receivables/customer-receipt.repository.ts', /origin: 'CUSTOMER_RECEIPT'/],
++    ['receivables/refund.repository.ts', /kind: 'REFUND', id: executed\.refundId/],
++  ];
++  it('the approved wiring: EXACTLY the four call sites reach the register — each through ONE `cashRegister.recordInTx(tx, …)` of the wiring helper, inside its own transaction callback, with the origin it is', () => {
++    for (const [f, origin] of CALL_SITES) {
++      const c = code(`apps/api/src/modules/${f}`);
++      expect(c.match(/cashRegister\.recordInTx\(/g), f).toHaveLength(1);
++      expect(
++        c.match(/from '\.\.\/cash-register\/cash-source-wiring\.repository\.js'/g),
++        f,
++      ).toHaveLength(1);
++      expect(c, f).toMatch(/cashRegister\.recordInTx\(\s*tx\b/);
++      expect(c, f).toMatch(origin);
++      expect(c, f).toMatch(/this\.scoped\(async \(tx\) =>/);
++      // never the recorder, the mapping, the reconciliation or a register table directly
++      expect(c, f).not.toMatch(
++        /cash_movement|register_session|cash_register\b|CashMovementRecorder|CashSourceReconciliation|cash-movement-recorder|cash-source-mapping|cash-source-reconciliation/,
++      );
++    }
++  });
++
++  it('the call is AFTER the financial write in the same transaction and its result is not used to change the financial outcome', () => {
++    expect(
++      ordered(
++        code('apps/api/src/modules/sales/sales-application.service.ts'),
++        'enqueueSaleCompleted(tx',
++        'this.cashRegister.recordInTx(',
++      ),
++    ).toBe(true);
++    expect(
++      ordered(
++        code('apps/api/src/modules/receivables/refund.repository.ts'),
++        'executeLocalRefundInTx(tx',
++        'this.cashRegister.recordInTx(',
++      ),
++    ).toBe(true);
++    expect(
++      ordered(
++        code('apps/api/src/modules/payments/payment.repository.ts'),
++        'captureSynchronousTendersInTx(tx',
++        'this.cashRegister.recordInTx(',
++      ),
++    ).toBe(true);
++    expect(
++      ordered(
++        code('apps/api/src/modules/receivables/customer-receipt.repository.ts'),
++        'collectInTx(tx',
++        'this.cashRegister.recordInTx(',
++      ),
++    ).toBe(true);
++  });
++
++  it('every OTHER frozen sale / payment / receipt / refund file still does not mention the register, its sessions or its movements', () => {
+     for (const f of [
+-      'sales/sales-application.service.ts',
+       'sales/atomic-walk-in-sale.service.ts',
+-      'payments/payment.repository.ts',
+       'payments/payment.service.ts',
+       'payments/payment-collection.repository.ts',
+       'receivables/customer-receipt-collection.repository.ts',
+-      'receivables/refund.repository.ts',
+       'receivables/refund.service.ts',
+       'receivables/refund-execution.repository.ts',
+     ]) {
+@@ -86,6 +139,42 @@
+     }
+   });
+ 
++  it('producer inventory: only the collection primitives (sale tenders / invoice payment, customer receipt) and the gateway webhook write a payment row, and the local refund primitive has ONE caller — a new producer of cash must be wired or reviewed', () => {
++    const rel = (f: string): string => f.slice(API.length + 1).replace(/\\/g, '/');
++    const writers = walk(API)
++      .filter((f) => /INSERT INTO "payment"\s/.test(readFileSync(f, 'utf8')))
++      .map(rel)
++      .sort();
++    expect(writers).toEqual([
++      'modules/payments/payment-collection.repository.ts',
++      'modules/payments/webhook-event-processor.repository.ts',
++      'modules/receivables/customer-receipt-collection.repository.ts',
++    ]);
++    const refundCallers = walk(API)
++      .filter((f) => /\.executeLocalRefundInTx\(/.test(strip(readFileSync(f, 'utf8'))))
++      .map(rel)
++      .sort();
++    expect(refundCallers).toEqual(['modules/receivables/refund.repository.ts']);
++  });
++
++  it('the shipped policy is OFF; the helper does nothing when OFF, builds the caller ONLY from the verified request context, and a refusal aborts the caller with CASH_REGISTER_REFUSED (409)', () => {
++    const mod = code(`${MOD}/cash-register.module.ts`);
++    expect(mod).toMatch(/provide: CASH_SALES_POLICY, useValue: 'OFF'/);
++    const w = code(`${MOD}/cash-source-wiring.repository.ts`);
++    expect(w).toMatch(/if \(this\.policy === 'OFF' \|\| refs\.length === 0\) return;/);
++    expect(w).toMatch(
++      /terminalId: ctx\.posTerminalId,\s*deviceId: ctx\.deviceId,\s*actorUserId: ctx\.userId/,
++    );
++    expect(w).toMatch(/new DomainError\(\s*'CASH_REGISTER_REFUSED'[\s\S]*?409,?\s*\)/);
++    // no SQL, journal, audit, clock or request field in the helper
++    expect(w).not.toMatch(
++      /\$queryRaw|\$executeRaw|journal|audit|Date\.now|new Date|req\.|body|headers|query/,
++    );
++    // POS_STRICT tolerates ONLY a missing verified terminal; ALL_STRICT tolerates nothing
++    expect(w).toMatch(/o\.kind === 'NO_VERIFIED_TERMINAL' && this\.policy === 'POS_STRICT'/);
++    expect(w).toMatch(/new Set\(\[\s*'RECORDED',\s*'ALREADY_RECORDED',\s*'NOT_ELIGIBLE',?\s*\]\)/);
++  });
++
+   it('no migration, permission or account was added for E-5', () => {
+     const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+       /^\d{14}_/.test(d),
+--- /dev/null
++++ b/apps/api/src/modules/cash-register/cash-sales-wired.integration.test.ts
+@@ -0,0 +1,1093 @@
++import 'reflect-metadata';
++import { randomBytes, randomUUID, type KeyObject } from 'node:crypto';
++import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import type { SessionData } from '../../common/auth/session.types.js';
++import { hash } from '@node-rs/argon2';
++import { Redis } from 'ioredis';
++import { createSaleWorld, rolePerms, type SaleWorld } from '../../verification/load-sale-world.js';
++import {
++  PROOF_ALG,
++  PROOF_AUD,
++  PROOF_TYP,
++  PROOF_VERSION,
++} from '../device-proof/device-proof.constants.js';
++import { canonicalize } from '../device-proof/proof-canonical.js';
++import { codeDigestB64 } from '../device-proof/activation-proof.js';
++import { ProofNonceService } from '../device-proof/proof-nonce.js';
++import {
++  defaultParts,
++  makeDeviceKey,
++  signProof,
++  signRaw,
++} from '../device-proof/device-proof.test-support.js';
++import { CashSourceWiringRepository } from './cash-source-wiring.repository.js';
++import { CashSourceReconciliationRepository } from './cash-source-reconciliation.repository.js';
++import { RequestContext, runWithContext } from '../../common/context/index.js';
++
++/**
++ * Phase 4 E-5 — the PROPOSED PRODUCTION WIRING (docs/decisions/E5-cash-sales-wiring.patch), verified end-to-end over HTTP on real PostgreSQL +
++ * Redis. This file ships WITH the patch and is meaningful only once the patch is applied: it flips the singleton `CashSourceWiringRepository`
++ * policy in test code (production reads the module's `CASH_SALES_POLICY` value, whose shipped default is OFF).
++ */
++
++const SECRET = 'integration-test-jwt-secret-0000000000';
++const PASSWORD = 'CorrectHorseBatteryStaple9';
++const AED_200 = [{ denominationMinor: '10000', count: 2 }];
++const FLOAT = 20_000n; // 200.00 AED
++const SALE_TOTAL = 2_000n; // 2 × 1000 (the sale world's unit price, no tax)
++
++interface Dev {
++  id: string;
++  privateKey: KeyObject;
++  terminalId: string;
++  branchId: string;
++  tenantId: string;
++}
++interface Shift {
++  dev: Dev;
++  userId: string;
++  email: string;
++  token: string;
++  sessionId: string;
++}
++
++describe('Phase 4 E-5 — the PROPOSED WIRING through the real routes (patched copy only; policy modes)', () => {
++  let stack: TestStack;
++  let w: SaleWorld;
++  let nonces: ProofNonceService;
++  let wiring: CashSourceWiringRepository;
++  let reconRepo: CashSourceReconciliationRepository;
++  let slugA = '';
++  /** the REAL owner user of tenant A: device administration writes foreign keys to a real user (the harness token carries a random id) */
++  let adminToken = '';
++  let pwHash = '';
++
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 3);
++    // the harness plan has no terminal / device limits; the real routes are limit-guarded (a tenant's limits are rows of its own)
++    await w.pool.query(
++      `INSERT INTO tenant_limit (id, "tenantId", "limitKey", value, "updatedAt")
++       SELECT uuidv7(), t.id, k, 100, now() FROM tenant t, unnest(ARRAY['max_pos_terminals','max_registered_devices']) k
++       WHERE NOT EXISTS (SELECT 1 FROM tenant_limit tl WHERE tl."tenantId" = t.id AND tl."limitKey" = k)`,
++    );
++    nonces = new ProofNonceService(SECRET);
++    const app = w.h.app;
++    wiring = app.get(CashSourceWiringRepository, { strict: false });
++    reconRepo = app.get(CashSourceReconciliationRepository, { strict: false });
++    slugA = (await rows(`SELECT slug FROM tenant WHERE id = $1`, [w.a.tenantId]))[0]![
++      'slug'
++    ] as string;
++    const ownerUserId = (
++      await rows(
++        `SELECT id FROM "user" WHERE "tenantId" = $1 AND "accountType" = 'OWNER' LIMIT 1`,
++        [w.a.tenantId],
++      )
++    )[0]!['id'] as string;
++    const adminSession = {
++      sessionId: `e5-admin-${randomUUID()}`,
++      realm: 'tenant',
++      familyId: 'f',
++      tenantId: w.a.tenantId,
++      userId: ownerUserId,
++      platformUserId: null,
++      accountType: 'OWNER',
++      posTerminalId: null,
++      deviceId: null,
++      mfaLevel: 'STEP_UP',
++      stepUpUntil: Date.now() + 5 * 3_600_000,
++      createdAt: Date.now(),
++      expiresAt: Date.now() + 6 * 3_600_000,
++      revokedAt: null,
++      revokeReason: null,
++      impersonatorPlatformUserId: null,
++      access: {
++        effectivePermissions: rolePerms('owner'),
++        companyScope: 'ALL',
++        branchScope: 'ALL',
++        perBranchOverlay: {},
++        entitledModules: [],
++        planKey: null,
++      },
++    } as unknown as SessionData;
++    await w.h.store.set(adminSession);
++    adminToken = await w.h.jwt.sign({
++      sub: ownerUserId,
++      sid: adminSession.sessionId,
++      aud: 'tenant',
++      tid: w.a.tenantId,
++    });
++    pwHash = await hash(PASSWORD, { memoryCost: 19_456, timeCost: 2, parallelism: 1 });
++  }, 900_000);
++
++  afterAll(async () => {
++    await w?.h.close();
++    await w?.pool.end();
++    await stack?.stop();
++  });
++
++  // ── harness ───────────────────────────────────────────────────────────────
++  /** a scoped repository reads the tenant from the REQUEST CONTEXT (as it does in a real request); this supplies one */
++  const asTenantA = <T>(fn: () => Promise<T>): Promise<T> =>
++    runWithContext(
++      new RequestContext({
++        requestId: randomUUID(),
++        tenantId: w.a.tenantId,
++        userId: randomUUID(),
++        accountType: 'OWNER',
++        companyScope: 'ALL',
++        branchScope: 'ALL',
++      }),
++      fn,
++    );
++  const recon = {
++    reconcileSession: (id: string) => asTenantA(() => reconRepo.reconcileSession(id)),
++    reconcileBranchWindow: (
++      p: Parameters<CashSourceReconciliationRepository['reconcileBranchWindow']>[0],
++    ) => asTenantA(() => reconRepo.reconcileBranchWindow(p)),
++  };
++  async function rows(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
++    return (await w.pool.query(sql, params)).rows as Record<string, unknown>[];
++  }
++  const num = async (sql: string, params: unknown[] = []): Promise<number> =>
++    Number((await rows(sql, params))[0]!['n']);
++  const errCode = (r: { body: unknown }): string | undefined =>
++    (r.body as { error?: { code?: string } })?.error?.code;
++
++  async function mkUser(branchId: string): Promise<{ userId: string; email: string }> {
++    const userId = randomUUID();
++    const email = `c-${randomBytes(4).toString('hex')}@e5.test`;
++    await rows(
++      `INSERT INTO "user" (id, "tenantId", "accountType", email, status, "updatedAt") VALUES ($1,$2,'USER',$3,'ACTIVE',now())`,
++      [userId, w.a.tenantId, email],
++    );
++    await rows(
++      `INSERT INTO user_role ("tenantId","userId","roleId") SELECT $1, $2, id FROM role WHERE "tenantId" = $1 AND key = 'cashier'`,
++      [w.a.tenantId, userId],
++    );
++    await rows(
++      `INSERT INTO data_scope_assignment ("tenantId","userId","companyScopeAll","companyIds","branchScopeAll","branchIds","updatedAt")
++       VALUES ($1,$2,false,$3,false,$4,now())`,
++      [w.a.tenantId, userId, [w.a.companyId], [branchId]],
++    );
++    await rows(
++      `INSERT INTO credential ("tenantId","userId",kind,hash,"updatedAt") VALUES ($1,$2,'PASSWORD',$3,now())`,
++      [w.a.tenantId, userId, pwHash],
++    );
++    return { userId, email };
++  }
++
++  async function activate(
++    code: string,
++    terminalId: string,
++    branchId: string,
++    tenantId: string,
++  ): Promise<Dev> {
++    const k = makeDeviceKey();
++    const proof = signRaw(
++      k.privateKey,
++      canonicalize({ alg: PROOF_ALG, kid: k.thumbprint, typ: PROOF_TYP }),
++      canonicalize({
++        aud: PROOF_AUD,
++        cdh: codeDigestB64(code.replace(/-/g, '').toUpperCase()),
++        purpose: 'activate',
++        v: PROOF_VERSION,
++      }),
++    );
++    // test-only: reset the activation abuse counters (the production limiter is untouched; 10 per minute is below this suite's need)
++    const rc = new Redis(stack.redis.url);
++    const stale = await rc.keys('*devact:src:*');
++    if (stale.length) await rc.del(...stale);
++    rc.disconnect();
++    const act = await w.h.app.inject({
++      method: 'POST',
++      url: '/v1/devices/activate',
++      payload: {
++        code,
++        publicKey: k.spki.toString('base64url'),
++        proof,
++        keyCustody: 'WEBCRYPTO_NONEXTRACTABLE',
++        platform: 'WEB',
++      },
++    });
++    expect(act.statusCode, act.body).toBe(201);
++    return {
++      id: act.json().deviceId as string,
++      privateKey: k.privateKey,
++      terminalId,
++      branchId,
++      tenantId,
++    };
++  }
++
++  /** a terminal with an ACTIVE enrolled device and (by default) a provisioned cash register */
++  async function terminal(
++    branchId = w.a.branches[0]!,
++    o: { register?: boolean } = {},
++  ): Promise<Dev> {
++    const tr = await w.req('POST', '/org/pos-terminals', adminToken, {
++      branchId,
++      code: `T-${randomBytes(3).toString('hex')}`,
++      name: 'Register',
++    });
++    expect(tr.status, JSON.stringify(tr.body)).toBe(201);
++    const terminalId = (tr.body as { id: string }).id;
++    const codeRes = await w.req(
++      'POST',
++      `/devices/terminals/${terminalId}/activation-codes`,
++      adminToken,
++      {},
++    );
++    expect(codeRes.status, JSON.stringify(codeRes.body)).toBe(201);
++    const dev = await activate(
++      (codeRes.body as { code: string }).code,
++      terminalId,
++      branchId,
++      w.a.tenantId,
++    );
++    if (o.register !== false) {
++      await rows(
++        `INSERT INTO cash_register ("tenantId","companyId","branchId","posTerminalId","active","updatedAt") VALUES ($1,$2,$3,$4,true,now())`,
++        [w.a.tenantId, w.a.companyId, branchId, terminalId],
++      );
++    }
++    return dev;
++  }
++
++  const sessionProof = (dev: Dev): string =>
++    signProof(dev.privateKey, defaultParts(dev.id, 'session', nonces.issue(dev.id, 'session'), {}));
++
++  /** a REAL device-bound login; the stored snapshot then carries the cashier role's real grants plus the cash keys (an approved enablement) */
++  async function boundToken(user: { email: string }, dev: Dev): Promise<string> {
++    const login = await w.h.app.inject({
++      method: 'POST',
++      url: '/v1/auth/login',
++      payload: { workspaceSlug: slugA, email: user.email, password: PASSWORD },
++      headers: { 'x-device-proof': sessionProof(dev) },
++    });
++    expect(login.statusCode, login.body).toBe(200);
++    const token = login.json().accessToken as string;
++    const sid = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'))
++      .sid as string;
++    const blob = (await w.h.store.get(sid))!;
++    blob.access = {
++      ...blob.access!,
++      effectivePermissions: [
++        ...new Set([
++          ...blob.access!.effectivePermissions,
++          ...rolePerms('owner').filter((k) => !k.startsWith('platform:')),
++          'cash_register:open',
++          'cash_register:view',
++          'cash_register:close',
++        ]),
++      ],
++    };
++    await w.h.store.set(blob);
++    return token;
++  }
++
++  /** a terminal + cashier + bound session + an OPEN register session (float 200.00) — a shift */
++  async function shift(o: { branchId?: string; float?: bigint } = {}): Promise<Shift> {
++    const branchId = o.branchId ?? w.a.branches[0]!;
++    const dev = await terminal(branchId);
++    const u = await mkUser(branchId);
++    const token = await boundToken(u, dev);
++    const float = o.float ?? FLOAT;
++    const open = await w.req(
++      'POST',
++      '/cash-register/sessions',
++      token,
++      {
++        openingFloat: { amountMinor: float.toString(), currency: 'AED', exponent: 2 },
++        denominations: [{ denominationMinor: '100', count: Number(float / 100n) }],
++      },
++      { 'idempotency-key': randomUUID() },
++    );
++    expect(open.status, JSON.stringify(open.body)).toBe(201);
++    return {
++      dev,
++      userId: u.userId,
++      email: u.email,
++      token,
++      sessionId: (open.body as { id: string }).id,
++    };
++  }
++
++  interface LedgerRowView {
++    type: string;
++    amt: string;
++    sourceKind: string;
++    sourceId: string;
++  }
++  const ledger = async (sessionId: string): Promise<LedgerRowView[]> =>
++    (await rows(
++      `SELECT type, "amountMinor"::text AS amt, "sourceKind", "sourceId" FROM cash_movement WHERE "registerSessionId" = $1 ORDER BY "occurredAt", id`,
++      [sessionId],
++    )) as unknown as LedgerRowView[];
++  const expectedOf = async (sessionId: string): Promise<bigint> =>
++    BigInt(
++      (
++        await rows(
++          `SELECT coalesce(sum("amountMinor") FILTER (WHERE type <> 'CLOSING'), 0)::text AS s FROM cash_movement WHERE "registerSessionId" = $1`,
++          [sessionId],
++        )
++      )[0]!['s'] as string,
++    );
++  /** every journal row of the tenant, fingerprinted: a recorder call must leave it bit-for-bit identical */
++  const journalFingerprint = async (): Promise<{ h: string; entries: number; lines: number }> => {
++    const r = (
++      await rows(
++        `SELECT md5(coalesce(string_agg(t, '|' ORDER BY t), '')) AS h,
++                (SELECT count(*) FROM journal_entry WHERE "tenantId" = $1)::int AS entries,
++                (SELECT count(*) FROM journal_line WHERE "tenantId" = $1)::int AS lines
++           FROM (
++             SELECT je.id::text || ':' || je."sourceKind" || ':' || je."sourceId"::text || ':' || je."postingFingerprint" AS t
++               FROM journal_entry je WHERE je."tenantId" = $1
++             UNION ALL
++             SELECT jl.id::text || ':' || jl."debitMinor"::text || ':' || jl."creditMinor"::text || ':' || jl."accountId"::text
++               FROM journal_line jl WHERE jl."tenantId" = $1
++           ) x`,
++        [w.a.tenantId],
++      )
++    )[0]!;
++    return { h: r['h'] as string, entries: r['entries'] as number, lines: r['lines'] as number };
++  };
++  const closeVia = (s: Shift, denominations: unknown) =>
++    w.req(
++      'POST',
++      `/cash-register/sessions/${s.sessionId}/close`,
++      s.token,
++      { denominations },
++      { 'idempotency-key': randomUUID() },
++    );
++
++  const sessionStatus = async (id: string): Promise<string> =>
++    (await rows(`SELECT status FROM register_session WHERE id = $1`, [id]))[0]!['status'] as string;
++
++  // ═════════════════ the proposed wiring, through the REAL routes ═════════════════
++  /** the test flips the (singleton) wiring policy at runtime; production reads the module's `CASH_SALES_POLICY` value, default OFF */
++  const setPolicy = (p: 'OFF' | 'POS_STRICT' | 'ALL_STRICT'): void => {
++    (wiring as unknown as { policy: string }).policy = p;
++  };
++  afterEach(() => setPolicy('OFF'));
++
++  interface SaleTry {
++    status: number;
++    code: string | undefined;
++    orderId: string;
++    version: number;
++  }
++  /** create an order and complete it through the real routes with the given token and tenders */
++  async function httpSale(
++    token: string,
++    branchId: string,
++    tenders: { method: string; amountMinor: bigint }[],
++    o: { key?: string; customerId?: string } = {},
++  ): Promise<SaleTry> {
++    const created = await w.req(
++      'POST',
++      `/companies/${w.a.companyId}/branches/${branchId}/orders`,
++      token,
++      {
++        ...(o.customerId ? { customerId: o.customerId } : {}),
++        lines: [
++          {
++            productId: w.productId,
++            variantId: w.variantId,
++            selectedUomCode: 'piece',
++            quantity: '2',
++          },
++        ],
++      },
++      { 'idempotency-key': randomUUID() },
++    );
++    expect(created.status, JSON.stringify(created.body)).toBe(201);
++    const order = (created.body as { order: { id: string; version: number } }).order;
++    const done = await w.req(
++      'POST',
++      `/companies/${w.a.companyId}/branches/${branchId}/orders/${order.id}/complete-sale`,
++      token,
++      {
++        paymentIntent: 'PAY_NOW',
++        tenders: tenders.map((t) => ({ method: t.method, amountMinor: t.amountMinor.toString() })),
++      },
++      { 'if-match': String(order.version), 'idempotency-key': o.key ?? randomUUID() },
++    );
++    return { status: done.status, code: errCode(done), orderId: order.id, version: order.version };
++  }
++  const cashRows = (sessionId: string) =>
++    ledger(sessionId).then((l) => l.filter((r) => r.type !== 'OPENING_FLOAT'));
++  const tenantRowCount = (table: string): Promise<number> =>
++    num(`SELECT count(*)::int AS n FROM ${table} WHERE "tenantId" = $1`, [w.a.tenantId]);
++  /** the journal footprint a sale adds (entries, lines) — must be the same with the register wiring OFF or ON */
++  async function saleFootprint(
++    token: string,
++    branchId: string,
++    tenders: { method: string; amountMinor: bigint }[],
++  ): Promise<{ entries: number; lines: number; sale: SaleTry }> {
++    const before = await journalFingerprint();
++    const sale = await httpSale(token, branchId, tenders);
++    const after = await journalFingerprint();
++    return { entries: after.entries - before.entries, lines: after.lines - before.lines, sale };
++  }
++
++  describe('policy OFF (the shipped default) — the old behaviour, unchanged', () => {
++    it('a device-bound CASH sale completes exactly as before and writes NO drawer movement', async () => {
++      const s = await shift();
++      const before = await tenantRowCount('cash_movement');
++      const r = await saleFootprint(s.token, s.dev.branchId, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(r.sale.status).toBe(200);
++      expect(await cashRows(s.sessionId)).toEqual([]);
++      expect(await tenantRowCount('cash_movement')).toBe(before);
++      expect(await expectedOf(s.sessionId)).toBe(FLOAT);
++    });
++
++    it('with the register ABSENT or CLOSED, a cash sale is still accepted (no policy, no refusal) — the E-5 gap, preserved until the owner flips the policy', async () => {
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const u = await mkUser(dev.branchId);
++      const token = await boundToken(u, dev);
++      const r = await httpSale(token, dev.branchId, [{ method: 'CASH', amountMinor: SALE_TOTAL }]);
++      expect(r.status).toBe(200);
++    });
++  });
++
++  describe('policy POS_STRICT — device-bound POS cash', () => {
++    it('a CASH sale writes ONE CASH_SALE for the verified terminal’s open session; expected cash = float + sale; the sale’s journal footprint is IDENTICAL to the OFF footprint', async () => {
++      const s = await shift();
++      const off = await saleFootprint(s.token, s.dev.branchId, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(off.sale.status).toBe(200);
++      setPolicy('POS_STRICT');
++      const on = await saleFootprint(s.token, s.dev.branchId, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(on.sale.status, on.sale.code).toBe(200);
++      expect({ entries: on.entries, lines: on.lines }).toEqual({
++        entries: off.entries,
++        lines: off.lines,
++      });
++      const movements = await cashRows(s.sessionId);
++      expect(movements).toHaveLength(1);
++      expect(movements[0]).toMatchObject({
++        type: 'CASH_SALE',
++        amt: SALE_TOTAL.toString(),
++        sourceKind: 'PAYMENT',
++      });
++      const payment = (
++        await rows(
++          `SELECT p.id FROM payment p JOIN payment_allocation pa ON pa."paymentId" = p.id JOIN invoice i ON i.id = pa."invoiceId" WHERE i."orderId" = $1`,
++          [on.sale.orderId],
++        )
++      )[0]!['id'];
++      expect(movements[0]!.sourceId).toBe(payment);
++      expect(await expectedOf(s.sessionId)).toBe(FLOAT + SALE_TOTAL);
++      // no journal entry was written for the movement, and none has a cash-register source kind
++      expect(
++        await num(
++          `SELECT count(*)::int AS n FROM journal_entry je JOIN cash_movement m ON m.id::text = je."sourceId"::text WHERE je."tenantId" = $1`,
++          [w.a.tenantId],
++        ),
++      ).toBe(0);
++    });
++
++    it('split CASH 500 + CARD 1,500: ONE movement (+500); a card-only sale needs no register at all', async () => {
++      setPolicy('POS_STRICT');
++      const s = await shift();
++      const split = await httpSale(s.token, s.dev.branchId, [
++        { method: 'CASH', amountMinor: 500n },
++        { method: 'CARD_TERMINAL', amountMinor: 1_500n },
++      ]);
++      expect(split.status, split.code).toBe(200);
++      expect((await cashRows(s.sessionId)).map((r) => [r.type, r.amt])).toEqual([
++        ['CASH_SALE', '500'],
++      ]);
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const token = await boundToken(await mkUser(dev.branchId), dev);
++      const card = await httpSale(token, dev.branchId, [
++        { method: 'CARD_TERMINAL', amountMinor: SALE_TOTAL },
++      ]);
++      expect(card.status, card.code).toBe(200);
++      const bank = await httpSale(token, dev.branchId, [
++        { method: 'BANK_TRANSFER', amountMinor: SALE_TOTAL },
++      ]);
++      expect(bank.status, bank.code).toBe(200);
++      // …but CASH on a terminal with no register is refused
++      const cash = await httpSale(token, dev.branchId, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(cash.status).toBe(409);
++      expect(cash.code).toBe('CASH_REGISTER_REFUSED');
++    });
++
++    it('a refusal ROLLS BACK THE WHOLE SALE: closed session → 409, and no payment, invoice, journal entry or movement, the order untouched', async () => {
++      const s = await shift();
++      // count exactly the float and close the drawer
++      const closed = await closeVia(s, AED_200);
++      expect(closed.status, JSON.stringify(closed.body)).toBe(200);
++      setPolicy('POS_STRICT');
++      const counts = async () => ({
++        payments: await tenantRowCount('payment'),
++        invoices: await tenantRowCount('invoice'),
++        movements: await tenantRowCount('cash_movement'),
++        journal: (await journalFingerprint()).h,
++      });
++      const before = await counts();
++      const r = await httpSale(s.token, s.dev.branchId, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(r.status).toBe(409);
++      expect(r.code).toBe('CASH_REGISTER_REFUSED');
++      expect(await counts()).toEqual(before);
++      expect(
++        (await rows(`SELECT status FROM "order" WHERE id = $1`, [r.orderId]))[0]!['status'],
++      ).toBe('DRAFT');
++    });
++
++    it('an Owner Web session (no verified terminal) keeps working under POS_STRICT and writes no movement; ALL_STRICT refuses it', async () => {
++      setPolicy('POS_STRICT');
++      const before = await tenantRowCount('cash_movement');
++      const ok = await httpSale(w.ownerToken, w.a.branches[0]!, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(ok.status, ok.code).toBe(200);
++      expect(await tenantRowCount('cash_movement')).toBe(before);
++      setPolicy('ALL_STRICT');
++      const no = await httpSale(w.ownerToken, w.a.branches[0]!, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(no.status).toBe(409);
++      expect(no.code).toBe('CASH_REGISTER_REFUSED');
++      expect(await tenantRowCount('cash_movement')).toBe(before);
++    });
++
++    it('a BLOCKED device ends its sessions (nothing is taken, nothing recorded); unblocked, a fresh bound login works again; a REVOKED device’s session is refused at once', async () => {
++      setPolicy('POS_STRICT');
++      const s = await shift();
++      const probe = (token: string) =>
++        w.req(
++          'POST',
++          `/companies/${w.a.companyId}/branches/${s.dev.branchId}/orders`,
++          token,
++          {
++            lines: [
++              {
++                productId: w.productId,
++                variantId: w.variantId,
++                selectedUomCode: 'piece',
++                quantity: '2',
++              },
++            ],
++          },
++          { 'idempotency-key': randomUUID() },
++        );
++      expect(
++        (await w.req('POST', `/devices/${s.dev.id}/block`, adminToken, { reason: 'MAINTENANCE' }))
++          .status,
++      ).toBe(200);
++      const payments = await tenantRowCount('payment');
++      expect((await probe(s.token)).status).toBe(401);
++      expect(await tenantRowCount('payment')).toBe(payments);
++      expect(await cashRows(s.sessionId)).toEqual([]);
++      expect((await w.req('POST', `/devices/${s.dev.id}/unblock`, adminToken, {})).status).toBe(
++        200,
++      );
++      const fresh = await boundToken({ email: s.email }, s.dev);
++      const again = await httpSale(fresh, s.dev.branchId, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(again.status, again.code).toBe(200);
++      expect(await cashRows(s.sessionId)).toHaveLength(1);
++      expect(
++        (await w.req('POST', `/devices/${s.dev.id}/revoke`, adminToken, { reason: 'LOST' })).status,
++      ).toBe(200);
++      expect((await probe(fresh)).status).toBe(401);
++      expect(await cashRows(s.sessionId)).toHaveLength(1);
++    });
++
++    it('a replayed completion (same Idempotency-Key, then a fresh key on the finished order) is never a second movement', async () => {
++      setPolicy('POS_STRICT');
++      const s = await shift();
++      const key = randomUUID();
++      const first = await httpSale(
++        s.token,
++        s.dev.branchId,
++        [{ method: 'CASH', amountMinor: SALE_TOTAL }],
++        { key },
++      );
++      expect(first.status, first.code).toBe(200);
++      const replay = await w.req(
++        'POST',
++        `/companies/${w.a.companyId}/branches/${s.dev.branchId}/orders/${first.orderId}/complete-sale`,
++        s.token,
++        {
++          paymentIntent: 'PAY_NOW',
++          tenders: [{ method: 'CASH', amountMinor: SALE_TOTAL.toString() }],
++        },
++        { 'if-match': String(first.version), 'idempotency-key': key },
++      );
++      expect(replay.status).toBe(200);
++      const fresh = await w.req(
++        'POST',
++        `/companies/${w.a.companyId}/branches/${s.dev.branchId}/orders/${first.orderId}/complete-sale`,
++        s.token,
++        {
++          paymentIntent: 'PAY_NOW',
++          tenders: [{ method: 'CASH', amountMinor: SALE_TOTAL.toString() }],
++        },
++        { 'if-match': String(first.version), 'idempotency-key': randomUUID() },
++      );
++      expect(fresh.status).not.toBe(200);
++      expect(await cashRows(s.sessionId)).toHaveLength(1);
++      expect(await expectedOf(s.sessionId)).toBe(FLOAT + SALE_TOTAL);
++    });
++
++    it('an invoice payment and a customer receipt in CASH are CUSTOMER_PAYMENT; a card part moves no cash; a replay is one movement', async () => {
++      setPolicy('POS_STRICT');
++      const s = await shift();
++      const sale = await w.sale({
++        co: w.a,
++        branch: s.dev.branchId,
++        token: w.ownerToken,
++        customerId: w.customers[0]!,
++        credit: true,
++      });
++      expect(sale.ok, JSON.stringify(sale)).toBe(true);
++      const invoiceId = (
++        await rows(`SELECT id FROM invoice WHERE "orderId" = $1`, [sale.orderId])
++      )[0]!['id'] as string;
++      const pay = (amount: bigint, method: string, key = randomUUID()) =>
++        w.req(
++          'POST',
++          `/companies/${w.a.companyId}/branches/${s.dev.branchId}/invoices/${invoiceId}/payments`,
++          s.token,
++          { amountMinor: amount.toString(), tenders: [{ method, amountMinor: amount.toString() }] },
++          { 'idempotency-key': key },
++        );
++      const k = randomUUID();
++      expect((await pay(600n, 'CASH', k)).status).toBe(201);
++      expect((await pay(600n, 'CASH', k)).status).toBe(201); // idempotent replay
++      expect((await pay(400n, 'CARD_TERMINAL')).status).toBe(201);
++      const rec = await w.receipt({
++        co: w.a,
++        branch: s.dev.branchId,
++        token: s.token,
++        customerId: w.customers[0]!,
++        amountMinor: 250n,
++      });
++      expect(rec.status, JSON.stringify(rec.body)).toBe(201);
++      expect((await cashRows(s.sessionId)).map((r) => [r.type, r.amt])).toEqual([
++        ['CUSTOMER_PAYMENT', '600'],
++        ['CUSTOMER_PAYMENT', '250'],
++      ]);
++    });
++
++    it('a CASH refund is ONE negative CASH_REFUND (and keeps its own single journal); BANK_TRANSFER records nothing; a refund the register refuses rolls back whole', async () => {
++      const s = await shift();
++      await httpSale(s.token, s.dev.branchId, [{ method: 'CASH', amountMinor: SALE_TOTAL }]); // OFF: no movement
++      // a cancelled manual-card customer sale = a credit-note advance to refund
++      const card = await httpSale(
++        w.ownerToken,
++        s.dev.branchId,
++        [{ method: 'CARD_TERMINAL', amountMinor: SALE_TOTAL }],
++        { customerId: w.customers[1]! },
++      );
++      expect(card.status, card.code).toBe(200);
++      const version = Number(
++        (await rows(`SELECT version FROM "order" WHERE id = $1`, [card.orderId]))[0]!['version'],
++      );
++      const cancel = await w.req(
++        'POST',
++        `/companies/${w.a.companyId}/branches/${s.dev.branchId}/orders/${card.orderId}/cancel`,
++        w.ownerToken,
++        { reason: 'e5 wired refund fixture' },
++        { 'if-match': String(version) },
++      );
++      expect(cancel.status, JSON.stringify(cancel.body)).toBe(200);
++      const advanceId = (
++        await rows(
++          `SELECT ca.id FROM customer_advance ca JOIN credit_note_coverage_release r ON r."customerAdvanceId" = ca.id
++            WHERE r."creditNoteId" = (SELECT cn.id FROM credit_note cn JOIN invoice i ON i.id = cn."invoiceId" WHERE i."orderId" = $1)`,
++          [card.orderId],
++        )
++      )[0]!['id'] as string;
++      // a refund is a step-up action: the cashier's stored session carries a fresh step-up (a real MFA step-up is outside this test)
++      const sid = JSON.parse(Buffer.from(s.token.split('.')[1]!, 'base64url').toString('utf8'))
++        .sid as string;
++      const stored = (await w.h.store.get(sid))!;
++      await w.h.store.set({ ...stored, mfaLevel: 'STEP_UP', stepUpUntil: Date.now() + 3_600_000 });
++      const refund = (amount: bigint, method: string, token = s.token) =>
++        w.req(
++          'POST',
++          `/companies/${w.a.companyId}/branches/${s.dev.branchId}/customers/${w.customers[1]!}/advances/${advanceId}/refunds`,
++          token,
++          { requestedAmountMinor: amount.toString(), method, reasonCode: 'CUSTOMER_REQUEST' },
++          { 'idempotency-key': randomUUID() },
++        );
++      setPolicy('POS_STRICT');
++      const before = await journalFingerprint();
++      const r = await refund(700n, 'CASH');
++      expect(r.status, JSON.stringify(r.body)).toBe(201);
++      const after = await journalFingerprint();
++      expect(after.entries - before.entries).toBe(1); // the refund's OWN journal only
++      expect((await cashRows(s.sessionId)).map((x) => [x.type, x.amt, x.sourceKind])).toEqual([
++        ['CASH_REFUND', '-700', 'REFUND'],
++      ]);
++      expect(await expectedOf(s.sessionId)).toBe(FLOAT - 700n);
++      const bank = await refund(100n, 'BANK_TRANSFER');
++      expect(bank.status, JSON.stringify(bank.body)).toBe(201);
++      expect(await cashRows(s.sessionId)).toHaveLength(1);
++      // a refund by a session with no verified terminal is tolerated under POS_STRICT but writes nothing…
++      const ownerRefund = await refund(50n, 'CASH', w.ownerToken);
++      expect(ownerRefund.status, JSON.stringify(ownerRefund.body)).toBe(201);
++      expect(await cashRows(s.sessionId)).toHaveLength(1);
++      // …and a device-bound refund the register refuses (closed drawer) rolls back with it
++      const closed = await closeVia(s, [
++        { denominationMinor: '10000', count: 1 },
++        { denominationMinor: '5000', count: 1 },
++        { denominationMinor: '1000', count: 4 },
++        { denominationMinor: '100', count: 3 },
++      ]);
++      expect(closed.status, JSON.stringify(closed.body)).toBe(200);
++      const refunds0 = await tenantRowCount('refund');
++      const refused = await refund(60n, 'CASH');
++      expect(refused.status).toBe(409);
++      expect(errCode(refused)).toBe('CASH_REGISTER_REFUSED');
++      expect(await tenantRowCount('refund')).toBe(refunds0);
++    });
++  });
++
++  describe('concurrent wired checkout vs close, and cross-scope', () => {
++    it('6 concurrent device-bound cash sales racing a close: every committed sale has exactly one movement, every refused sale left nothing, and the drawer then closes at zero variance', async () => {
++      setPolicy('POS_STRICT');
++      const s = await shift();
++      const orders = [];
++      for (let i = 0; i < 6; i++) {
++        const created = await w.req(
++          'POST',
++          `/companies/${w.a.companyId}/branches/${s.dev.branchId}/orders`,
++          s.token,
++          {
++            lines: [
++              {
++                productId: w.productId,
++                variantId: w.variantId,
++                selectedUomCode: 'piece',
++                quantity: '2',
++              },
++            ],
++          },
++          { 'idempotency-key': randomUUID() },
++        );
++        expect(created.status).toBe(201);
++        orders.push((created.body as { order: { id: string; version: number } }).order);
++      }
++      const results = await Promise.all([
++        ...orders.map((o) =>
++          w
++            .req(
++              'POST',
++              `/companies/${w.a.companyId}/branches/${s.dev.branchId}/orders/${o.id}/complete-sale`,
++              s.token,
++              {
++                paymentIntent: 'PAY_NOW',
++                tenders: [{ method: 'CASH', amountMinor: SALE_TOTAL.toString() }],
++              },
++              { 'if-match': String(o.version), 'idempotency-key': randomUUID() },
++            )
++            .then((r) => ({ kind: 'sale' as const, id: o.id, status: r.status, code: errCode(r) })),
++        ),
++        closeVia(s, AED_200).then((r) => ({
++          kind: 'close' as const,
++          id: s.sessionId,
++          status: r.status,
++          code: errCode(r),
++        })),
++      ]);
++      const sales = results.filter((r) => r.kind === 'sale');
++      const close = results.find((r) => r.kind === 'close')!;
++      const committed = sales.filter((r) => r.status === 200);
++      for (const r of sales.filter((x) => x.status !== 200)) {
++        expect(r.status, `${r.code}`).toBe(409);
++        expect(
++          await num(
++            `SELECT count(*)::int AS n FROM invoice WHERE "orderId" = $1 AND "tenantId" = $2`,
++            [r.id, w.a.tenantId],
++          ),
++        ).toBe(0);
++      }
++      // one movement per committed cash payment, none for a refused sale, no cash payment without a movement
++      const moved = await cashRows(s.sessionId);
++      expect(moved).toHaveLength(committed.length);
++      for (const r of committed) {
++        expect(
++          await num(
++            `SELECT count(*)::int AS n FROM payment p JOIN payment_allocation pa ON pa."paymentId" = p.id JOIN invoice i ON i.id = pa."invoiceId"
++              WHERE i."orderId" = $1 AND NOT EXISTS (SELECT 1 FROM cash_movement m WHERE m."sourceKind" = 'PAYMENT' AND m."sourceId" = p.id)`,
++            [r.id],
++          ),
++        ).toBe(0);
++      }
++      if (close.status === 200) {
++        // the close won: it counted exactly the float, so no sale had committed before it
++        expect(committed).toHaveLength(0);
++        expect(await sessionStatus(s.sessionId)).toBe('CLOSED');
++      } else {
++        expect(close.code).toBe('VARIANCE_BLOCKS_CLOSE');
++        expect(await expectedOf(s.sessionId)).toBe(FLOAT + SALE_TOTAL * BigInt(committed.length));
++        // count the real drawer: float + the committed sales, in 10.00 notes and 1.00 coins… closes at zero variance
++        const totalMinor = FLOAT + SALE_TOTAL * BigInt(committed.length);
++        const ok = await closeVia(s, [
++          { denominationMinor: '10000', count: Number(totalMinor / 10000n) },
++          { denominationMinor: '1000', count: Number((totalMinor % 10000n) / 1000n) },
++          { denominationMinor: '100', count: Number((totalMinor % 1000n) / 100n) },
++        ]);
++        expect(ok.status, JSON.stringify(ok.body)).toBe(200);
++      }
++      expect((await recon.reconcileSession(s.sessionId))!.summary.consistent).toBe(true);
++    });
++
++    it('a terminal of another branch / tenant can never receive this sale’s cash: the recorded session is always the verified terminal’s own', async () => {
++      setPolicy('POS_STRICT');
++      const s1 = await shift();
++      const s2 = await shift({ branchId: w.a.branches[1] ?? w.a.branches[0]! });
++      const a = await httpSale(s1.token, s1.dev.branchId, [
++        { method: 'CASH', amountMinor: SALE_TOTAL },
++      ]);
++      expect(a.status, a.code).toBe(200);
++      expect(await cashRows(s1.sessionId)).toHaveLength(1);
++      expect(await cashRows(s2.sessionId)).toHaveLength(0);
++      // a sale for the OTHER branch by this terminal’s token is refused by the frozen scope guard before any money moves
++      if (s1.dev.branchId !== s2.dev.branchId) {
++        const cross = await w
++          .req(
++            'POST',
++            `/companies/${w.a.companyId}/branches/${s2.dev.branchId}/orders`,
++            s1.token,
++            { lines: [] },
++            { 'idempotency-key': randomUUID() },
++          )
++          .then((r) => r.status);
++        expect([400, 403, 404]).toContain(cross);
++      }
++      expect(await cashRows(s2.sessionId)).toHaveLength(0);
++    });
++  });
++
++  describe('customer-advance-funded sales (wired) — an advance is NOT new cash', () => {
++    /** a credit-note advance: a manual-card customer sale, then cancelled (the card slip is not drawer cash) */
++    async function advanceFor(branchId: string, customerId: string): Promise<string> {
++      const card = await httpSale(
++        w.ownerToken,
++        branchId,
++        [{ method: 'CARD_TERMINAL', amountMinor: SALE_TOTAL }],
++        { customerId },
++      );
++      expect(card.status, card.code).toBe(200);
++      const version = Number(
++        (await rows(`SELECT version FROM "order" WHERE id = $1`, [card.orderId]))[0]!['version'],
++      );
++      const cancel = await w.req(
++        'POST',
++        `/companies/${w.a.companyId}/branches/${branchId}/orders/${card.orderId}/cancel`,
++        w.ownerToken,
++        { reason: 'e5 advance fixture' },
++        { 'if-match': String(version) },
++      );
++      expect(cancel.status, JSON.stringify(cancel.body)).toBe(200);
++      return (
++        await rows(
++          `SELECT ca.id FROM customer_advance ca JOIN credit_note_coverage_release r ON r."customerAdvanceId" = ca.id
++            WHERE r."creditNoteId" = (SELECT cn.id FROM credit_note cn JOIN invoice i ON i.id = cn."invoiceId" WHERE i."orderId" = $1)`,
++          [card.orderId],
++        )
++      )[0]!['id'] as string;
++    }
++    /** a customer sale completed with advance applications and (optionally) cash tenders, by the given token */
++    async function advanceSale(
++      token: string,
++      branchId: string,
++      customerId: string,
++      advances: { advanceId: string; amountMinor: bigint }[],
++      tenders: { method: string; amountMinor: bigint }[],
++    ) {
++      const created = await w.req(
++        'POST',
++        `/companies/${w.a.companyId}/branches/${branchId}/orders`,
++        token,
++        {
++          customerId,
++          lines: [
++            {
++              productId: w.productId,
++              variantId: w.variantId,
++              selectedUomCode: 'piece',
++              quantity: '2',
++            },
++          ],
++        },
++        { 'idempotency-key': randomUUID() },
++      );
++      expect(created.status, JSON.stringify(created.body)).toBe(201);
++      const order = (created.body as { order: { id: string; version: number } }).order;
++      const done = await w.req(
++        'POST',
++        `/companies/${w.a.companyId}/branches/${branchId}/orders/${order.id}/complete-sale`,
++        token,
++        {
++          paymentIntent: 'PAY_NOW',
++          tenders: tenders.map((t) => ({
++            method: t.method,
++            amountMinor: t.amountMinor.toString(),
++          })),
++          advanceApplications: advances.map((a) => ({
++            advanceId: a.advanceId,
++            amountMinor: a.amountMinor.toString(),
++          })),
++        },
++        { 'if-match': String(order.version), 'idempotency-key': randomUUID() },
++      );
++      return { status: done.status, code: errCode(done), body: done.body, orderId: order.id };
++    }
++    const advanceBalance = async (advanceId: string): Promise<bigint> =>
++      BigInt(
++        (
++          await rows(
++            `SELECT coalesce((SELECT sum("amountMinor") FROM customer_advance_application WHERE "customerAdvanceId" = $1), 0)::text AS s`,
++            [advanceId],
++          )
++        )[0]!['s'] as string,
++      );
++
++    it('advance 1,200 + CASH 800: ONE movement (+800) for the CASH part only; the advance part moves no cash; the sale’s journal footprint is IDENTICAL with the policy OFF and POS_STRICT', async () => {
++      const s = await shift();
++      const cust = w.customers[2]!;
++      const advOff = await advanceFor(s.dev.branchId, cust);
++      const advOn = await advanceFor(s.dev.branchId, cust);
++
++      const fpBefore = await journalFingerprint();
++      const off = await advanceSale(
++        s.token,
++        s.dev.branchId,
++        cust,
++        [{ advanceId: advOff, amountMinor: 1_200n }],
++        [{ method: 'CASH', amountMinor: 800n }],
++      );
++      expect(off.status, JSON.stringify(off.body)).toBe(200);
++      const fpOff = await journalFingerprint();
++      expect(await cashRows(s.sessionId)).toEqual([]); // OFF: nothing recorded
++
++      setPolicy('POS_STRICT');
++      const on = await advanceSale(
++        s.token,
++        s.dev.branchId,
++        cust,
++        [{ advanceId: advOn, amountMinor: 1_200n }],
++        [{ method: 'CASH', amountMinor: 800n }],
++      );
++      expect(on.status, JSON.stringify(on.body)).toBe(200);
++      const fpOn = await journalFingerprint();
++      expect({ entries: fpOn.entries - fpOff.entries, lines: fpOn.lines - fpOff.lines }).toEqual({
++        entries: fpOff.entries - fpBefore.entries,
++        lines: fpOff.lines - fpBefore.lines,
++      });
++
++      // the advance was really consumed (1,200 applied), yet the drawer only received the 800 of cash
++      expect(await advanceBalance(advOn)).toBe(1_200n);
++      expect((await cashRows(s.sessionId)).map((r) => [r.type, r.amt])).toEqual([
++        ['CASH_SALE', '800'],
++      ]);
++      expect(await expectedOf(s.sessionId)).toBe(FLOAT + 800n);
++      // the movement is backed by the CASH payment row only; no payment exists for an advance application
++      const paid = await rows(
++        `SELECT p.method, p."amountMinor"::text AS amt FROM payment p JOIN payment_allocation pa ON pa."paymentId" = p.id JOIN invoice i ON i.id = pa."invoiceId" WHERE i."orderId" = $1`,
++        [on.orderId],
++      );
++      expect(paid.map((p) => [p['method'], p['amt']])).toEqual([['CASH', '800']]);
++    });
++
++    it('a FULLY advance-funded sale (advance 2,000, no tender) creates no cash source and needs no register: it succeeds on a terminal with no register and under ALL_STRICT, recording nothing', async () => {
++      const cust = w.customers[2]!;
++      const dev = await terminal(w.a.branches[0]!, { register: false });
++      const token = await boundToken(await mkUser(dev.branchId), dev);
++      const adv = await advanceFor(dev.branchId, cust);
++      const before = await tenantRowCount('cash_movement');
++      setPolicy('ALL_STRICT');
++      const r = await advanceSale(
++        token,
++        dev.branchId,
++        cust,
++        [{ advanceId: adv, amountMinor: SALE_TOTAL }],
++        [],
++      );
++      expect(r.status, JSON.stringify(r.body)).toBe(200);
++      expect(await advanceBalance(adv)).toBe(SALE_TOTAL);
++      expect(await tenantRowCount('cash_movement')).toBe(before);
++      expect(
++        await num(
++          `SELECT count(*)::int AS n FROM payment p JOIN payment_allocation pa ON pa."paymentId" = p.id JOIN invoice i ON i.id = pa."invoiceId" WHERE i."orderId" = $1`,
++          [r.orderId],
++        ),
++      ).toBe(0);
++    });
++
++    it('advance + CASH where the register refuses the cash part: the WHOLE sale rolls back — the advance is not consumed either', async () => {
++      const cust = w.customers[2]!;
++      const s = await shift();
++      const closed = await closeVia(s, AED_200);
++      expect(closed.status, JSON.stringify(closed.body)).toBe(200);
++      const adv = await advanceFor(s.dev.branchId, cust);
++      setPolicy('POS_STRICT');
++      const r = await advanceSale(
++        s.token,
++        s.dev.branchId,
++        cust,
++        [{ advanceId: adv, amountMinor: 1_200n }],
++        [{ method: 'CASH', amountMinor: 800n }],
++      );
++      expect(r.status).toBe(409);
++      expect(r.code).toBe('CASH_REGISTER_REFUSED');
++      expect(await advanceBalance(adv)).toBe(0n);
++      expect(
++        (await rows(`SELECT status FROM "order" WHERE id = $1`, [r.orderId]))[0]!['status'],
++      ).toBe('DRAFT');
++    });
++  });
++
++  describe('whole-run invariants (wired)', () => {
++    it('no journal entry has a cash-register source kind; at most one movement per source event; every payment/refund movement is backed by a cash source row of the same amount', async () => {
++      expect(
++        await num(
++          `SELECT count(*)::int AS n FROM journal_entry WHERE "tenantId" = $1 AND "sourceKind" IN ('cash_movement','cash_register','register_session')`,
++          [w.a.tenantId],
++        ),
++      ).toBe(0);
++      expect(
++        await num(
++          `SELECT count(*)::int AS n FROM (SELECT 1 FROM cash_movement WHERE "tenantId" = $1 AND "sourceId" IS NOT NULL GROUP BY "sourceKind","sourceId" HAVING count(*) > 1) x`,
++          [w.a.tenantId],
++        ),
++      ).toBe(0);
++      expect(
++        await num(
++          `SELECT count(*)::int AS n FROM cash_movement m
++            WHERE m."tenantId" = $1 AND m."sourceKind" = 'PAYMENT'
++              AND NOT EXISTS (SELECT 1 FROM payment p WHERE p.id = m."sourceId" AND p.method = 'CASH' AND p."amountMinor" = m."amountMinor")`,
++          [w.a.tenantId],
++        ),
++      ).toBe(0);
++      expect(
++        await num(
++          `SELECT count(*)::int AS n FROM cash_movement m
++            WHERE m."tenantId" = $1 AND m."sourceKind" = 'REFUND'
++              AND NOT EXISTS (SELECT 1 FROM refund r WHERE r.id = m."sourceId" AND r.method = 'CASH' AND r."amountMinor" = -m."amountMinor")`,
++          [w.a.tenantId],
++        ),
++      ).toBe(0);
++    });
++  });
++});

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import './pos.css';
 import { ServiceWorkerRegistrar } from './sw-registrar';
 
 export const metadata: Metadata = {

@@ -1,0 +1,166 @@
+// DRAFT — NOT in apps/api/src, NOT registered, NOT approved. The REVIEWABLE route surface of the inventory MVP. Every route is INACTIVE until the owner
+// approves the migrations (DRAFT-H / I / K / L / M), the three new permission keys below + their S0b baseline entries + role-template grants, and the
+// independent security review. This file supersedes the route sketch in DRAFT-K-stock-document.controller.ts.txt (which used invented `stock:*` names:
+// the frozen registry ALREADY defines inventory:view / receive / adjust / count / wastage / transfer and recipe:view / manage).
+//
+// RULES FOR EVERY ROUTE (checked by apps/api/src/modules/stock/stock-route-drafts.test.ts):
+//   * tenant comes ONLY from the authenticated session; company is derived SERVER-SIDE from the validated branch; branch comes ONLY from the validated
+//     route param + the session's branch scope (@ScopedParam) — NEVER from a body / query / header field (CLAUDE.md rule 5). No schema field is named
+//     tenantId / companyId / branchId.
+//   * every handler declares @RequirePermission(...) from the EXISTING registry, or from the NEW keys listed in NEW_PERMISSIONS below. No @Public.
+//   * every mutating route requires the `Idempotency-Key` header (8–128 chars) and runs ONE scoped transaction (rule 23); replays return the original.
+//   * entitlement: the `inventory` module for stock routes, `production_bom` for recipe routes (an un-entitled tenant's route is inert, rule 14).
+//   * money is an integer-minor-unit STRING, quantities are decimal STRINGS (never JSON numbers).
+//
+// NEW_PERMISSIONS (each needs: permissions package + S0b baseline fact + role-template grant + route-inventory pin — a frozen-contract amendment, i.e. a patch):
+//   inventory:costing:confirm   owner only, STEP-UP MFA     — the one-time, permanent choice of the company costing method (route: DRAFT-H controller)
+//   inventory:opening           owner only, STEP-UP MFA     — opening-stock documents (a financial opening balance)
+//   inventory:approve           owner / accountant, STEP-UP — approving adjustments, counts and gains (approver attribution); the requester needs
+//                                                             inventory:adjust / inventory:count / inventory:wastage
+//
+// EXISTING_PERMISSIONS used: inventory:view, inventory:receive, inventory:adjust, inventory:count, inventory:wastage, recipe:view, recipe:manage.
+import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
+import { z } from 'zod';
+import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
+import { ScopedParam } from '../../common/auth/pipeline.decorators.js';
+import { ZodBody } from '../../common/validation/zod-body.js';
+
+const money = z.string().regex(/^\d{1,18}$/); // integer minor units as a STRING
+const qty = z.string().regex(/^\d{1,14}(\.\d{1,4})?$/);
+const civilDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+// ───────────── receiving + opening balances ─────────────
+const documentLine = z.object({ variantId: z.string().uuid(), quantity: qty, uomCode: z.string(), lineCostMinor: money, batchRef: z.string().max(120).optional(), expiryDate: civilDate.optional() }).strict();
+const documentBody = z.object({ kind: z.enum(['OPENING', 'RECEIPT']), supplierRef: z.string().max(120).optional(), documentRef: z.string().max(120).optional(), businessDate: civilDate, currencyCode: z.string(), lines: z.array(documentLine).min(1).max(200) }).strict();
+
+@Controller('inventory/branches/:branchId/documents')
+export class StockDocumentController {
+  // RECEIPT needs inventory:receive; OPENING additionally inventory:opening + step-up (decided in the handler by `kind`)
+  @Post()
+  @RequirePermission('inventory:receive')
+  @ScopedParam({ branch: 'branchId' })
+  post(@Param('branchId') branchId: string, @Headers('idempotency-key') key: string, @Body(new ZodBody(documentBody)) dto: z.infer<typeof documentBody>) {
+    return { branchId, key, dto }; // → postStockDocument(tx, …) in ONE scoped transaction
+  }
+
+  @Get(':documentId')
+  @RequirePermission('inventory:view')
+  @ScopedParam({ branch: 'branchId' })
+  get(@Param('documentId') documentId: string) {
+    return documentId; // → getStockDocument
+  }
+}
+
+// ───────────── adjustments + wastage ─────────────
+const adjustmentLine = z.object({ variantId: z.string().uuid(), direction: z.enum(['IN', 'OUT']), reasonCode: z.string(), quantity: qty, uomCode: z.string(), lotId: z.string().uuid().optional(), note: z.string().max(500).optional(), batchRef: z.string().max(120).optional(), expiryDate: civilDate.optional(), approvedUnitCostMinor: money.optional() }).strict();
+const adjustmentBody = z.object({ businessDate: civilDate, currencyCode: z.string(), note: z.string().max(500).optional(), lines: z.array(adjustmentLine).min(1).max(200) }).strict();
+
+@Controller('inventory/branches/:branchId/adjustments')
+export class StockAdjustmentController {
+  // The REQUESTER is the authenticated user. Reasons WASTAGE / DAMAGED / EXPIRED need inventory:wastage; COUNT_LOSS / THEFT / any gain need inventory:adjust.
+  // The APPROVER is a different (or, if the owner allows it, the same) authenticated user holding inventory:approve + step-up; the server NEVER takes an
+  // approver id from the body. Gains additionally need the company's approved valuation policy (none exists: they are refused 409 GAIN_VALUATION_NOT_APPROVED).
+  @Post()
+  @RequirePermission('inventory:adjust')
+  @ScopedParam({ branch: 'branchId' })
+  post(@Param('branchId') branchId: string, @Headers('idempotency-key') key: string, @Body(new ZodBody(adjustmentBody)) dto: z.infer<typeof adjustmentBody>) {
+    return { branchId, key, dto }; // → postStockAdjustment(tx, …)
+  }
+
+  @Get(':adjustmentId')
+  @RequirePermission('inventory:view')
+  @ScopedParam({ branch: 'branchId' })
+  get(@Param('adjustmentId') adjustmentId: string) {
+    return adjustmentId; // → getStockAdjustment
+  }
+}
+
+// ───────────── physical stock counts ─────────────
+const countLine = z.object({ variantId: z.string().uuid(), countedQuantity: qty, uomCode: z.string() }).strict();
+const countBody = z.object({ countedAt: z.string(), businessDate: civilDate, currencyCode: z.string(), lines: z.array(countLine).min(1).max(200) }).strict();
+
+@Controller('inventory/branches/:branchId/counts')
+export class StockCountController {
+  // read-only preview for the approver: variance and its value, or why a line is blocked; writes nothing, takes no lock
+  @Post('preview')
+  @RequirePermission('inventory:count')
+  @ScopedParam({ branch: 'branchId' })
+  preview(@Param('branchId') branchId: string, @Body(new ZodBody(countBody)) dto: z.infer<typeof countBody>) {
+    return { branchId, dto }; // → previewStockCount (the route needs no Idempotency-Key: it changes nothing)
+  }
+
+  @Post()
+  @RequirePermission('inventory:count')
+  @ScopedParam({ branch: 'branchId' })
+  post(@Param('branchId') branchId: string, @Headers('idempotency-key') key: string, @Body(new ZodBody(countBody)) dto: z.infer<typeof countBody>) {
+    return { branchId, key, dto }; // → postStockCount(tx, …); approver = the authenticated inventory:approve user (step-up), never a body field
+  }
+
+  @Get(':countId')
+  @RequirePermission('inventory:view')
+  @ScopedParam({ branch: 'branchId' })
+  get(@Param('countId') countId: string) {
+    return countId; // → getStockCount
+  }
+}
+
+// ───────────── availability (read-only hints; the sale re-validates inside the lock) ─────────────
+@Controller('inventory/branches/:branchId/availability')
+export class StockAvailabilityController {
+  @Get()
+  @RequirePermission('inventory:view')
+  @ScopedParam({ branch: 'branchId' })
+  list(@Param('branchId') branchId: string, @Query('variantIds') variantIds: string, @Query('asOf') asOf: string) {
+    return { branchId, variantIds, asOf }; // → sellableQuantities (≤ 200 ids); POS cashiers read it through pos:sell (S0b decision S-5)
+  }
+
+  @Get('bom/:variantId')
+  @RequirePermission('inventory:view')
+  @ScopedParam({ branch: 'branchId' })
+  bom(@Param('branchId') branchId: string, @Param('variantId') variantId: string, @Query('asOf') asOf: string) {
+    return { branchId, variantId, asOf }; // → bomAvailabilityForVariant (production_bom entitlement)
+  }
+}
+
+// ───────────── recipes (bouquet BOM, build-to-order) ─────────────
+const recipeComponent = z.object({ variantId: z.string().uuid(), quantity: qty, uomCode: z.string(), wastageBps: z.number().int().min(0).max(10000).optional() }).strict();
+const recipeBody = z.object({ finishedVariantId: z.string().uuid(), yieldQuantity: qty.optional(), components: z.array(recipeComponent).min(1).max(100) }).strict();
+
+@Controller('inventory/recipes')
+export class RecipeController {
+  // company-level (a recipe belongs to the company, not a branch): the company comes from the session's company scope
+  @Post()
+  @RequirePermission('recipe:manage')
+  @ScopedParam({ company: 'companyId' })
+  publish(@Headers('idempotency-key') key: string, @Body(new ZodBody(recipeBody)) dto: z.infer<typeof recipeBody>) {
+    return { key, dto }; // → publishRecipe (a new immutable version; the previous ACTIVE one is retired)
+  }
+
+  @Get()
+  @RequirePermission('recipe:view')
+  @ScopedParam({ company: 'companyId' })
+  active(@Query('finishedVariantId') finishedVariantId: string) {
+    return finishedVariantId; // → loadActiveRecipe
+  }
+
+  @Get(':recipeId')
+  @RequirePermission('recipe:view')
+  @ScopedParam({ company: 'companyId' })
+  get(@Param('recipeId') recipeId: string) {
+    return recipeId; // → loadRecipe
+  }
+}
+
+// ───────────── reconciliation report (read-only; the JOB is not a route) ─────────────
+@Controller('inventory/reconciliation')
+export class ReconciliationController {
+  @Get()
+  @RequirePermission('inventory:view')
+  @ScopedParam({ company: 'companyId' })
+  report() {
+    return 'report'; // → the latest stored report of runStockReconciliation (NO route triggers a run; no route corrects anything)
+  }
+}
+
+// NOT routes (by design): BOM consumption and cancellation are called ONLY from the (frozen, unapproved-to-amend) sale transaction — there is no HTTP
+// endpoint that consumes components; the costing-method lock is the single DRAFT-H route.

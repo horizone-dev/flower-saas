@@ -38,7 +38,7 @@ export interface StartTestStackOptions {
 }
 
 const IMAGES = {
-  postgres: 'postgres:17',
+  postgres: 'postgres:17.11',
   redis: 'redis:7',
 } as const;
 

@@ -10,7 +10,7 @@ export default function Home() {
     let cancelled = false;
     async function route(): Promise<void> {
       const ok = getAccessToken() !== null || (await bootstrapSession());
-      if (!cancelled) router.replace(ok ? '/access' : '/login');
+      if (!cancelled) router.replace(ok ? '/sell' : '/login');
     }
     void route();
     return () => {

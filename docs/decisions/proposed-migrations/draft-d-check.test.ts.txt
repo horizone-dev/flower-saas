@@ -1,0 +1,256 @@
+import 'reflect-metadata';
+import { readFileSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type pg from 'pg';
+import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
+import { createSaleWorld, type SaleWorld } from './load-sale-world.js';
+
+/**
+ * Validation of DRAFT D (register_session_count) against a REAL PostgreSQL that has all 53 shipped migrations. This runs in a DISPOSABLE
+ * database (a throw-away container, destroyed afterwards): the real project database and the migrations directory are never touched. The
+ * functional tests (guards, close rule, privileges, RLS) and the lock tests keep every statement either in a rolled-back transaction or in
+ * the disposable container only. Lives in a disposable source copy; it is never added to the real tree.
+ */
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const DRAFT_D = readFileSync(
+  join(ROOT, 'docs/decisions/proposed-migrations/DRAFT-D-register-session-count.sql'),
+  'utf8',
+);
+
+describe('DRAFT D — register_session_count: guards, immutability, close rule, locks, privileges', () => {
+  let stack: TestStack;
+  let w: SaleWorld;
+  const cur = { companyId: '', branchId: '' };
+
+  beforeAll(async () => {
+    stack = await startTestStack({ services: ['postgres', 'redis'] });
+    migrateTestDb(stack.postgres.url);
+    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2);
+    cur.companyId = w.a.companyId;
+    cur.branchId = w.a.branches[0]!;
+    await w.pool.query(DRAFT_D); // into the DISPOSABLE database only
+  }, 900_000);
+  afterAll(async () => {
+    await w?.h.close();
+    await w?.pool.end();
+    await stack?.stop();
+  });
+
+  interface Sess {
+    sessionId: string;
+    terminalId: string;
+    registerId: string;
+    cashier: string;
+    other: string;
+  }
+  async function mkUser(): Promise<string> {
+    const id = randomUUID();
+    await w.pool.query(
+      `INSERT INTO "user" (id, "tenantId", "accountType", email, status, "updatedAt") VALUES ($1,$2,'USER',$3,'ACTIVE',now())`,
+      [id, w.a.tenantId, `d-${id.slice(0, 8)}@draft.test`],
+    );
+    return id;
+  }
+  /** a fresh terminal + register + OPEN session with a 200.00 float (session and float row in ONE transaction) */
+  async function session(float = 20_000n): Promise<Sess> {
+    const terminalId = randomUUID();
+    const registerId = randomUUID();
+    const sessionId = randomUUID();
+    const cashier = await mkUser();
+    const other = await mkUser();
+    const c = await w.pool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query(
+        `INSERT INTO pos_terminal (id, "tenantId", "companyId", "branchId", code, name, status, "updatedAt") VALUES ($1,$2,$3,$4,$5,'T','ACTIVE',now())`,
+        [terminalId, w.a.tenantId, cur.companyId, cur.branchId, `D-${terminalId.slice(0, 8)}`],
+      );
+      await c.query(
+        `INSERT INTO cash_register (id, "tenantId", "companyId", "branchId", "posTerminalId", "updatedAt") VALUES ($1,$2,$3,$4,$5,now())`,
+        [registerId, w.a.tenantId, cur.companyId, cur.branchId, terminalId],
+      );
+      await c.query(
+        `INSERT INTO register_session (id, "tenantId", "companyId", "branchId", "posTerminalId", "cashRegisterId", "cashierUserId", "openingFloatMinor", "currencyCode", "currencyExponent", "updatedAt")
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8, co."defaultCurrency", cu.exponent, now() FROM company co JOIN currency cu ON cu.code = co."defaultCurrency" WHERE co.id = $3`,
+        [sessionId, w.a.tenantId, cur.companyId, cur.branchId, terminalId, registerId, cashier, float.toString()],
+      );
+      await c.query(
+        `INSERT INTO cash_movement ("tenantId","companyId","branchId","posTerminalId","cashRegisterId","registerSessionId","type","amountMinor","currencyCode","currencyExponent","sourceKind","sourceId","actingUserId")
+         SELECT $1,$2,$3,$4,$5,$6,'OPENING_FLOAT',$7,"currencyCode","currencyExponent",'REGISTER_SESSION',$6,$8 FROM register_session WHERE id = $6`,
+        [w.a.tenantId, cur.companyId, cur.branchId, terminalId, registerId, sessionId, float.toString(), cashier],
+      );
+      await c.query('COMMIT');
+    } catch (e) {
+      await c.query('ROLLBACK');
+      throw e;
+    } finally {
+      c.release();
+    }
+    return { sessionId, terminalId, registerId, cashier, other };
+  }
+  const movement = (s: Sess, type: string, amount: bigint) =>
+    w.pool.query(
+      `INSERT INTO cash_movement ("tenantId","companyId","branchId","posTerminalId","cashRegisterId","registerSessionId","type","amountMinor","currencyCode","currencyExponent","sourceKind","sourceId","actingUserId")
+       SELECT $1,$2,$3,$4,$5,$6,$7,$8,"currencyCode","currencyExponent",'T',$9,$10 FROM register_session WHERE id = $6`,
+      [w.a.tenantId, cur.companyId, cur.branchId, s.terminalId, s.registerId, s.sessionId, type, amount.toString(), randomUUID(), s.cashier],
+    );
+  interface CountArgs {
+    seq: number;
+    purpose?: string;
+    lines: [string, number][];
+    counted: bigint;
+    expected: bigint;
+    by?: string;
+    supervisor?: string | null;
+  }
+  const countSql = `INSERT INTO register_session_count ("tenantId","companyId","branchId","posTerminalId","cashRegisterId","registerSessionId","seq","purpose","currencyCode","currencyExponent","denominations","countedMinor","expectedMinor","varianceMinor","countedByUserId","supervisorUserId")
+     SELECT $1,$2,$3,$4,$5,$6,$7,$8,"currencyCode","currencyExponent",$9::jsonb,$10,$11,$10::bigint-$11::bigint,$12,$13 FROM register_session WHERE id = $6`;
+  const count = (s: Sess, a: CountArgs, c: pg.Pool | pg.PoolClient = w.pool) =>
+    c.query(countSql, [
+      w.a.tenantId, cur.companyId, cur.branchId, s.terminalId, s.registerId, s.sessionId,
+      a.seq, a.purpose ?? 'SPOT',
+      JSON.stringify(a.lines.map(([d, n]) => ({ denominationMinor: d, count: n }))),
+      a.counted.toString(), a.expected.toString(), a.by ?? s.cashier, a.supervisor ?? null,
+    ]);
+  const refused = async (p: Promise<unknown>, re: RegExp): Promise<void> => {
+    await expect(p).rejects.toThrow(re);
+  };
+  const setStatus = (s: Sess, to: string) =>
+    w.pool.query(`UPDATE register_session SET status = $2, "updatedAt" = now() WHERE id = $1`, [s.sessionId, to]);
+
+  it('the draft created the table, the three triggers and the least-privilege grants; RLS is forced; app role cannot UPDATE or DELETE', async () => {
+    const trg = (
+      await w.pool.query(
+        `SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN ('register_session_count'::regclass, 'register_session'::regclass) AND tgname LIKE '%count%' ORDER BY tgname`,
+      )
+    ).rows.map((r) => r.tgname);
+    expect(trg).toEqual([
+      'trg_register_session_close_requires_count',
+      'trg_register_session_count_append_only',
+      'trg_register_session_count_guard',
+    ]);
+    const rls = (await w.pool.query(`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'register_session_count'`)).rows[0];
+    expect(rls).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+    const priv = async (p: string) =>
+      (await w.pool.query(`SELECT has_table_privilege('flower_app', 'register_session_count', $1) AS ok`, [p])).rows[0].ok as boolean;
+    expect([await priv('SELECT'), await priv('INSERT'), await priv('UPDATE'), await priv('DELETE')]).toEqual([true, true, false, false]);
+  });
+
+  it('a valid count is accepted and every guard refuses its violation: sequence, expected cash, denomination sum, duplicate / bad lines, non-cashier counter, self-verification, foreign-tenant supervisor', async () => {
+    const s = await session();
+    await movement(s, 'CASH_SALE', 2_000n); // expected 22,000
+    const lines: [string, number][] = [['10000', 2], ['1000', 2]];
+    await count(s, { seq: 1, lines, counted: 22_000n, expected: 22_000n });
+    // the stored figures
+    const r = (await w.pool.query(`SELECT "varianceMinor"::text AS v, "countedMinor"::text AS c FROM register_session_count WHERE "registerSessionId" = $1`, [s.sessionId])).rows[0];
+    expect(r).toEqual({ v: '0', c: '22000' });
+    await refused(count(s, { seq: 1, lines, counted: 22_000n, expected: 22_000n }), /unique|seq must be 2/i);
+    await refused(count(s, { seq: 3, lines, counted: 22_000n, expected: 22_000n }), /seq must be 2/);
+    await refused(count(s, { seq: 2, lines, counted: 22_000n, expected: 21_999n }), /not the ledger/);
+    await refused(count(s, { seq: 2, lines, counted: 22_001n, expected: 22_000n }), /not the sum of the denomination lines/);
+    await refused(count(s, { seq: 2, lines: [['1000', 1], ['1000', 1]], counted: 2_000n, expected: 22_000n }), /invalid or duplicate/);
+    await refused(count(s, { seq: 2, lines: [['0', 1]], counted: 0n, expected: 22_000n }), /invalid or duplicate/);
+    await refused(count(s, { seq: 2, lines: [['1000', -1]], counted: -1_000n, expected: 22_000n }), /counted_chk|invalid or duplicate/);
+    await refused(count(s, { seq: 2, lines, counted: 22_000n, expected: 22_000n, by: s.other }), /only the session's cashier/);
+    await refused(count(s, { seq: 2, lines, counted: 22_000n, expected: 22_000n, supervisor: s.cashier }), /supervisor_chk/);
+    // a supervisor from ANOTHER tenant is not a user of this tenant
+    const foreign = randomUUID();
+    await w.pool.query(`INSERT INTO "user" (id, "tenantId", "accountType", email, status, "updatedAt") VALUES ($1,$2,'USER',$3,'ACTIVE',now())`, [foreign, w.b.tenantId, `f-${foreign.slice(0, 8)}@draft.test`]);
+    await refused(count(s, { seq: 2, lines, counted: 22_000n, expected: 22_000n, supervisor: foreign }), /does not exist in this tenant/);
+    // a shortage and an overage are measured, not refused (a SPOT count)
+    await count(s, { seq: 2, lines: [['10000', 2]], counted: 20_000n, expected: 22_000n, supervisor: s.other });
+    expect((await w.pool.query(`SELECT "varianceMinor"::text AS v FROM register_session_count WHERE "registerSessionId" = $1 AND seq = 2`, [s.sessionId])).rows[0].v).toBe('-2000');
+  });
+
+  it('the history is IMMUTABLE: no update, no delete; and nothing can be counted against a CLOSED session', async () => {
+    const s = await session();
+    await count(s, { seq: 1, purpose: 'CLOSE', lines: [['10000', 2]], counted: 20_000n, expected: 20_000n });
+    await refused(w.pool.query(`UPDATE register_session_count SET "countedMinor" = 1 WHERE "registerSessionId" = $1`, [s.sessionId]), /append-only/);
+    await refused(w.pool.query(`DELETE FROM register_session_count WHERE "registerSessionId" = $1`, [s.sessionId]), /append-only/);
+    await setStatus(s, 'COUNTING');
+    await setStatus(s, 'CLOSED');
+    await refused(count(s, { seq: 2, lines: [['10000', 2]], counted: 20_000n, expected: 20_000n }), /CLOSED/);
+  });
+
+  it('the close rule (today’s): no count, a SPOT count, a shortage, a STALE count all refuse the close; a fresh balanced CLOSE count allows it; a recount after a difference closes', async () => {
+    const s = await session();
+    await setStatus(s, 'COUNTING');
+    await refused(setStatus(s, 'CLOSED'), /requires a recorded count/);
+    await count(s, { seq: 1, purpose: 'SPOT', lines: [['10000', 2]], counted: 20_000n, expected: 20_000n });
+    await refused(setStatus(s, 'CLOSED'), /not a CLOSE count/);
+    await count(s, { seq: 2, purpose: 'CLOSE', lines: [['10000', 1]], counted: 10_000n, expected: 20_000n });
+    await refused(setStatus(s, 'CLOSED'), /balanced count/);
+    // the recount balances: now the close is allowed
+    await count(s, { seq: 3, purpose: 'CLOSE', lines: [['10000', 2]], counted: 20_000n, expected: 20_000n });
+    await setStatus(s, 'CLOSED');
+    expect((await w.pool.query(`SELECT status FROM register_session WHERE id = $1`, [s.sessionId])).rows[0].status).toBe('CLOSED');
+  });
+
+  it('a movement recorded AFTER the close count makes it stale (recount), and the recount then closes', async () => {
+    const s = await session();
+    await count(s, { seq: 1, purpose: 'CLOSE', lines: [['10000', 2]], counted: 20_000n, expected: 20_000n });
+    await movement(s, 'CASH_IN', 500n); // the drawer now expects 20,500
+    await setStatus(s, 'COUNTING');
+    await refused(setStatus(s, 'CLOSED'), /stale/);
+    await count(s, { seq: 2, purpose: 'CLOSE', lines: [['10000', 2], ['500', 1]], counted: 20_500n, expected: 20_500n });
+    await setStatus(s, 'CLOSED');
+    expect((await w.pool.query(`SELECT status FROM register_session WHERE id = $1`, [s.sessionId])).rows[0].status).toBe('CLOSED');
+  });
+
+  it('LOCKS (two connections, nothing committed by the contenders): a count in flight blocks a second count, a movement and a status change; a close in flight blocks a count; a lost race on the sequence is refused after the winner commits', async () => {
+    const s = await session();
+    const lockTimeout = async (c: pg.PoolClient) => c.query(`SET lock_timeout = '800ms'`);
+    // (1) a count in flight holds the session lock
+    const c1 = await w.pool.connect();
+    const c2 = await w.pool.connect();
+    try {
+      await c1.query('BEGIN');
+      await count(s, { seq: 1, lines: [['10000', 2]], counted: 20_000n, expected: 20_000n }, c1);
+      await c2.query('BEGIN');
+      await lockTimeout(c2);
+      await refused(count(s, { seq: 1, lines: [['10000', 2]], counted: 20_000n, expected: 20_000n }, c2), /lock timeout|canceling statement/i);
+      await c2.query('ROLLBACK');
+      await c2.query('BEGIN');
+      await lockTimeout(c2);
+      await refused(
+        c2.query(
+          `INSERT INTO cash_movement ("tenantId","companyId","branchId","posTerminalId","cashRegisterId","registerSessionId","type","amountMinor","currencyCode","currencyExponent","sourceKind","sourceId","actingUserId")
+           SELECT $1,$2,$3,$4,$5,$6,'CASH_IN',100,"currencyCode","currencyExponent",'T',$7,$8 FROM register_session WHERE id = $6`,
+          [w.a.tenantId, cur.companyId, cur.branchId, s.terminalId, s.registerId, s.sessionId, randomUUID(), s.cashier],
+        ),
+        /lock timeout|canceling statement/i,
+      );
+      await c2.query('ROLLBACK');
+      await c1.query('ROLLBACK');
+      // (2) a close in flight (the session row locked by the close) blocks a count
+      await c1.query('BEGIN');
+      await c1.query(`UPDATE register_session SET status = 'COUNTING', "updatedAt" = now() WHERE id = $1`, [s.sessionId]);
+      await c2.query('BEGIN');
+      await lockTimeout(c2);
+      await refused(count(s, { seq: 1, lines: [['10000', 2]], counted: 20_000n, expected: 20_000n }, c2), /lock timeout|canceling statement/i);
+      await c2.query('ROLLBACK');
+      await c1.query('ROLLBACK');
+      // (3) the race on the same sequence: the loser waits, then is refused once the winner commits
+      await c1.query('BEGIN');
+      await count(s, { seq: 1, lines: [['10000', 2]], counted: 20_000n, expected: 20_000n }, c1);
+      await c2.query('BEGIN');
+      await c2.query(`SET lock_timeout = '0'`);
+      const loser = count(s, { seq: 1, lines: [['10000', 2]], counted: 20_000n, expected: 20_000n }, c2);
+      await new Promise((r) => setTimeout(r, 400));
+      await c1.query('COMMIT');
+      await refused(loser, /seq must be 2|unique/i);
+      await c2.query('ROLLBACK');
+    } finally {
+      c1.release();
+      c2.release();
+    }
+    expect((await w.pool.query(`SELECT count(*)::int AS n FROM register_session_count WHERE "registerSessionId" = $1`, [s.sessionId])).rows[0].n).toBe(1);
+  });
+
+  it('the real project state is untouched: this test file is not in the real tree and the migrations directory has no count migration', () => {
+    expect(DRAFT_D).toMatch(/NOT APPLIED, NOT IN packages\/db\/prisma\/migrations/);
+  });
+});

@@ -1,0 +1,43 @@
+// Disposable-database check of DRAFT-F1-cashier-sales-catalog-view.sql (run from the repo root after `pnpm build` of api + testing):
+//   copy to a .mjs file, then `node thatfile.mjs`. Applies the draft to a THROWAWAY Testcontainers PostgreSQL only.
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import pg from 'pg';
+const root = process.cwd();
+const load = (p) => import(pathToFileURL(path.join(root, p)).href);
+const { startTestStack, migrateTestDb } = await load('packages/testing/dist/index.js');
+const { createSaleWorld } = await load('apps/api/dist/verification/load-sale-world.js');
+const sql = readFileSync('docs/decisions/proposed-migrations/DRAFT-F1-cashier-sales-catalog-view.sql', 'utf8');
+const stack = await startTestStack({ services: ['postgres', 'redis'] });
+let failures = 0;
+const check = (n, ok, d = '') => { console.log(`  ${ok ? '✓' : '✗'} ${n}${ok ? '' : '  ← ' + d}`); if (!ok) failures++; };
+try {
+  migrateTestDb(stack.postgres.url);
+  const w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2);
+  const owner = new pg.Client({ connectionString: stack.postgres.url });
+  await owner.connect();
+  const has = async (roleKey) => (await owner.query(`SELECT r."tenantId", count(*)::int AS n FROM role r JOIN role_permission rp ON rp."roleId" = r.id WHERE r."isSystem" AND r.key = $1 AND rp."permissionKey" = 'catalog:view' GROUP BY r."tenantId"`, [roleKey])).rows;
+  const tenants = (await owner.query(`SELECT count(*)::int AS n FROM tenant`)).rows[0].n;
+  check('before: cashier holds no catalog:view in any tenant', (await has('cashier')).length === 0);
+  check('before: manager holds catalog:view (control)', (await has('manager')).length === tenants);
+  const others = async () => (await owner.query(`SELECT r.key, count(*)::int AS n FROM role r JOIN role_permission rp ON rp."roleId" = r.id WHERE r."isSystem" AND rp."permissionKey" = 'catalog:view' GROUP BY r.key ORDER BY r.key`)).rows.map((r) => `${r.key}:${r.n}`).join(',');
+  const before = await others();
+  await owner.query('BEGIN'); await owner.query(sql); await owner.query('COMMIT');
+  check('after: cashier holds catalog:view in EVERY tenant', (await has('cashier')).length === tenants, JSON.stringify(await has('cashier')));
+  check('after: sales holds catalog:view in EVERY tenant', (await has('sales')).length === tenants);
+  const after = await others();
+  check('after: only cashier + sales changed (owner/admin/manager unchanged)', after.split(',').filter((x) => !x.startsWith('cashier') && !x.startsWith('sales')).join(',') === before.split(',').filter((x) => !x.startsWith('cashier') && !x.startsWith('sales')).join(','), after);
+  const florist = (await owner.query(`SELECT count(*)::int AS n FROM role r JOIN role_permission rp ON rp."roleId" = r.id WHERE r.key IN ('florist','storekeeper','driver','accountant') AND rp."permissionKey" = 'catalog:view'`)).rows[0].n;
+  check('after: no other built-in role gained it', florist === 0);
+  const rowsBefore = (await owner.query(`SELECT count(*)::int AS n FROM role_permission`)).rows[0].n;
+  await owner.query('BEGIN'); await owner.query(sql); await owner.query('COMMIT');
+  check('idempotent: a second run adds no rows', (await owner.query(`SELECT count(*)::int AS n FROM role_permission`)).rows[0].n === rowsBefore);
+  const force = (await owner.query(`SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relname IN ('role','role_permission') ORDER BY relname`)).rows;
+  check('FORCE row level security is restored on both tables', force.every((r) => r.f === true), JSON.stringify(force));
+  const writePerm = (await owner.query(`SELECT count(*)::int AS n FROM role_permission rp JOIN role r ON r.id = rp."roleId" WHERE r.key IN ('cashier','sales') AND rp."permissionKey" IN ('catalog:manage','variants:manage')`)).rows[0].n;
+  check('no catalog WRITE permission was granted', writePerm === 0);
+  await owner.end(); await w.h.close(); await w.pool.end();
+} finally { await stack.stop(); }
+console.log(failures === 0 ? 'DRAFT F-1 CHECK: ALL PASSED' : `DRAFT F-1 CHECK: ${failures} FAILED`);
+process.exit(failures === 0 ? 0 : 1);
