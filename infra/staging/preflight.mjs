@@ -61,6 +61,11 @@ const SECRETS = [
   'AUTH_JWT_SECRET',
 ];
 
+// R-1a: the disabled vault needs an explicit, time-boxed, internal-alpha-only authorization (mirrors apps/api/src/config/env.ts)
+const SECRETS_DISABLED_AUTHORIZATION = 'internal-alpha-only';
+const SECRETS_DISABLED_MAX_DAYS = 90;
+const disabledVault = env['SECRETS_PROVIDER'] === 'disabled';
+if (disabledVault) REQUIRED.push('SECRETS_DISABLED_AUTHORIZATION', 'SECRETS_DISABLED_UNTIL');
 for (const k of REQUIRED) {
   if (!env[k]) bad(`${k} is missing or empty`);
   else if (/CHANGE_ME/.test(env[k])) bad(`${k} still contains the CHANGE_ME placeholder`);
@@ -116,8 +121,40 @@ for (const [k, lo, hi] of [
 }
 if (!['disabled', 'kms'].includes(env['SECRETS_PROVIDER'] ?? ''))
   bad(
-    'SECRETS_PROVIDER must be disabled (needs patch R-1) or kms (not wired); dev is refused in production',
+    'SECRETS_PROVIDER must be disabled (needs patch R-1 + R-1a) or kms (not wired); dev is refused in production',
   );
+{
+  const auth = env['SECRETS_DISABLED_AUTHORIZATION'] ?? '';
+  const until = env['SECRETS_DISABLED_UNTIL'] ?? '';
+  if (!disabledVault) {
+    // no latent authorization: a later edit of SECRETS_PROVIDER must not silently switch it on
+    if (auth || until)
+      bad(
+        'SECRETS_DISABLED_AUTHORIZATION / SECRETS_DISABLED_UNTIL are only allowed with SECRETS_PROVIDER=disabled — remove them',
+      );
+  } else {
+    if (auth && !/CHANGE_ME/.test(auth) && auth !== SECRETS_DISABLED_AUTHORIZATION)
+      bad(
+        `SECRETS_DISABLED_AUTHORIZATION must be exactly "${SECRETS_DISABLED_AUTHORIZATION}" (the explicit internal-alpha-only authorization)`,
+      );
+    if (until && !/CHANGE_ME/.test(until)) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(until);
+      const t = m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN;
+      const d = new Date(t);
+      const real =
+        m &&
+        d.getUTCFullYear() === +m[1] &&
+        d.getUTCMonth() === +m[2] - 1 &&
+        d.getUTCDate() === +m[3];
+      const now = new Date();
+      const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+      if (!real || !(t >= today) || !(t <= today + SECRETS_DISABLED_MAX_DAYS * 86_400_000))
+        bad(
+          `SECRETS_DISABLED_UNTIL must be a real YYYY-MM-DD date (UTC) from today to at most ${SECRETS_DISABLED_MAX_DAYS} days ahead — the authorization is a time box and must be renewed deliberately`,
+        );
+    }
+  }
+}
 for (const k of ['API_IMAGE', 'POS_IMAGE', 'OWNER_IMAGE', 'MIGRATE_IMAGE']) {
   if (env[k] && /:(latest)?$/.test(env[k]))
     bad(`${k} must pin an explicit tag (not :latest / empty)`);

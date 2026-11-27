@@ -73,7 +73,7 @@ if want 1; then
 const r=()=>require('crypto').randomBytes(18).toString('hex');
 const e=['POS_HOST=pos.flower.localhost','OWNER_HOST=owner.flower.localhost','OPS_HOST=ops.flower.localhost','ADMIN_CIDR=172.16.0.0/12','HTTP_PORT=8080','HTTPS_PORT=8443','CADDYFILE=./Caddyfile.local',
 'API_IMAGE=$A_API','POS_IMAGE=$A_POS','OWNER_IMAGE=$A_OWN','MIGRATE_IMAGE=$A_MIG','POSTGRES_IMAGE=$PGIMG','MIGRATION_MODE=check',
-'POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
+'POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled','SECRETS_DISABLED_AUTHORIZATION=internal-alpha-only','SECRETS_DISABLED_UNTIL='+new Date(Date.now()+30*864e5).toISOString().slice(0,10)];
 require('fs').writeFileSync('$ENVF',e.join('\n')+'\n')"
   # record set A (tags -> immutable IDs) BEFORE anything is deployed
   node release-images.mjs "$ENVF" --out "$OUTW/release-A.json" >/dev/null && ok "set A recorded as immutable image IDs" || bad "record set A"

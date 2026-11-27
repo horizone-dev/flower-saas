@@ -107,6 +107,17 @@ if (!envFile) {
   if (svc.api.environment?.NODE_ENV !== 'production') bad('api must run with NODE_ENV=production');
   if (svc.api.environment?.SECRETS_PROVIDER === 'dev')
     bad('api must not use the dev secrets provider');
+  // R-1a: the compose file must hand BOTH authorization variables to the API from the env file. Read from the resolved config (the key must be
+  // present) AND from the source (the value must be an interpolation, never a literal that would authorize the disabled vault silently).
+  const composeSrc = readFileSync(composeFile, 'utf8');
+  for (const key of ['SECRETS_DISABLED_AUTHORIZATION', 'SECRETS_DISABLED_UNTIL']) {
+    if (!(key in (svc.api.environment ?? {}))) bad(`api environment does not pass ${key}`);
+    // [$][{] rather than escapes: the line must read `    KEY: ${KEY:-}` (an interpolation), never `    KEY: some-literal`
+    if (!new RegExp('^ +' + key + ': *[$][{]' + key + '[:}-]', 'm').test(composeSrc))
+      bad(
+        `${key} must be interpolated from the env file in the compose file (a literal value would authorize the disabled vault silently)`,
+      );
+  }
   const text = readFileSync(composeFile, 'utf8').replace(/\$\{[^}]*\}/g, '');
   if (/(PASSWORD|SECRET)\s*:\s*['"]?[A-Za-z0-9]{12,}['"]?\s*$/m.test(text)) {
     bad('a literal secret appears in the compose file');

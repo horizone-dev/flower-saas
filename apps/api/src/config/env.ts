@@ -75,8 +75,12 @@ const envSchema = backendEnvSchema.extend({
   // refused when NODE_ENV=production (G16). `SECRETS_MASTER_KEY` is any passphrase
   // ≥ 32 chars; the 32-byte key is derived from it.
   // `disabled` (R-1, PROPOSED): a FAIL-CLOSED vault for a deployment that stores NO provider secrets (the controlled pilot: card is a recorded
-  // terminal tender, no provider integration). It is allowed in production because it can never hold or reveal a secret.
+  // terminal tender, no provider integration). It can never hold or reveal a secret, but it must never be reached by accident (R-1a):
+  // it needs an explicit, time-boxed, internal-alpha-only authorization in EVERY NODE_ENV (see `assertSecretsDisabledAuthorization`).
   SECRETS_PROVIDER: z.enum(['dev', 'kms', 'disabled']).default('dev'),
+  // R-1a. Both are optional here and policed by `assertSecretsDisabledAuthorization`; an empty value counts as "not set" (compose passes `${VAR:-}`).
+  SECRETS_DISABLED_AUTHORIZATION: z.string().optional(),
+  SECRETS_DISABLED_UNTIL: z.string().optional(),
   SECRETS_MASTER_KEY: z
     .string()
     .min(32)
@@ -118,16 +122,88 @@ const envSchema = backendEnvSchema.extend({
 export type AppConfig = Readonly<z.infer<typeof envSchema>>;
 
 export class EnvValidationError extends Error {
-  constructor(issues: string) {
-    super(`Invalid environment:\n${issues}`);
+  /**
+   * `reason` is an optional FIXED, value-free phrase placed on the first line. The shared logger keeps only a templated first line of an
+   * error message (and turns any 24+ character run such as a variable name into `<token>`), so without it the log says just
+   * "Invalid environment:". Use plain words only: never a value, never a variable name.
+   */
+  constructor(issues: string, reason?: string) {
+    super(`Invalid environment${reason ? ` (${reason})` : ''}:\n${issues}`);
     this.name = 'EnvValidationError';
   }
 }
 
+const REASON_NOT_AUTHORIZED =
+  'secrets vault disabled without a valid internal-alpha-only authorization';
+const REASON_LATENT = 'secrets authorization variables set without the disabled vault';
+
 const DEV_JWT_SECRET = 'dev-only-insecure-jwt-secret-change-me-000';
 const DEV_SECRETS_MASTER_KEY = 'dev-only-insecure-secrets-master-key-change-me-000';
 
-export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
+/** The only value that authorizes the disabled vault: the scope is part of the value, so it cannot be confused with a flag. */
+export const SECRETS_DISABLED_AUTHORIZATION_VALUE = 'internal-alpha-only';
+/** The authorization is a time box: it may reach at most this many days past today (UTC). */
+export const SECRETS_DISABLED_MAX_DAYS = 90;
+const DAY_MS = 86_400_000;
+
+/** `YYYY-MM-DD` as UTC midnight (ms), or null unless it is a real calendar date (no truncation, no reinterpretation). */
+function calendarDateUtc(value: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = Date.UTC(y, mo - 1, d);
+  const back = new Date(t);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) {
+    return null;
+  }
+  return t;
+}
+
+/**
+ * R-1a. `SECRETS_PROVIDER=disabled` is a fail-closed vault, but it must never be reached by accident, so it needs an explicit authorization,
+ * in EVERY NODE_ENV: `SECRETS_DISABLED_AUTHORIZATION=internal-alpha-only` and `SECRETS_DISABLED_UNTIL=YYYY-MM-DD` (a real UTC calendar date,
+ * today .. today + 90 days). Any other provider must carry neither (no latent authorization that a later edit could switch on).
+ * Shared by `loadConfig` and the secrets module factory (defence in depth). Refusals never echo the supplied value. Fails closed on an unusable clock.
+ */
+export function assertSecretsDisabledAuthorization(
+  cfg: Pick<
+    AppConfig,
+    'SECRETS_PROVIDER' | 'SECRETS_DISABLED_AUTHORIZATION' | 'SECRETS_DISABLED_UNTIL'
+  >,
+  now: Date,
+): void {
+  const auth = cfg.SECRETS_DISABLED_AUTHORIZATION ?? '';
+  const until = cfg.SECRETS_DISABLED_UNTIL ?? '';
+  if (cfg.SECRETS_PROVIDER !== 'disabled') {
+    if (auth !== '' || until !== '') {
+      throw new EnvValidationError(
+        '  - SECRETS_DISABLED_AUTHORIZATION / SECRETS_DISABLED_UNTIL: only meaningful with SECRETS_PROVIDER=disabled; remove them',
+        REASON_LATENT,
+      );
+    }
+    return;
+  }
+  if (auth !== SECRETS_DISABLED_AUTHORIZATION_VALUE) {
+    throw new EnvValidationError(
+      `  - SECRETS_DISABLED_AUTHORIZATION: SECRETS_PROVIDER=disabled needs the explicit internal-alpha-only authorization (set it to "${SECRETS_DISABLED_AUTHORIZATION_VALUE}"); otherwise use SECRETS_PROVIDER=kms`,
+      REASON_NOT_AUTHORIZED,
+    );
+  }
+  const expiry = calendarDateUtc(until);
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const furthest = today + SECRETS_DISABLED_MAX_DAYS * DAY_MS;
+  if (expiry === null || !(expiry >= today) || !(expiry <= furthest)) {
+    throw new EnvValidationError(
+      `  - SECRETS_DISABLED_UNTIL: must be a real YYYY-MM-DD date (UTC) from today to at most ${SECRETS_DISABLED_MAX_DAYS} days ahead; renew it deliberately when the alpha is extended`,
+      REASON_NOT_AUTHORIZED,
+    );
+  }
+}
+
+export function loadConfig(
+  source: NodeJS.ProcessEnv = process.env,
+  now: Date = new Date(),
+): AppConfig {
   const parsed = envSchema.safeParse(source);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -136,6 +212,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new EnvValidationError(issues);
   }
   const cfg = parsed.data;
+  assertSecretsDisabledAuthorization(cfg, now);
   if (cfg.NODE_ENV === 'production') {
     if (cfg.AUTH_JWT_SECRET === DEV_JWT_SECRET) {
       throw new EnvValidationError(

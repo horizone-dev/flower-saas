@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
 import { PLATFORM_PERMISSIONS } from '@flower/permissions';
-import { createSaleWorld, type SaleWorld } from '../../verification/load-sale-world.js';
+import { bootApp, createSaleWorld, type SaleWorld } from '../../verification/load-sale-world.js';
 import type { SessionData } from '../../common/auth/session.types.js';
 
 /**
@@ -25,6 +25,11 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
 
   beforeAll(async () => {
     process.env['SECRETS_PROVIDER'] = 'disabled';
+    // R-1a: the disabled vault needs the explicit, time-boxed internal-alpha-only authorization
+    process.env['SECRETS_DISABLED_AUTHORIZATION'] = 'internal-alpha-only';
+    process.env['SECRETS_DISABLED_UNTIL'] = new Date(Date.now() + 30 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
     stack = await startTestStack({ services: ['postgres', 'redis'] });
     migrateTestDb(stack.postgres.url);
     w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2, {
@@ -62,6 +67,8 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
 
   afterAll(async () => {
     delete process.env['SECRETS_PROVIDER'];
+    delete process.env['SECRETS_DISABLED_AUTHORIZATION'];
+    delete process.env['SECRETS_DISABLED_UNTIL'];
     await w?.h.close();
     await w?.pool.end();
     await stack?.stop();
@@ -104,6 +111,50 @@ describe('R-1 — the disabled secrets vault fails closed', () => {
       'the pre-existing credential row must exist for this test to mean anything',
     ).toHaveLength(1);
     const r = await creds('GET', `/${rows[0]!.id}`);
+    expect(r.status).toBe(503);
+  });
+
+  it('R-1a: the REAL application module will not boot with an unauthorized, expired or over-long disabled vault (nothing is listening afterwards)', async () => {
+    const urls = { pg: stack.postgres.url, redis: stack.redis.url };
+    const day = 86_400_000;
+    const ymd = (offsetDays: number) =>
+      new Date(Date.now() + offsetDays * day).toISOString().slice(0, 10);
+    const keys = ['SECRETS_DISABLED_AUTHORIZATION', 'SECRETS_DISABLED_UNTIL'] as const;
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    const attempt = async (over: Partial<Record<(typeof keys)[number], string | undefined>>) => {
+      try {
+        for (const k of keys) {
+          const v = k in over ? over[k] : saved[k];
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+        return await bootApp(urls).then(
+          async (h) => {
+            await h.app.close(); // would be a FAILURE below: it booted
+            return 'booted';
+          },
+          (e: Error) => e.message,
+        );
+      } finally {
+        for (const k of keys) {
+          if (saved[k] === undefined) delete process.env[k];
+          else process.env[k] = saved[k];
+        }
+      }
+    };
+    expect(await attempt({ SECRETS_DISABLED_AUTHORIZATION: undefined })).toMatch(
+      /SECRETS_DISABLED_AUTHORIZATION/,
+    );
+    expect(await attempt({ SECRETS_DISABLED_AUTHORIZATION: 'true' })).toMatch(
+      /SECRETS_DISABLED_AUTHORIZATION/,
+    );
+    expect(await attempt({ SECRETS_DISABLED_UNTIL: undefined })).toMatch(/SECRETS_DISABLED_UNTIL/);
+    expect(await attempt({ SECRETS_DISABLED_UNTIL: ymd(-1) })).toMatch(/SECRETS_DISABLED_UNTIL/);
+    expect(await attempt({ SECRETS_DISABLED_UNTIL: ymd(91) })).toMatch(/SECRETS_DISABLED_UNTIL/);
+    // control: the same helper, with the real authorization, boots (so the refusals above are the authorization's doing)
+    expect(await attempt({})).toBe('booted');
+    // and the application that was booted in beforeAll still answers: the vault stays closed
+    const r = await creds('POST', '', { provider: 'stripe', mode: 'LIVE', secret: SECRET });
     expect(r.status).toBe(503);
   });
 

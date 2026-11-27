@@ -47,7 +47,7 @@ jobs:
           node -e "
           const r=()=>require('crypto').randomBytes(18).toString('hex');
           const d=(c)=>c.repeat(64); // well-formed but fake digests: the preflight now requires immutable application images, and this step only validates configuration
-          const e=['POS_HOST=pos.ci.flower-saas.dev','OWNER_HOST=owner.ci.flower-saas.dev','OPS_HOST=ops.ci.flower-saas.dev','ADMIN_CIDR=203.0.113.0/24','API_IMAGE=flower/api@sha256:'+d('1'),'POS_IMAGE=flower/pos-pwa@sha256:'+d('2'),'OWNER_IMAGE=flower/owner-web@sha256:'+d('3'),'MIGRATE_IMAGE=flower/migrate@sha256:'+d('4'),'POSTGRES_IMAGE='+require('fs').readFileSync('infra/staging/postgres-image.pin','utf8').split('\n').find(l=>l.trim()&&!l.startsWith('#')).trim(),'MIGRATION_MODE=check','POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
+          const e=['POS_HOST=pos.ci.flower-saas.dev','OWNER_HOST=owner.ci.flower-saas.dev','OPS_HOST=ops.ci.flower-saas.dev','ADMIN_CIDR=203.0.113.0/24','API_IMAGE=flower/api@sha256:'+d('1'),'POS_IMAGE=flower/pos-pwa@sha256:'+d('2'),'OWNER_IMAGE=flower/owner-web@sha256:'+d('3'),'MIGRATE_IMAGE=flower/migrate@sha256:'+d('4'),'POSTGRES_IMAGE='+require('fs').readFileSync('infra/staging/postgres-image.pin','utf8').split('\n').find(l=>l.trim()&&!l.startsWith('#')).trim(),'MIGRATION_MODE=check','POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled','SECRETS_DISABLED_AUTHORIZATION=internal-alpha-only','SECRETS_DISABLED_UNTIL='+new Date(Date.now()+30*864e5).toISOString().slice(0,10)];
           require('fs').writeFileSync('infra/staging/.env.ci',e.join('\n')+'\n')"
           chmod 600 infra/staging/.env.ci # the preflight (correctly) refuses an env file readable by group/others
           node infra/staging/preflight.mjs infra/staging/.env.ci
@@ -133,6 +133,24 @@ jobs:
           expect_refused "reviewed pin" "s|$PH|$OTHER|"
           # postgres on the reviewed pin, backup on something else (the first placeholder is the postgres service, the second the backup job)
           expect_refused "same image" "0,/$PH/s|$PH|$PIN|" "s|$PH|$OTHER|"
+      - name: R-1a - preflight refuses an unauthorized, expired or over-long disabled secrets vault (for the right reason)
+        run: node --test infra/staging/preflight-secrets.test.mjs
+      - name: R-1a - check-release refuses a compose file that hard-codes or drops the disabled-vault authorization
+        run: |
+          F=infra/staging/docker-compose.staging.yml
+          cp "$F" "$RUNNER_TEMP/compose.r1a.orig"
+          trap 'cp "$RUNNER_TEMP/compose.r1a.orig" "$F"' EXIT
+          expect_refused() { # <reason fragment> <sed expression>
+            cp "$RUNNER_TEMP/compose.r1a.orig" "$F"
+            sed -i "$2" "$F"
+            if out=$(node infra/staging/check-release.mjs infra/staging/.env.ci 2>&1); then echo "check-release accepted: $1"; exit 1; fi
+            echo "$out" | grep -q "$1" || { echo "refused for the wrong reason (wanted '$1'): $out"; exit 1; }
+          }
+          # a literal authorization would authorize the disabled vault for everyone, silently
+          expect_refused "SECRETS_DISABLED_AUTHORIZATION must be interpolated" 's|SECRETS_DISABLED_AUTHORIZATION: ${SECRETS_DISABLED_AUTHORIZATION:-}|SECRETS_DISABLED_AUTHORIZATION: internal-alpha-only|'
+          expect_refused "SECRETS_DISABLED_UNTIL must be interpolated" 's|SECRETS_DISABLED_UNTIL: ${SECRETS_DISABLED_UNTIL:-}|SECRETS_DISABLED_UNTIL: 2099-12-31|'
+          # dropping the variable from the API environment means the vault can never be authorized
+          expect_refused "api environment does not pass SECRETS_DISABLED_UNTIL" '/SECRETS_DISABLED_UNTIL: /d'
       - name: Start order, published ports, healthchecks and workflow references
         run: node infra/staging/check-release.mjs infra/staging/.env.ci
       - name: Caddyfiles are valid

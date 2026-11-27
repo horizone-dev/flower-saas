@@ -142,16 +142,23 @@ describe('loadConfig', () => {
       AUTH_JWT_SECRET: 'a-real-production-jwt-secret-value-32+',
       CORS_ORIGINS: 'https://pos.acme.com',
     };
-    expect(() => loadConfig({ ...prodBase, SECRETS_PROVIDER: 'disabled' })).not.toThrow();
+    // R-1a: "boots" now means "boots WITH the explicit internal-alpha-only authorization" (the matrix is in secrets-disabled-authorization.test.ts)
+    const alpha = {
+      SECRETS_PROVIDER: 'disabled',
+      SECRETS_DISABLED_AUTHORIZATION: 'internal-alpha-only',
+      SECRETS_DISABLED_UNTIL: new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10),
+    };
+    expect(() => loadConfig({ ...prodBase, ...alpha })).not.toThrow();
+    expect(() => loadConfig({ ...prodBase, SECRETS_PROVIDER: 'disabled' })).toThrow(
+      /SECRETS_DISABLED_AUTHORIZATION/,
+    );
     expect(() => loadConfig({ ...prodBase, SECRETS_PROVIDER: 'dev' })).toThrow(/SECRETS_PROVIDER/);
     // the other production guards still apply with the vault disabled
-    expect(() =>
-      loadConfig({ ...prodBase, SECRETS_PROVIDER: 'disabled', CORS_ORIGINS: '*' }),
-    ).toThrow(/CORS_ORIGINS/);
+    expect(() => loadConfig({ ...prodBase, ...alpha, CORS_ORIGINS: '*' })).toThrow(/CORS_ORIGINS/);
     expect(() =>
       loadConfig({
         ...prodBase,
-        SECRETS_PROVIDER: 'disabled',
+        ...alpha,
         AUTH_JWT_SECRET: 'dev-only-insecure-jwt-secret-change-me-000',
       }),
     ).toThrow(/AUTH_JWT_SECRET/);
