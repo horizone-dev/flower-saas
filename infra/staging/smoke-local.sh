@@ -24,7 +24,7 @@ node -e "
 const r=()=>require('crypto').randomBytes(18).toString('hex');
 const e=['POS_HOST=pos.flower.localhost','OWNER_HOST=owner.flower.localhost','OPS_HOST=ops.flower.localhost','ADMIN_CIDR=172.16.0.0/12','HTTP_PORT=8080','HTTPS_PORT=8443','CADDYFILE=./Caddyfile.local',
 'API_IMAGE=$API','POS_IMAGE=$POS','OWNER_IMAGE=$OWN','MIGRATE_IMAGE=$MIG','POSTGRES_IMAGE=$PGIMG','MIGRATION_MODE=check',
-'POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
+'POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled','SECRETS_DISABLED_AUTHORIZATION=internal-alpha-only','SECRETS_DISABLED_UNTIL='+new Date(Date.now()+30*864e5).toISOString().slice(0,10)];
 require('fs').writeFileSync('.env.smoke',e.join('\n')+'\n')"
 echo "== config"; node preflight.mjs .env.smoke --local >/dev/null && ok "preflight accepts the generated env" || bad "preflight"
 node check-release.mjs .env.smoke >/dev/null && ok "start order / ports / healthchecks / workflows" || bad "check-release"

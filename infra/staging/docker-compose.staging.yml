@@ -202,7 +202,10 @@ services:
       # explicit https origins only (production refuses localhost and *); single-origin POS does not need CORS but the guard still applies
       CORS_ORIGINS: https://${POS_HOST:?},https://${OWNER_HOST:?}
       # R-1: `disabled` needs the (unapproved) R-1 patch; `kms` is not wired. Until one exists the API refuses to boot in production mode.
-      SECRETS_PROVIDER: ${SECRETS_PROVIDER:?set SECRETS_PROVIDER (disabled requires patch R-1)}
+      SECRETS_PROVIDER: ${SECRETS_PROVIDER:?set SECRETS_PROVIDER (disabled requires patch R-1 + R-1a)}
+      # R-1a: the disabled vault is refused at boot unless BOTH are set (internal-alpha-only, a real UTC date within 90 days). Empty = not set.
+      SECRETS_DISABLED_AUTHORIZATION: ${SECRETS_DISABLED_AUTHORIZATION:-}
+      SECRETS_DISABLED_UNTIL: ${SECRETS_DISABLED_UNTIL:-}
       # Caddy is exactly ONE trusted proxy hop in front of the API (abuse limits read X-Forwarded-For only for this many hops)
       DEVICE_TRUSTED_PROXY_HOPS: '1'
     healthcheck:
