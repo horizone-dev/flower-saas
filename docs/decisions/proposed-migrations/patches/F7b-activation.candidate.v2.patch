@@ -1,0 +1,611 @@
+diff --git a/apps/api/src/modules/access/access.module.ts b/apps/api/src/modules/access/access.module.ts
+index dfdd83f..f501666 100644
+--- a/apps/api/src/modules/access/access.module.ts
++++ b/apps/api/src/modules/access/access.module.ts
+@@ -1,5 +1,9 @@
+ import { Module } from '@nestjs/common';
+ import { AuditModule } from '../../common/audit/audit.module.js';
++import { PlatformModule } from '../platform/platform.module.js';
++import { StaffOnboardingRepository } from './staff-onboarding.repository.js';
++import { StaffOnboardingService } from './staff-onboarding.service.js';
++import { StaffInviteController } from './staff-invite.controller.js';
+ import { AccessRepository } from './access.repository.js';
+ import { PolicyService } from './policy.service.js';
+ import { PolicyEngine } from './policy-engine.js';
+@@ -17,15 +21,17 @@ import { PlatformTenantAccessController } from './platform-tenant-access.control
+  * takes effect on the next request (no logout).
+  */
+ @Module({
+-  imports: [AuditModule],
++  imports: [AuditModule, PlatformModule],
+   providers: [
+     AccessRepository,
+     PolicyService,
+     PolicyEngine,
+     SessionAccessRefresher,
+     AccessAdminService,
++    StaffOnboardingRepository,
++    StaffOnboardingService,
+   ],
+-  controllers: [AccessController, PlatformTenantAccessController],
++  controllers: [AccessController, PlatformTenantAccessController, StaffInviteController],
+   exports: [PolicyService, PolicyEngine],
+ })
+ export class AccessModule {}
+diff --git a/apps/api/src/modules/access/staff-invite.controller.integration.test.ts b/apps/api/src/modules/access/staff-invite.controller.integration.test.ts
+new file mode 100644
+index 0000000..116a260
+--- /dev/null
++++ b/apps/api/src/modules/access/staff-invite.controller.integration.test.ts
+@@ -0,0 +1,413 @@
++import 'reflect-metadata';
++import { createHash } from 'node:crypto';
++import { afterAll, beforeAll, describe, expect, it } from 'vitest';
++import { Test } from '@nestjs/testing';
++import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
++import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
++import { PLATFORM_PERMISSIONS } from '@flower/permissions';
++import pg from 'pg';
++import { AppModule } from '../../app.module.js';
++import { AllExceptionsFilter } from '../../common/errors/all-exceptions.filter.js';
++import { installRequestContext } from '../../common/context/index.js';
++import { JwtService } from '../../common/auth/jwt.service.js';
++import { SessionStore } from '../../common/auth/session-store.js';
++import { assertEveryRouteDeclaresIntent } from '../../common/auth/route-coverage.js';
++import type { SessionData } from '../../common/auth/session.types.js';
++
++// F-7b — route A (POST /platform/tenants/:tenantId/staff-invites) against the REAL guard pipeline + real Postgres + Redis.
++// the repository-wide PUBLIC fixture password (also what the approved secret-scan exception for docs/decisions/*.patch covers)
++const FIXTURE_PASSWORD = 'CorrectHorseBatteryStaple9';
++const PLAN_V = '00000000-0000-7000-8000-000000190001';
++const PLATFORM_USER = '00000000-0000-7000-8000-000000190002';
++
++describe('F-7b staff-invite route (platform realm)', () => {
++  let stack: TestStack;
++  let app: NestFastifyApplication;
++  let jwt: JwtService;
++  let store: SessionStore;
++  let admin: pg.Client;
++  const A: { tenantId: string; companyId: string; branchId: string; ownerUserId: string } =
++    {} as never;
++  const B: { tenantId: string; companyId: string; branchId: string; ownerUserId: string } =
++    {} as never;
++  let ownerTokenA: string;
++
++  const sha = (s: string) => createHash('sha256').update(s).digest('hex');
++
++  function base(sessionId: string, realm: 'tenant' | 'platform'): SessionData {
++    return {
++      sessionId,
++      realm,
++      familyId: 'f',
++      tenantId: null,
++      userId: null,
++      platformUserId: null,
++      accountType: 'USER',
++      posTerminalId: null,
++      deviceId: null,
++      mfaLevel: 'NONE',
++      stepUpUntil: null,
++      createdAt: Date.now(),
++      expiresAt: Date.now() + 3_600_000,
++      revokedAt: null,
++      revokeReason: null,
++      impersonatorPlatformUserId: null,
++      access: null,
++    };
++  }
++  async function platformToken(
++    id: string,
++    o: { perms: string[]; stepUp: boolean },
++  ): Promise<string> {
++    const s = base(id, 'platform');
++    s.platformUserId = PLATFORM_USER;
++    s.accountType = 'PLATFORM';
++    s.mfaLevel = o.stepUp ? 'STEP_UP' : 'MFA';
++    s.stepUpUntil = o.stepUp ? Date.now() + 600_000 : null;
++    s.access = {
++      effectivePermissions: o.perms,
++      companyScope: 'ALL',
++      branchScope: 'ALL',
++      perBranchOverlay: {},
++      entitledModules: [],
++      planKey: null,
++    };
++    await store.set(s);
++    return jwt.sign({ sub: PLATFORM_USER, sid: s.sessionId, aud: 'platform' });
++  }
++  async function tenantOwnerToken(id: string, t: typeof A): Promise<string> {
++    const s = base(id, 'tenant');
++    s.tenantId = t.tenantId;
++    s.userId = t.ownerUserId;
++    s.accountType = 'OWNER';
++    s.mfaLevel = 'STEP_UP';
++    s.stepUpUntil = Date.now() + 600_000;
++    s.access = {
++      effectivePermissions: [...PLATFORM_PERMISSIONS],
++      companyScope: 'ALL',
++      branchScope: 'ALL',
++      perBranchOverlay: {},
++      entitledModules: [],
++      planKey: null,
++    };
++    await store.set(s);
++    return jwt.sign({ sub: t.ownerUserId, sid: s.sessionId, aud: 'tenant', tid: t.tenantId });
++  }
++  const invite = (tenantId: string, body: unknown, token?: string) =>
++    app.inject({
++      method: 'POST',
++      url: `/v1/platform/tenants/${tenantId}/staff-invites`,
++      payload: body as Record<string, unknown>,
++      headers: token ? { authorization: `Bearer ${token}` } : {},
++    });
++  const goodBody = (t: typeof A, email: string, roleKey = 'cashier') => ({
++    email,
++    roleKey,
++    companyIds: [t.companyId],
++    branchIds: [t.branchId],
++  });
++
++  async function provision(slug: string, ownerEmail: string): Promise<typeof A> {
++    const r = await app.inject({
++      method: 'POST',
++      url: '/v1/platform/tenants',
++      payload: {
++        slug,
++        name: `${slug} FZE`,
++        region: 'AE',
++        companyCountryCode: 'AE',
++        businessTypeKey: 'CUSTOM',
++        planVersionId: PLAN_V,
++        ownerEmail,
++      },
++      headers: {
++        authorization: `Bearer ${await platformToken(`prov-${slug}`, { perms: [...PLATFORM_PERMISSIONS], stepUp: true })}`,
++        'idempotency-key': `prov-${slug}`,
++      },
++    });
++    expect(r.statusCode).toBe(201);
++    const j = r.json();
++    return {
++      tenantId: j.tenantId,
++      companyId: j.companyId,
++      branchId: j.branchId,
++      ownerUserId: j.ownerUserId,
++    };
++  }
++
++  beforeAll(async () => {
++    stack = await startTestStack({ services: ['postgres', 'redis'] });
++    migrateTestDb(stack.postgres.url);
++    admin = new pg.Client({ connectionString: stack.postgres.url });
++    await admin.connect();
++    await admin.query(`
++      INSERT INTO plan (id, key, name, "updatedAt") VALUES ('00000000-0000-7000-8000-000000190000', 'starter', 'Starter', now());
++      INSERT INTO plan_version (id, "planId", version, status, "updatedAt") VALUES ('${PLAN_V}', '00000000-0000-7000-8000-000000190000', 1, 'PUBLISHED', now());
++      INSERT INTO limit_default ("planVersionId", "limitKey", value) VALUES ('${PLAN_V}', 'max_branches', 5), ('${PLAN_V}', 'max_users', 20), ('${PLAN_V}', 'max_sessions_per_user', 20);
++      INSERT INTO platform_user (id, email, name, "updatedAt") VALUES ('${PLATFORM_USER}', 'admin@flower.test', 'Platform Admin', now());
++      INSERT INTO currency (code, exponent, symbol, "nameEn", "nameAr") VALUES ('AED', 2, 'AED', 'UAE Dirham', 'AED-ar');
++      INSERT INTO country (code, "nameEn", "nameAr", region, "defaultCurrencyCode", "weekendModel", active, "updatedAt") VALUES ('AE', 'United Arab Emirates', 'UAE-ar', 'gcc', 'AED', 'SAT_SUN', true, now());
++      INSERT INTO business_type_template (key, version, "nameEn", "nameAr", status, "updatedAt") VALUES ('CUSTOM', 1, 'Custom', 'x', 'ACTIVE', now());
++      INSERT INTO business_type_template_capability ("templateKey", "capabilityKey", enabled, "updatedAt") VALUES ('CUSTOM','strategy.stocked',true,now()),('CUSTOM','branch_pricing',true,now()),('CUSTOM','channel.pos',true,now());
++    `);
++    process.env['DATABASE_URL'] = stack.postgres.url;
++    process.env['PLATFORM_DATABASE_URL'] = stack.postgres.url;
++    process.env['REDIS_URL'] = stack.redis.url;
++    process.env['AUTH_JWT_SECRET'] = 'integration-test-jwt-secret-0000000000';
++    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
++    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
++    app.setGlobalPrefix('v1', { exclude: ['healthz', 'readyz'] });
++    app.useGlobalFilters(new AllExceptionsFilter());
++    installRequestContext(app.getHttpAdapter().getInstance());
++    await app.init();
++    await app.getHttpAdapter().getInstance().ready();
++    jwt = app.get(JwtService);
++    store = app.get(SessionStore);
++    Object.assign(A, await provision('f7a', 'owner@f7a.test'));
++    Object.assign(B, await provision('f7b', 'owner@f7b.test'));
++    ownerTokenA = await tenantOwnerToken('f7-owner-a', A);
++  }, 300_000);
++
++  afterAll(async () => {
++    await admin?.end();
++    await app?.close();
++    await stack?.stop();
++  });
++
++  const opTok = (id: string, stepUp = true, perms: string[] = [...PLATFORM_PERMISSIONS]) =>
++    platformToken(id, { perms, stepUp });
++
++  it('R0 the app compiles with the route registered and every route still declares intent', () => {
++    expect(() => assertEveryRouteDeclaresIntent(app)).not.toThrow();
++  });
++  it('R1 no token → 401', async () => {
++    expect((await invite(A.tenantId, goodBody(A, 'x1@f7a.test'))).statusCode).toBe(401);
++  });
++  it('R2 a TENANT-realm token (even an owner holding every key) cannot use the platform route', async () => {
++    const r = await invite(A.tenantId, goodBody(A, 'x2@f7a.test'), ownerTokenA);
++    expect(r.statusCode).toBe(401);
++  });
++  it('R3 a platform user WITHOUT platform:tenant_users:manage → 403', async () => {
++    const r = await invite(
++      A.tenantId,
++      goodBody(A, 'x3@f7a.test'),
++      await opTok('op-noperm', true, ['platform:tenants:manage']),
++    );
++    expect(r.statusCode).toBe(403);
++  });
++  it('R4 platform user with the permission but NO step-up → refused', async () => {
++    const r = await invite(A.tenantId, goodBody(A, 'x4@f7a.test'), await opTok('op-nostep', false));
++    expect(r.statusCode).toBe(403);
++    expect(r.json().error.code).toBe('STEP_UP_REQUIRED');
++  });
++  it('R5 strict body: unknown key, owner/admin role, empty scope, bad uuid → rejected, nothing created', async () => {
++    const tok = await opTok('op-ok-5');
++    const before = Number(
++      (await admin.query(`SELECT count(*) FROM "user" WHERE "tenantId"=$1`, [A.tenantId])).rows[0]
++        .count,
++    );
++    const bad = [
++      { ...goodBody(A, 'x5a@f7a.test'), isOwner: true },
++      goodBody(A, 'x5b@f7a.test', 'owner'),
++      goodBody(A, 'x5c@f7a.test', 'admin'),
++      { ...goodBody(A, 'x5d@f7a.test'), companyIds: [] },
++      { ...goodBody(A, 'x5e@f7a.test'), branchIds: ['not-a-uuid'] },
++      { ...goodBody(A, 'x5f@f7a.test'), tenantId: B.tenantId },
++    ];
++    for (const b of bad) {
++      const r = await invite(A.tenantId, b, tok);
++      expect([400, 422]).toContain(r.statusCode);
++    }
++    const after = Number(
++      (await admin.query(`SELECT count(*) FROM "user" WHERE "tenantId"=$1`, [A.tenantId])).rows[0]
++        .count,
++    );
++    expect(after).toBe(before);
++  });
++
++  let invited: { userId: string; setPasswordToken: string };
++  it('R6 success: 201, Cache-Control no-store, one role, explicit scope, token hashed, audit by the platform actor, token absent from audit', async () => {
++    const r = await invite(A.tenantId, goodBody(A, 'Cashier.One@F7A.test'), await opTok('op-ok-6'));
++    expect(r.statusCode).toBe(201);
++    expect(r.headers['cache-control']).toBe('no-store');
++    invited = r.json();
++    expect(invited.setPasswordToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
++    const roles = (
++      await admin.query(
++        `SELECT r.key FROM user_role ur JOIN role r ON r.id=ur."roleId" WHERE ur."userId"=$1`,
++        [invited.userId],
++      )
++    ).rows;
++    expect(roles).toEqual([{ key: 'cashier' }]);
++    const scope = (
++      await admin.query(
++        `SELECT "companyScopeAll","branchScopeAll","companyIds","branchIds" FROM data_scope_assignment WHERE "userId"=$1`,
++        [invited.userId],
++      )
++    ).rows[0];
++    expect(scope).toMatchObject({
++      companyScopeAll: false,
++      branchScopeAll: false,
++      companyIds: [A.companyId],
++      branchIds: [A.branchId],
++    });
++    const tok = (
++      await admin.query(
++        `SELECT "tokenHash", "createdByPlatformUserId" FROM set_password_token WHERE "userId"=$1`,
++        [invited.userId],
++      )
++    ).rows[0];
++    expect(tok.tokenHash).toBe(sha(invited.setPasswordToken));
++    expect(tok.createdByPlatformUserId).toBe(PLATFORM_USER);
++    const audit = (
++      await admin.query(
++        `SELECT action, "actorPlatformUserId"::text AS a, before::text || after::text AS j FROM audit_log WHERE "resourceId"=$1 ORDER BY action`,
++        [invited.userId],
++      )
++    ).rows;
++    expect(audit.map((x) => x.action)).toEqual([
++      'user.created',
++      'user.roles_changed',
++      'user.scope_changed',
++    ]);
++    expect(audit.every((x) => x.a === PLATFORM_USER)).toBe(true);
++    expect(JSON.stringify(audit)).not.toContain(invited.setPasswordToken);
++    const email = (await admin.query(`SELECT email FROM "user" WHERE id=$1`, [invited.userId]))
++      .rows[0].email;
++    expect(email).toBe('cashier.one@f7a.test');
++  });
++  it('R7 the invited cashier sets a password (single use), logs in with NO MFA, and holds only cashier rights', async () => {
++    const sp = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/set-password',
++      payload: { token: invited.setPasswordToken, newPassword: FIXTURE_PASSWORD },
++    });
++    expect(sp.statusCode).toBeLessThan(300);
++    const credentialHash = async () =>
++      (
++        await admin.query(`SELECT hash FROM credential WHERE "userId"=$1 AND kind='PASSWORD'`, [
++          invited.userId,
++        ])
++      ).rows[0].hash as string;
++    const hashBefore = await credentialHash();
++    const again = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/set-password',
++      payload: { token: invited.setPasswordToken, newPassword: FIXTURE_PASSWORD },
++    });
++    expect(again.statusCode).toBeGreaterThanOrEqual(400);
++    // the same fixture password is used twice on purpose: a salted hash that did NOT change proves the second use of the token changed nothing
++    expect(await credentialHash()).toBe(hashBefore);
++    const login = await app.inject({
++      method: 'POST',
++      url: '/v1/auth/login',
++      payload: {
++        workspaceSlug: 'f7a',
++        email: 'cashier.one@f7a.test',
++        password: FIXTURE_PASSWORD,
++      },
++    });
++    expect(login.statusCode).toBe(200);
++    const lj = login.json();
++    expect(lj.status).not.toBe('mfa_required');
++    const acc = await app.inject({
++      method: 'GET',
++      url: '/v1/me/access',
++      headers: { authorization: `Bearer ${lj.accessToken}` },
++    });
++    expect(acc.statusCode).toBe(200);
++    const perms: string[] = acc.json().effectivePermissions ?? acc.json().permissions ?? [];
++    expect(perms).not.toContain('users:manage');
++    expect(perms).not.toContain('roles:manage');
++    const roles = await app.inject({
++      method: 'GET',
++      url: '/v1/access/roles',
++      headers: { authorization: `Bearer ${lj.accessToken}` },
++    });
++    expect(roles.statusCode).toBe(403);
++    const plat = await app.inject({
++      method: 'POST',
++      url: `/v1/platform/tenants/${A.tenantId}/staff-invites`,
++      payload: goodBody(A, 'y@f7a.test'),
++      headers: { authorization: `Bearer ${lj.accessToken}` },
++    });
++    expect([401, 403]).toContain(plat.statusCode);
++  });
++  it('R8 cross-tenant: tenant B path with tenant A ids (and the reverse) → 422, nothing created in either tenant', async () => {
++    const tok = await opTok('op-ok-8');
++    const count = async (t: string) =>
++      Number(
++        (await admin.query(`SELECT count(*) FROM "user" WHERE "tenantId"=$1`, [t])).rows[0].count,
++      );
++    const [a0, b0] = [await count(A.tenantId), await count(B.tenantId)];
++    const r1 = await invite(B.tenantId, goodBody(A, 'x8a@f7b.test'), tok);
++    const r2 = await invite(A.tenantId, goodBody(B, 'x8b@f7a.test'), tok);
++    const r3 = await invite(
++      A.tenantId,
++      { ...goodBody(A, 'x8c@f7a.test'), branchIds: [A.branchId, B.branchId] },
++      tok,
++    );
++    expect([r1.statusCode, r2.statusCode, r3.statusCode]).toEqual([422, 422, 422]);
++    expect(r1.json().error.code).toBe('SCOPE_INVALID');
++    expect([await count(A.tenantId), await count(B.tenantId)]).toEqual([a0, b0]);
++  });
++  it('R10 a FOREIGN company id listed ALONGSIDE valid own company + branch is refused (kills the missing-tenant-filter mutant)', async () => {
++    const tok = await opTok('op-ok-10');
++    const before = Number(
++      (await admin.query(`SELECT count(*) FROM "user" WHERE "tenantId"=$1`, [A.tenantId])).rows[0]
++        .count,
++    );
++    const r = await invite(
++      A.tenantId,
++      {
++        email: 'x10@f7a.test',
++        roleKey: 'cashier',
++        companyIds: [A.companyId, B.companyId],
++        branchIds: [A.branchId],
++      },
++      tok,
++    );
++    expect(r.statusCode).toBe(422);
++    expect(r.json().error.code).toBe('SCOPE_INVALID');
++    const after = Number(
++      (await admin.query(`SELECT count(*) FROM "user" WHERE "tenantId"=$1`, [A.tenantId])).rows[0]
++        .count,
++    );
++    expect(after).toBe(before);
++  });
++  it('R9 cross-COMPANY inside one tenant: a branch of company 2 is refused when only company 1 is listed', async () => {
++    const co2 = (await admin.query(`SELECT * FROM company WHERE id=$1`, [A.companyId])).rows[0];
++    const cols = Object.keys(co2).filter((k) => !['id'].includes(k));
++    // clone company 1 under a new id/legal key, then a branch of it
++    const newId = (await admin.query(`SELECT uuidv7() AS id`)).rows[0].id;
++    const vals = cols.map((k) => (k === 'legalName' || k === 'name' ? `${co2[k]} 2` : co2[k]));
++    await admin.query(
++      `INSERT INTO company (id, ${cols.map((c) => `"${c}"`).join(',')}) VALUES ($1, ${cols.map((_, i) => `$${i + 2}`).join(',')})`,
++      [newId, ...vals],
++    );
++    const br = (
++      await admin.query(
++        `INSERT INTO branch (id,"tenantId","companyId",name,"updatedAt") VALUES (uuidv7(),$1,$2,'C2 branch',now()) RETURNING id`,
++        [A.tenantId, newId],
++      )
++    ).rows[0].id;
++    const r = await invite(
++      A.tenantId,
++      { email: 'x9@f7a.test', roleKey: 'cashier', companyIds: [A.companyId], branchIds: [br] },
++      await opTok('op-ok-9'),
++    );
++    expect(r.statusCode).toBe(422);
++    expect(r.json().error.code).toBe('SCOPE_INVALID');
++    const ok = await invite(
++      A.tenantId,
++      {
++        email: 'x9ok@f7a.test',
++        roleKey: 'sales',
++        companyIds: [A.companyId, newId],
++        branchIds: [A.branchId, br],
++      },
++      await opTok('op-ok-9b'),
++    );
++    expect(ok.statusCode).toBe(201);
++  });
++});
+diff --git a/apps/api/src/modules/access/staff-invite.controller.ts b/apps/api/src/modules/access/staff-invite.controller.ts
+new file mode 100644
+index 0000000..ba7872d
+--- /dev/null
++++ b/apps/api/src/modules/access/staff-invite.controller.ts
+@@ -0,0 +1,43 @@
++// DRAFT — NOT in apps/api/src, NOT registered, NOT approved. F-7 route for "create a staff user + one-time invite".
++// To enable (after owner + security approval): copy to apps/api/src/modules/access/staff-invite.controller.ts, register the controller and the
++// three providers (StaffOnboardingRepository, StaffOnboardingService + LimitService access) in AccessModule, and add a cross-tenant probe + a route
++// inventory pin. NO new permission and NO migration: it reuses `platform:tenant_users:manage` (step-up) and the existing set_password_token table.
++import { Body, Controller, Header, Param, Post } from '@nestjs/common';
++import { z } from 'zod';
++import { PlatformRealm } from '../../common/auth/pipeline.decorators.js';
++import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
++import { ZodBody } from '../../common/validation/zod-body.js';
++import { getContext } from '../../common/context/index.js';
++import { DomainError } from '../../common/errors/domain-error.js';
++import { StaffOnboardingService } from './staff-onboarding.service.js';
++
++const inviteStaffSchema = z
++  .object({
++    email: z.string().min(3).max(254),
++    roleKey: z.enum(['cashier', 'sales']),
++    companyIds: z.array(z.string().uuid()).min(1).max(20),
++    branchIds: z.array(z.string().uuid()).min(1).max(20),
++  })
++  .strict();
++
++@Controller('platform/tenants/:tenantId')
++@PlatformRealm()
++export class StaffInviteController {
++  constructor(private readonly staff: StaffOnboardingService) {}
++
++  /**
++   * The raw invite token is in the response BODY ONCE (never logged, never cached by a proxy). The operator hands the link to the new
++   * cashier, who sets a password through the existing `POST /v1/auth/set-password`. 24 h, single use.
++   */
++  @Post('staff-invites')
++  @RequirePermission('platform:tenant_users:manage')
++  @Header('Cache-Control', 'no-store')
++  async invite(
++    @Param('tenantId') tenantId: string,
++    @Body(new ZodBody(inviteStaffSchema)) dto: z.infer<typeof inviteStaffSchema>,
++  ) {
++    const actor = getContext()?.platformUserId ?? null;
++    if (!actor) throw new DomainError('ACTOR_REQUIRED', 'platform actor required', 401);
++    return this.staff.inviteStaff({ tenantId, ...dto, actorPlatformUserId: actor });
++  }
++}
+diff --git a/apps/api/src/tooling/production-bootstrap.integration.test.ts b/apps/api/src/tooling/production-bootstrap.integration.test.ts
+index cab1cd6..acd90bc 100644
+--- a/apps/api/src/tooling/production-bootstrap.integration.test.ts
++++ b/apps/api/src/tooling/production-bootstrap.integration.test.ts
+@@ -271,20 +271,37 @@ describe('production bootstrap procedure', () => {
+     expect(step.statusCode, step.payload).toBeLessThan(300);
+   });
+ 
+-  it('pilot cashier onboarding stays BLOCKED: the F-7 invite route is not active (404), and no cashier exists', async () => {
+-    for (const url of [`/platform/tenants/${tenantId}/staff-invites`, '/org/staff-invites']) {
+-      const r = await post(
+-        url,
+-        { email: 'cashier@pilot-flowers.example', roleKey: 'cashier' },
+-        opToken,
+-      );
+-      expect(r.statusCode, url).toBe(404);
+-    }
++  it('pilot cashier onboarding (F-7b): the operator invites ONE cashier, who sets a password and logs in; the owner self-service route (route B) does not exist', async () => {
++    const company = (
++      await q<{ id: string }>(`SELECT id FROM company WHERE "tenantId" = $1`, [tenantId])
++    )[0]!.id;
++    const branch = (
++      await q<{ id: string }>(`SELECT id FROM branch WHERE "tenantId" = $1`, [tenantId])
++    )[0]!.id;
++    const email = 'cashier@pilot-flowers.example';
++    const invited = await post(
++      `/platform/tenants/${tenantId}/staff-invites`,
++      { email, roleKey: 'cashier', companyIds: [company], branchIds: [branch] },
++      opToken,
++    );
++    expect(invited.statusCode, invited.payload).toBe(201);
++    const { setPasswordToken } = invited.json() as { setPasswordToken: string };
++    const password = `Pilot-${randomUUID()}`;
++    const set = await post('/auth/set-password', {
++      token: setPasswordToken,
++      newPassword: password,
++    });
++    expect(set.statusCode, set.payload).toBeLessThan(300);
++    const login = await post('/auth/login', { workspaceSlug: slug, email, password });
++    expect(login.statusCode, login.payload).toBe(200);
++    // route B (a tenant-realm route for the owner) is a separate decision and must stay absent
++    const routeB = await post('/org/staff-invites', { email, roleKey: 'cashier' }, opToken);
++    expect(routeB.statusCode).toBe(404);
+     expect(
+       await q(
+         `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur."roleId" WHERE r.key = 'cashier' AND ur."tenantId" = $1`,
+         [tenantId],
+       ),
+-    ).toHaveLength(0);
++    ).toHaveLength(1);
+   });
+ });
+diff --git a/apps/pos-pwa/e2e/run.mjs b/apps/pos-pwa/e2e/run.mjs
+index 30d119e..eba9161 100644
+--- a/apps/pos-pwa/e2e/run.mjs
++++ b/apps/pos-pwa/e2e/run.mjs
+@@ -220,35 +220,27 @@ try {
+     `UPDATE company SET trn = '100123456700003', "registeredAddress" = 'Shop 4, Rose Street, Dubai, UAE' WHERE id = $1`,
+     [w.a.companyId],
+   );
+-  // ── a cashier with a real password, scoped to this company and branch (staff creation has no API route yet) ──
++  // ── a cashier created through the REAL operator route (F-7b: POST /platform/tenants/:id/staff-invites), NOT by SQL: the operator invites, the cashier
++  // sets a password with the one-time token, and the cashier's rights (including catalog:view) come from the approved role template (F-1a). ──
+   const slug = (await q(`SELECT slug FROM tenant WHERE id = $1`, [w.a.tenantId]))[0].slug;
+   const email = `cashier-${randomUUID().slice(0, 6)}@pilot.test`;
+   const password = `Pilot-Cashier-${randomUUID()}`;
+-  const userId = randomUUID();
+-  await q(
+-    `INSERT INTO "user" (id, "tenantId", "accountType", email, status, "updatedAt") VALUES ($1,$2,'USER',$3,'ACTIVE',now())`,
+-    [userId, w.a.tenantId, email],
+-  );
+-  await q(
+-    `INSERT INTO user_role ("tenantId","userId","roleId") SELECT $1,$2,id FROM role WHERE "tenantId"=$1 AND key='cashier'`,
+-    [w.a.tenantId, userId],
+-  );
+-  // FINDING (owner decision): the shipped `cashier` system role has NO `catalog:view`, so a cashier cannot list products. The role template is
+-  // NOT changed here (a template change needs a permissions migration + S0b approval); the rehearsal grants it to THIS rehearsal tenant's
+-  // cashier role only, to prove the rest of the journey.
+-  await q(
+-    `INSERT INTO role_permission ("tenantId","roleId","permissionKey") SELECT $1,id,'catalog:view' FROM role WHERE "tenantId"=$1 AND key='cashier' ON CONFLICT DO NOTHING`,
+-    [w.a.tenantId],
+-  );
+-  await q(
+-    `INSERT INTO data_scope_assignment ("tenantId","userId","companyScopeAll","companyIds","branchScopeAll","branchIds","updatedAt") VALUES ($1,$2,false,$3,false,$4,now())`,
+-    [w.a.tenantId, userId, [w.a.companyId], [w.a.branches[0]]],
+-  );
++  const operatorId = (await q(`SELECT id FROM platform_user ORDER BY "createdAt" LIMIT 1`))[0].id;
++  // the sale-world seeder keeps its stepped-up platform session ('g-platform') in the session store; sign a token for it
++  const operatorToken = await w.h.jwt.sign({ sub: operatorId, sid: 'g-platform', aud: 'platform' });
++  const invite = await w.req('POST', `/platform/tenants/${w.a.tenantId}/staff-invites`, operatorToken, {
++    email,
++    roleKey: 'cashier',
++    companyIds: [w.a.companyId],
++    branchIds: [w.a.branches[0]],
++  });
++  if (invite.status !== 201) throw new Error(`cashier invite failed ${invite.status} ${JSON.stringify(invite.body)}`);
++  const setPw = await w.req('POST', '/auth/set-password', null, {
++    token: invite.body.setPasswordToken,
++    newPassword: password,
++  });
++  if (setPw.status >= 300) throw new Error(`cashier set-password failed ${setPw.status} ${JSON.stringify(setPw.body)}`);
+   const argon = { memoryCost: 19456, timeCost: 2, parallelism: 1 };
+-  await q(
+-    `INSERT INTO credential ("tenantId","userId",kind,hash,"updatedAt") VALUES ($1,$2,'PASSWORD',$3,now())`,
+-    [w.a.tenantId, userId, await hash(password, argon)],
+-  );
+   // ── a MANAGER with a real password, same company + branch: applying a customer advance is a manager authority, not a cashier one ──
+   const managerEmail = `manager-${randomUUID().slice(0, 6)}@pilot.test`;
+   const managerPassword = `Pilot-Manager-${randomUUID()}`;

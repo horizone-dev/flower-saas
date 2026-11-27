@@ -1,0 +1,48 @@
+# LOCAL SMOKE ONLY: certificates from Caddy's internal CA (browsers/curl will not trust them without -k).
+# Identical to ./Caddyfile except every site has `tls internal`. Keep the two files in sync.
+
+(secure_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+	request_body {
+		max_size 2MB
+	}
+}
+
+{$POS_HOST} {
+	tls internal
+	import secure_headers
+	@platform path /v1/platform/* /v1/platform
+	respond @platform 404
+	reverse_proxy pos:3000
+}
+
+{$OWNER_HOST} {
+	tls internal
+	import secure_headers
+	reverse_proxy owner-web:3000
+}
+
+{$OPS_HOST} {
+	tls internal
+	import secure_headers
+	@operators remote_ip {$ADMIN_CIDR}
+	handle @operators {
+		@platformApi path /v1/platform/*
+		handle @platformApi {
+			reverse_proxy api:3001
+		}
+		handle {
+			respond 404
+		}
+	}
+	handle {
+		respond 403
+	}
+}

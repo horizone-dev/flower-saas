@@ -1,0 +1,434 @@
+import 'reflect-metadata';
+import { randomUUID } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import pg from 'pg';
+import { Test } from '@nestjs/testing';
+import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
+// White-box rehearsal: repositories are driven under a hand-built request context over a Prisma client built for the DISPOSABLE database.
+// eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
+import { createPrismaClient, type PrismaClient, type ScopedTx } from '@flower/db';
+import { RequestContext, runWithContext } from '../../common/context/index.js';
+import { DbService } from '../../common/data/index.js';
+import { AUDITABLE_ACTIONS, isSecurityEventAction } from '../../common/audit/actions.js';
+import { AuditWriter } from '../../common/audit/audit.writer.js';
+import { PlatformExpenseAudit } from './expense-audit.adapter.js';
+import {
+  EXPENSE_AUDIT_POLICY,
+  PROPOSED_EXPENSE_AUDIT_ACTIONS,
+  auditRequired,
+  type ExpenseAuditPolicy,
+} from './expense-audit.js';
+import { ExpenseRepository } from './expense.repository.js';
+import { OtherIncomeRepository } from './other-income.repository.js';
+import { ExpenseService, type CreateExpenseRequest } from './expense.service.js';
+import { OtherIncomeService } from './other-income.service.js';
+import { draftSql, seedExpenseWorld, type ExpenseWorld } from './expenses-test-support.js';
+
+/**
+ * AUDIT-REGISTRATION REHEARSAL (registered state). This file is a `.txt` DRAFT in the approval bundle; the rehearsal script copies it into an ISOLATED copy of the tree where the
+ * registry patch AND the pin-amendment patch are applied. Here the REAL `actions.ts` (patched) is the registry — nothing is added at run time — and the audit policy is REQUIRED,
+ * activated through REAL Nest dependency injection. Disposable PostgreSQL only. Nothing in the real tree changes.
+ */
+const EIGHT = Object.keys(PROPOSED_EXPENSE_AUDIT_ACTIONS);
+const PERMS = ['expense:view', 'expense:create', 'expense:edit', 'expense:approve', 'expense:pay', 'income:view', 'income:create'] as const;
+const EVIDENCE_OUT = process.env['AUDIT_EVIDENCE_OUT'];
+const HARDENED = Boolean(process.env['AUDIT_LOG_HARDENED']);
+const evidence = (k: string, v: unknown): void => {
+  if (EVIDENCE_OUT) appendFileSync(EVIDENCE_OUT, `${JSON.stringify({ k, v })}\n`);
+};
+
+interface AuditRow {
+  id: string;
+  action: string;
+  resourceType: string;
+  resourceId: string | null;
+  tenantId: string | null;
+  companyId: string | null;
+  branchId: string | null;
+  actorUserId: string | null;
+  actorAccountType: string;
+  impersonatorPlatformUserId: string | null;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+}
+
+describe('REHEARSAL — expense audit REGISTERED + REQUIRED, real AuditWriter, real Nest DI, disposable PostgreSQL', () => {
+  let stack: TestStack;
+  let pool: pg.Pool;
+  let prisma: PrismaClient;
+  let db: DbService;
+  let w: ExpenseWorld;
+  let svc: ExpenseService;
+  let inc: OtherIncomeService;
+  let repo: ExpenseRepository;
+  let writer: AuditWriter;
+  let CAT = '';
+
+  interface Who {
+    user?: string;
+    tenant?: string;
+    branch?: 'ALL' | readonly string[];
+    company?: 'ALL' | readonly string[];
+    accountType?: 'OWNER' | 'USER';
+    impersonator?: string;
+  }
+  const as = <T>(who: Who, fn: () => Promise<T>): Promise<T> =>
+    runWithContext(
+      new RequestContext({
+        requestId: randomUUID(),
+        tenantId: who.tenant ?? w.TA,
+        userId: who.user ?? w.U1,
+        accountType: who.accountType ?? 'USER',
+        companyScope: who.company ?? 'ALL',
+        branchScope: who.branch ?? 'ALL',
+        effectivePermissions: PERMS,
+        ...(who.impersonator ? { impersonatorPlatformUserId: who.impersonator } : {}),
+      }),
+      fn,
+    );
+  const q = async (text: string, params: unknown[] = []): Promise<Record<string, unknown>[]> => (await pool.query(text, params)).rows as Record<string, unknown>[];
+  const num = async (sql: string, params: unknown[] = []): Promise<number> => Number((await q(sql, params))[0]!['n']);
+  const key = (): string => `k-${randomUUID()}`;
+  const U1 = (): Who => ({ user: w.U1 });
+  const U2 = (): Who => ({ user: w.U2 });
+  const U3 = (): Who => ({ user: w.U3 });
+  const req = (over: Partial<CreateExpenseRequest> = {}): CreateExpenseRequest => ({
+    companyId: w.CO_A,
+    branchId: w.BR_A,
+    posTerminalId: null,
+    registerSessionId: null,
+    categoryId: CAT,
+    amountMinor: 12_500n,
+    currency: 'AED',
+    taxAmountMinor: null,
+    taxCode: null,
+    paymentMethod: 'CARD',
+    payeeKind: 'OTHER',
+    payeeId: null,
+    expenseDate: '2026-11-17',
+    description: 'Van fuel',
+    reference: null,
+    idempotencyKey: key(),
+    ...over,
+  });
+  const auditOf = async (id: string): Promise<AuditRow[]> => (await q(`SELECT * FROM audit_log WHERE "resourceId" = $1 ORDER BY "at", "id"`, [id])) as unknown as AuditRow[];
+  const proposedCount = (): Promise<number> =>
+    num(`SELECT count(*)::int AS n FROM audit_log WHERE action LIKE 'expense_record.%' OR action LIKE 'expense_category.%' OR action LIKE 'other_income.%'`);
+  const statusOf = async (id: string): Promise<string> => (await q(`SELECT status FROM expense WHERE id=$1`, [id]))[0]!['status'] as string;
+  const eventsOf = async (id: string): Promise<string[]> => (await q(`SELECT action FROM expense_event WHERE "expenseId"=$1 ORDER BY seq`, [id])).map((r) => r['action'] as string);
+  async function create(over: Partial<CreateExpenseRequest> = {}): Promise<string> {
+    const r = await as(U1(), () => svc.createExpense(req(over)));
+    if (r.kind !== 'CREATED') throw new Error('not created');
+    return r.expense.id;
+  }
+  async function submitted(): Promise<string> {
+    const id = await create();
+    await as(U1(), () => svc.submit(id, key()));
+    return id;
+  }
+
+  beforeAll(async () => {
+    stack = await startTestStack({ services: ['postgres'] });
+    migrateTestDb(stack.postgres.url);
+    pool = new pg.Pool({ connectionString: stack.postgres.url, max: 24 });
+    w = await seedExpenseWorld(pool);
+    await pool.query(draftSql('DRAFT-E1-expenses-and-other-income.sql'));
+    // AUDIT_LOG_HARDENED=1: the audit_log immutability draft (DRAFT-AL1) is applied too — the same rehearsal then proves the eight actions on the HARDENED platform table
+    if (HARDENED) await pool.query(draftSql('DRAFT-AL1-audit-log-immutability.sql'));
+    prisma = createPrismaClient({ connectionString: stack.postgres.url });
+    db = { appClient: () => prisma, platformClient: () => prisma } as unknown as DbService;
+  }, 300_000);
+
+  afterAll(async () => {
+    await prisma?.$disconnect();
+    await pool?.end();
+    await stack?.stop();
+  });
+
+  // ═════════════════════ 1. the registry IS the patched file ═════════════════════
+  it('REGISTRY: all eight proposed actions are in the REAL (patched) registry with the proposed resource types, none is a security event, and no other expense / category / income action exists', () => {
+    for (const [a, meta] of Object.entries(PROPOSED_EXPENSE_AUDIT_ACTIONS)) {
+      expect(a in AUDITABLE_ACTIONS, a).toBe(true);
+      expect((AUDITABLE_ACTIONS as Record<string, { resourceType: string; security: boolean }>)[a], a).toEqual({ resourceType: meta.resourceType, security: false });
+      expect(isSecurityEventAction(a), `${a} must not match the security_event view`).toBe(false);
+    }
+    const family = Object.keys(AUDITABLE_ACTIONS).filter((a) => /^(expense_record|expense_category|other_income|expense|income)\./.test(a));
+    expect(family.sort()).toEqual([...EIGHT].sort());
+  });
+
+  // ═════════════════════ 2. REQUIRED activated through real Nest DI ═════════════════════
+  it('REQUIRED POLICY VIA REAL NEST DI: with the policy provider the services resolve and audit; WITHOUT it the module does not even compile (no default, no silent optional audit)', async () => {
+    const providers = [
+      { provide: DbService, useValue: db },
+      AuditWriter,
+      PlatformExpenseAudit,
+      ExpenseRepository,
+      OtherIncomeRepository,
+      ExpenseService,
+      OtherIncomeService,
+    ];
+    const withPolicy = await Test.createTestingModule({
+      providers: [
+        ...providers,
+        {
+          provide: EXPENSE_AUDIT_POLICY,
+          useFactory: (adapter: PlatformExpenseAudit): ExpenseAuditPolicy => auditRequired(adapter),
+          inject: [PlatformExpenseAudit],
+        },
+      ],
+    }).compile();
+    svc = withPolicy.get(ExpenseService);
+    inc = withPolicy.get(OtherIncomeService);
+    repo = withPolicy.get(ExpenseRepository);
+    writer = withPolicy.get(AuditWriter);
+    expect(withPolicy.get(PlatformExpenseAudit)).toBeInstanceOf(PlatformExpenseAudit);
+    await expect(Test.createTestingModule({ providers }).compile()).rejects.toThrow(/resolve dependencies|EXPENSE_AUDIT_POLICY/);
+    // each repository separately: neither may carry a silent default of its own (a lone @Optional() on one of them would otherwise hide behind the other)
+    for (const repository of [ExpenseRepository, OtherIncomeRepository]) {
+      await expect(
+        Test.createTestingModule({ providers: [{ provide: DbService, useValue: db }, repository] }).compile(),
+        repository.name,
+      ).rejects.toThrow(/resolve dependencies|EXPENSE_AUDIT_POLICY/);
+    }
+    const c = await as(U1(), () => svc.createCategory({ nameEn: 'Fuel' }));
+    if (c.kind !== 'CREATED') throw new Error('category');
+    CAT = c.category.id;
+    expect(await auditOf(CAT)).toHaveLength(1); // audited through the DI-built REQUIRED policy
+  }, 120_000);
+
+  // ═════════════════════ 3. all eight actions, real writer, real rows ═════════════════════
+  it('ALL EIGHT ACTIONS are written by the real AuditWriter, each with the registry’s own resource type, by the authenticated actor, in the audited row’s scope', async () => {
+    const cat = await as(U1(), () => svc.createCategory({ nameEn: `Cat-${randomUUID().slice(0, 6)}` }));
+    if (cat.kind !== 'CREATED') throw new Error('cat');
+    await as(U1(), () => svc.setCategoryActive(cat.category.id, false));
+    const paid = await create();
+    await as(U1(), () => svc.submit(paid, key()));
+    await as(U2(), () => svc.approve(paid, key()));
+    await as(U3(), () => svc.pay(paid, key()));
+    const rejected = await submitted();
+    await as(U2(), () => svc.reject(rejected, key(), 'not a business cost'));
+    const income = await as(U1(), () =>
+      inc.createDraft({ companyId: w.CO_A, branchId: w.BR_A, accountId: w.ACC_INC_A, amountMinor: 7_500n, currency: 'AED', taxAmountMinor: null, paymentMethod: 'BANK', sourceReference: null, incomeDate: '2026-11-17', description: 'Scrap', documentId: null, idempotencyKey: key() }),
+    );
+    if (income.kind !== 'CREATED') throw new Error('income');
+    const rows = [...(await auditOf(cat.category.id)), ...(await auditOf(paid)), ...(await auditOf(rejected)), ...(await auditOf(income.income.id))];
+    expect([...new Set(rows.map((r) => r.action))].sort()).toEqual([...EIGHT].sort());
+    for (const r of rows) {
+      expect(r.resourceType, r.action).toBe((AUDITABLE_ACTIONS as Record<string, { resourceType: string }>)[r.action]!.resourceType);
+      expect(r.tenantId).toBe(w.TA);
+      expect(r.actorAccountType).toBe('USER');
+    }
+    expect((await auditOf(paid)).map((r) => [r.action, r.actorUserId])).toEqual([
+      ['expense_record.created', w.U1],
+      ['expense_record.submitted', w.U1],
+      ['expense_record.approved', w.U2],
+      ['expense_record.paid', w.U3],
+    ]);
+    for (const r of await auditOf(paid)) expect([r.companyId, r.branchId]).toEqual([w.CO_A, w.BR_A]);
+    expect((await auditOf(cat.category.id)).every((r) => r.companyId === null && r.branchId === null)).toBe(true);
+    expect((await auditOf(income.income.id))[0]).toMatchObject({ companyId: w.CO_A, branchId: w.BR_A, actorUserId: w.U1 });
+  }, 180_000);
+
+  it('IDENTITY: the account type and a platform IMPERSONATOR come from the verified context — the audit row records who really acted and on whose behalf', async () => {
+    const platformUser = randomUUID();
+    const id = await create();
+    const r = await as({ ...U1(), accountType: 'OWNER', impersonator: platformUser }, () => svc.submit(id, key()));
+    expect(r.kind).toBe('TRANSITIONED');
+    const row = (await auditOf(id)).find((x) => x.action === 'expense_record.submitted')!;
+    expect([row.actorUserId, row.actorAccountType, row.impersonatorPlatformUserId]).toEqual([w.U1, 'OWNER', platformUser]);
+    // nothing in the port lets a caller name another actor
+    expect(Object.keys(PROPOSED_EXPENSE_AUDIT_ACTIONS)).toHaveLength(8);
+  }, 90_000);
+
+  // ═════════════════════ 4. one transaction ═════════════════════
+  it('SAME TRANSACTION: the expense row, its event and its audit row were all written by ONE transaction (equal xmin) in every step', async () => {
+    const id = await create();
+    await as(U1(), () => svc.submit(id, key()));
+    await as(U2(), () => svc.approve(id, key()));
+    const joined = await q(
+      `SELECT a.action, (a.xmin::text = e.xmin::text) AS same_event,
+              (a.xmin::text = (SELECT x.xmin::text FROM expense x WHERE x.id = $1::uuid)) AS same_expense_row
+         FROM audit_log a JOIN expense_event e ON e.id = (a."after" ->> 'eventId')::uuid WHERE a."resourceId" = $1::text ORDER BY a."at", a.id`,
+      [id],
+    );
+    expect(joined.map((r) => r['action'])).toEqual(['expense_record.created', 'expense_record.submitted', 'expense_record.approved']);
+    expect(joined.every((r) => r['same_event'] === true)).toBe(true);
+    expect(joined[2]!['same_expense_row']).toBe(true); // the last transition's transaction also wrote the expense row
+  }, 90_000);
+
+  // ═════════════════════ 5. real platform failure rolls everything back ═════════════════════
+  it('REAL AUDIT FAILURE: a failing insert INTO audit_log (a database trigger on the real platform table) rolls back the status change, the event and the audit row; removing the fault lets the same key succeed', async () => {
+    const id = await submitted();
+    await pool.query(`CREATE FUNCTION rehearsal_fail_audit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'rehearsal: audit_log unavailable'; END; $$ LANGUAGE plpgsql`);
+    await pool.query(`CREATE TRIGGER rehearsal_fail_audit BEFORE INSERT ON audit_log FOR EACH ROW WHEN (NEW.action = 'expense_record.approved') EXECUTE FUNCTION rehearsal_fail_audit()`);
+    const k = key();
+    const base = [await statusOf(id), (await eventsOf(id)).join(), await proposedCount()];
+    try {
+      await expect(as(U2(), () => svc.approve(id, k))).rejects.toThrow();
+      expect([await statusOf(id), (await eventsOf(id)).join(), await proposedCount()]).toEqual(base);
+      expect(await num(`SELECT count(*)::int AS n FROM expense_event WHERE "idempotencyKey"=$1`, [k])).toBe(0);
+      // the failure is specific to the audit write: other transitions of OTHER expenses are unaffected
+      const other = await create();
+      expect(await as(U1(), () => svc.submit(other, key()))).toMatchObject({ kind: 'TRANSITIONED' });
+    } finally {
+      await pool.query(`DROP TRIGGER rehearsal_fail_audit ON audit_log`);
+      await pool.query(`DROP FUNCTION rehearsal_fail_audit()`);
+    }
+    expect(await as(U2(), () => svc.approve(id, k))).toMatchObject({ kind: 'TRANSITIONED' });
+    expect((await auditOf(id)).map((r) => r.action)).toEqual(['expense_record.created', 'expense_record.submitted', 'expense_record.approved']);
+  }, 120_000);
+
+  // ═════════════════════ 6. scope ═════════════════════
+  it('SCOPE: a row for ANOTHER TENANT is refused by audit_log RLS; a row outside the caller’s company / branch scope is refused by the adapter — both roll the transition back', async () => {
+    const id = await submitted();
+    const base = [await statusOf(id), (await eventsOf(id)).join(), await proposedCount()];
+    const adapter = new PlatformExpenseAudit(writer);
+    const foreign = new ExpenseService(
+      new ExpenseRepository(db, auditRequired({ record: async (tx: ScopedTx, e) => writer.record(tx, { action: e.action as never, resourceType: 'expense', resourceId: e.resourceId, tenantId: w.TB, after: e.after }) })),
+    );
+    await expect(as(U2(), () => foreign.approve(id, key()))).rejects.toThrow();
+    const mislabelled = new ExpenseService(
+      new ExpenseRepository(db, auditRequired({ record: (tx, e) => adapter.record(tx, { ...e, branchId: w.BR_K, companyId: w.CO_K }) })),
+    );
+    await expect(as({ ...U2(), branch: [w.BR_A, w.BR_A2] }, () => mislabelled.approve(id, key()))).rejects.toThrow(/outside the caller's (company|branch) scope/);
+    expect([await statusOf(id), (await eventsOf(id)).join(), await proposedCount()]).toEqual(base);
+    expect(await as({ user: w.UB, tenant: w.TB }, () => svc.approve(id, key()))).toEqual({ kind: 'NOT_FOUND' });
+    expect(await num(`SELECT count(*)::int AS n FROM audit_log WHERE "resourceId" = $1 AND "tenantId" <> $2`, [id, w.TA])).toBe(0);
+  }, 120_000);
+
+  // ═════════════════════ 7. concurrency and replay ═════════════════════
+  it('CONCURRENCY AND REPLAY: 8 concurrent approvals → ONE approved audit row; same-key replays and refusals add none; the total never exceeds one row per real transition', async () => {
+    const id = await submitted();
+    const res = await Promise.all(Array.from({ length: 8 }, (_, i) => as(i % 2 ? U2() : U3(), () => svc.approve(id, key()))));
+    expect(res.filter((r) => r.kind === 'TRANSITIONED')).toHaveLength(1);
+    expect((await auditOf(id)).map((r) => r.action)).toEqual(['expense_record.created', 'expense_record.submitted', 'expense_record.approved']);
+    const k = key();
+    const id2 = await create();
+    const sub = await Promise.all(Array.from({ length: 6 }, () => as(U1(), () => svc.submit(id2, k))));
+    expect(sub.filter((r) => r.kind === 'TRANSITIONED')).toHaveLength(1);
+    const count = (await auditOf(id2)).length;
+    expect(await as(U1(), () => svc.submit(id2, k))).toMatchObject({ kind: 'REPLAYED' });
+    expect(await as(U1(), () => svc.reject(id2, k, 'x'))).toEqual({ kind: 'REFUSED', reason: 'IDEMPOTENCY_KEY_REUSED' });
+    expect(await as(U1(), () => svc.approve(id2, key()))).toEqual({ kind: 'REFUSED', reason: 'SELF_APPROVAL' });
+    expect((await auditOf(id2)).length).toBe(count);
+    expect(count).toBe(2); // created + submitted, exactly once each
+  }, 180_000);
+
+  // ═════════════════════ 8. security_event view consistency ═════════════════════
+  it('SECURITY_EVENT VIEW CONSISTENCY: for EVERY distinct action in audit_log, "appears in the security_event view" equals the registry’s isSecurityEventAction; the eight never appear; a security action written through the same real writer DOES (positive control)', async () => {
+    await writer.emit({ action: 'tenant.suspend', resourceType: 'tenant', resourceId: w.TA, tenantId: w.TA, actorAccountType: 'PLATFORM' });
+    const actions = (await q(`SELECT DISTINCT action FROM audit_log`)).map((r) => r['action'] as string);
+    const inView = new Set((await q(`SELECT DISTINCT kind FROM security_event WHERE source = 'audit'`)).map((r) => r['kind'] as string));
+    expect(actions).toContain('tenant.suspend');
+    expect(inView.has('tenant.suspend')).toBe(true);
+    for (const a of actions) expect(inView.has(a), `${a}: view vs registry`).toBe(isSecurityEventAction(a));
+    for (const a of EIGHT) expect(inView.has(a), a).toBe(false);
+    evidence('security_event.eight_in_view', EIGHT.filter((a) => inView.has(a)));
+  }, 90_000);
+
+  // ═════════════════════ 9. no financial effect ═════════════════════
+  it('NO FINANCIAL EFFECT: the whole rehearsal created no journal entry and no cash movement; reads write no audit row', async () => {
+    const before = await proposedCount();
+    const id = await create();
+    await as(U1(), () => svc.get(id));
+    await as(U1(), () => svc.history(id));
+    await as(U1(), () => svc.list());
+    await as(U1(), () => svc.listCategories());
+    await as(U1(), () => inc.list());
+    expect(await proposedCount()).toBe(before + 1);
+    expect(await num(`SELECT count(*)::int AS n FROM journal_entry`)).toBe(0);
+    expect(await num(`SELECT count(*)::int AS n FROM cash_movement`)).toBe(0);
+  }, 90_000);
+
+  // ═════════════════════ 10. EVIDENCE for the security review (facts, measured) ═════════════════════
+  it('EVIDENCE — grants, RLS, triggers and the transaction boundary of audit_log, measured on the migrated database', async () => {
+    const privs = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'];
+    const held: Record<string, string[]> = {};
+    for (const role of ['flower_app', 'flower_platform']) {
+      held[role] = [];
+      for (const p of privs) if ((await q(`SELECT has_table_privilege($1, 'audit_log', $2) AS ok`, [role, p]))[0]!['ok']) held[role]!.push(p);
+    }
+    const rls = (await q(`SELECT relrowsecurity AS enabled, relforcerowsecurity AS forced FROM pg_class WHERE oid = 'audit_log'::regclass`))[0]!;
+    const policy = (await q(`SELECT policyname, cmd, qual, with_check FROM pg_policies WHERE tablename = 'audit_log'`)) as Record<string, unknown>[];
+    const triggers = (await q(`SELECT tgname FROM pg_trigger WHERE tgrelid = 'audit_log'::regclass AND NOT tgisinternal`)).map((r) => r['tgname'] as string);
+    const partitions = (await q(`SELECT inhrelid::regclass::text AS p FROM pg_inherits WHERE inhparent = 'audit_log'::regclass`)).map((r) => r['p'] as string);
+    evidence('audit_log.privileges', held);
+    evidence('audit_log.rls', rls);
+    evidence('audit_log.policy', policy);
+    evidence('audit_log.triggers', triggers);
+    evidence('audit_log.partitions', partitions);
+    expect(rls).toEqual({ enabled: true, forced: true });
+    expect(policy).toHaveLength(1);
+    expect(String(policy[0]!['qual'])).toMatch(/app\.tenant_id/);
+    expect(String(policy[0]!['with_check'])).toMatch(/app\.tenant_id/);
+    expect(String(policy[0]!['qual'])).not.toMatch(/branch/); // the policy has NO branch dimension (why the adapter checks branch)
+    expect(held['flower_app']).toContain('INSERT');
+    const guarded = (await q(`SELECT to_regprocedure('fn_audit_log_protection_gaps()') IS NOT NULL AS g`))[0]!['g'] === true;
+    expect(guarded, 'the rehearsal state must match AUDIT_LOG_HARDENED').toBe(HARDENED);
+    evidence('audit_log.hardened', guarded);
+    if (guarded) {
+      // HARDENED (DRAFT-AL1): exactly SELECT + INSERT for both roles, the guards exist and the self-check is clean
+      expect(held['flower_app']).toEqual(['SELECT', 'INSERT']);
+      expect(held['flower_platform']).toEqual(['SELECT', 'INSERT']);
+      expect(triggers).toEqual(expect.arrayContaining(['trg_audit_log_append_only', 'trg_audit_log_no_truncate']));
+      expect((await q(`SELECT * FROM fn_audit_log_protection_gaps()`))).toEqual([]);
+    } else {
+      // GAP (pre-existing, frozen Phase 1/2 schema — NOT introduced here): the application role may also UPDATE and DELETE audit rows, and no trigger protects them
+      expect(held['flower_app']).toEqual(expect.arrayContaining(['UPDATE', 'DELETE']));
+      expect(triggers.filter((t) => !t.startsWith('RI_ConstraintTrigger'))).toEqual([]);
+    }
+  }, 60_000);
+
+  it('EVIDENCE — can an application-role transaction rewrite or delete its own tenant’s audit rows? TODAY: yes (the gap). HARDENED (DRAFT-AL1): no — refused, and the audit row of the eight actions stays intact', async () => {
+    const id = await create();
+    const [row] = await auditOf(id);
+    const tamper = (sql: string): Promise<number> =>
+      as(U1(), () =>
+        prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL ROLE flower_app`);
+          await tx.$executeRaw`SELECT set_config('app.tenant_id', ${w.TA}, true)`;
+          return Number(await tx.$executeRawUnsafe(sql, row!.id));
+        }),
+      );
+    if (HARDENED) {
+      await expect(tamper(`UPDATE audit_log SET "reason" = 'tampered' WHERE id = $1::uuid`)).rejects.toThrow();
+      await expect(tamper(`DELETE FROM audit_log WHERE id = $1::uuid`)).rejects.toThrow();
+      evidence('audit_log.app_role_can_update', false);
+      evidence('audit_log.app_role_can_delete', false);
+      expect(await auditOf(id)).toHaveLength(1);
+      expect((await auditOf(id))[0]!.action).toBe('expense_record.created');
+    } else {
+      const updated = await tamper(`UPDATE audit_log SET "reason" = 'tampered' WHERE id = $1::uuid`);
+      const deleted = await tamper(`DELETE FROM audit_log WHERE id = $1::uuid`);
+      evidence('audit_log.app_role_can_update', updated === 1);
+      evidence('audit_log.app_role_can_delete', deleted === 1);
+      expect([updated, deleted]).toEqual([1, 1]);
+      expect(await auditOf(id)).toHaveLength(0);
+    }
+    // another tenant's context reaches none of it either way (RLS; hardened: refused before RLS is even consulted)
+    const idB = await create();
+    const [rowB] = await auditOf(idB);
+    const crossTenant = await as({ user: w.UB, tenant: w.TB }, () =>
+      prisma
+        .$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL ROLE flower_app`);
+          await tx.$executeRaw`SELECT set_config('app.tenant_id', ${w.TB}, true)`;
+          return Number(await tx.$executeRawUnsafe(`DELETE FROM audit_log WHERE id = $1::uuid`, rowB!.id));
+        })
+        .catch(() => 0),
+    );
+    expect(crossTenant).toBe(0);
+    expect(await auditOf(idB)).toHaveLength(1);
+  }, 90_000);
+
+  it('EVIDENCE — what is NOT audited today (coverage gaps for the reviewer): refused attempts (self-approval, missing permission), reads, and illegal transitions write no platform audit row', async () => {
+    const id = await submitted();
+    const before = await proposedCount();
+    expect(await as(U1(), () => svc.approve(id, key()))).toEqual({ kind: 'REFUSED', reason: 'SELF_APPROVAL' });
+    expect(await as(U2(), () => svc.pay(id, key()))).toEqual({ kind: 'REFUSED', reason: 'ILLEGAL_TRANSITION' });
+    expect(await as({ ...U2() }, () => svc.reject(id, key(), '   '))).toEqual({ kind: 'REFUSED', reason: 'REASON_REQUIRED' });
+    expect(await proposedCount()).toBe(before);
+    evidence('coverage.refusals_audited', false);
+  }, 90_000);
+});

@@ -1,8 +1,19 @@
 'use client';
 
-import { useActionState } from 'react';
+import { Suspense, useActionState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { login } from './actions';
 import { Field, ErrorText } from '@/components/ui';
+
+/** shown after the authenticator was confirmed (the Security screen redirects here with ?mfa=enabled) */
+function EnabledNotice() {
+  if (useSearchParams().get('mfa') !== 'enabled') return null;
+  return (
+    <p className="banner" role="status" data-testid="mfa-enabled-notice">
+      Authenticator confirmed. Sign in with your password and the 6-digit code from the app.
+    </p>
+  );
+}
 
 export default function LoginPage() {
   const [error, formAction, pending] = useActionState(login, undefined);
@@ -13,6 +24,9 @@ export default function LoginPage() {
         FLOWER SAAS
       </p>
       <h1 style={{ margin: '0.25rem 0 1.25rem' }}>Owner sign in</h1>
+      <Suspense fallback={null}>
+        <EnabledNotice />
+      </Suspense>
       <form action={formAction} className="stack">
         <Field label="Workspace" name="workspaceSlug" placeholder="acme-florist" required />
         <Field label="Email" name="email" type="email" required />

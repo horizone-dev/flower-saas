@@ -1,0 +1,51 @@
+// DRAFT — NOT in apps/api/src, NOT registered, NOT approved. F-7b: how the pilot OWNER invites cashiers WITHOUT any platform privilege.
+//
+// Why a separate tenant-realm route (and not the platform route F-7): a platform-realm route needs a Flower operator for every cashier. This route
+// lets the Owner do it, with these hard limits, all enforced server-side:
+//   1. tenant comes ONLY from the authenticated session (rule 5) — there is no :tenantId in the path;
+//   2. NEW permission `staff:invite` (owner role only; step-up MFA) — needs a permissions-package change + S0b entry + a registry migration;
+//   3. role allow-list `cashier` / `sales` (the same ONBOARDABLE_ROLE_KEYS) — an owner cannot mint another owner/admin/manager;
+//   4. the granted company/branch scope must be INSIDE the inviter's own scope (`assertScopeWithin`, tested) — never "all";
+//   5. the same budgets (per-user 20/h, per-workspace 50/day, fail-closed), `max_users`, hashed single-use 24 h token, audit with actorUserId.
+// Service change needed (small, tested before enabling): `inviteStaff` takes `actor: { kind: 'PLATFORM'|'TENANT_USER', id }`; the repository
+// writes `createdByUserId` / `actorUserId` for a tenant actor instead of the platform columns; the platform path is unchanged.
+//
+// Enable ONLY after: owner + security approval · `staff:invite` added to @flower/permissions (+ STEP_UP_PERMISSIONS, owner grant) · S0b entry ·
+// registry migration · probe entry · route tests (401 / 403 cashier / 403 manager / 403 no step-up / scope-exceeds 403 / foreign ids 422).
+import { Body, Controller, Header, Post } from '@nestjs/common';
+import { z } from 'zod';
+import { RequirePermission } from '../../common/auth/require-permission.decorator.js';
+import { ZodBody } from '../../common/validation/zod-body.js';
+import { requireTenantContext } from '../../common/context/index.js';
+import { StaffOnboardingService } from './staff-onboarding.service.js';
+import { assertScopeWithin } from './staff-scope.js';
+
+const inviteSchema = z
+  .object({
+    email: z.string().min(3).max(254),
+    roleKey: z.enum(['cashier', 'sales']),
+    companyIds: z.array(z.string().uuid()).min(1).max(20),
+    branchIds: z.array(z.string().uuid()).min(1).max(20),
+  })
+  .strict();
+
+@Controller('org/staff-invites')
+export class OwnerStaffInviteController {
+  constructor(private readonly staff: StaffOnboardingService) {}
+
+  @Post()
+  @RequirePermission('staff:invite')
+  @Header('Cache-Control', 'no-store')
+  async invite(@Body(new ZodBody(inviteSchema)) dto: z.infer<typeof inviteSchema>) {
+    const ctx = requireTenantContext(); // tenantId + userId + data scope from the SESSION only
+    assertScopeWithin(
+      { companyScope: ctx.companyScope, branchScope: ctx.branchScope },
+      { companyIds: dto.companyIds, branchIds: dto.branchIds },
+    );
+    return this.staff.inviteStaff({
+      tenantId: ctx.tenantId,
+      ...dto,
+      actor: { kind: 'TENANT_USER', id: ctx.userId },
+    });
+  }
+}

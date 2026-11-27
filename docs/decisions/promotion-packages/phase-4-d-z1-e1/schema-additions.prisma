@@ -1,0 +1,180 @@
+/// Phase 4 (DRAFT D) — one immutable cash COUNT of a register session (append-only: no UPDATE, no DELETE, no TRUNCATE for any role). Scalar-only: the composite foreign key that proves the
+/// count's company / branch / terminal / register AND currency equal its session's lives in the migration SQL. `denominations` is evidence (the trigger proves Σ denomination × count =
+/// countedMinor); `varianceMinor` = counted − expected is MEASURED only — nothing here posts or absorbs it. No free-text column.
+model RegisterSessionCount {
+  id                String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId          String   @db.Uuid
+  companyId         String   @db.Uuid
+  branchId          String   @db.Uuid
+  posTerminalId     String   @db.Uuid
+  cashRegisterId    String   @db.Uuid
+  registerSessionId String   @db.Uuid
+  /// 1-based, contiguous within a session (trigger-enforced under the session lock)
+  seq               Int
+  /// SPOT | CLOSE (CHECK, migration SQL)
+  purpose           String
+  currencyCode      String
+  currencyExponent  Int      @db.SmallInt
+  denominations     Json
+  countedMinor      BigInt
+  expectedMinor     BigInt
+  varianceMinor     BigInt
+  countedByUserId   String   @db.Uuid
+  supervisorUserId  String?  @db.Uuid
+  countedAt         DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, registerSessionId, seq], map: "register_session_count_session_seq_key")
+  @@index([tenantId, branchId, countedAt], map: "register_session_count_tenantId_branchId_countedAt_idx")
+  @@map("register_session_count")
+}
+
+/// Phase 4 (DRAFT Z1) — a finalised Z-Report: immutable (no UPDATE, DELETE or TRUNCATE for any role), hash-chained per register and gapless (`zNumber` = previous + 1 under the register-row lock,
+/// never a SEQUENCE). Scalar-only: the composite foreign key to the session scope lives in the migration SQL. `content` is the frozen canonical report WITHOUT its number / links; only a
+/// FINALIZABLE report (no blocker) is ever stored. The close of the session and the Z are committed together (a deferred constraint trigger refuses a Z whose session is not CLOSED at commit).
+model ZReport {
+  id                    String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId              String   @db.Uuid
+  companyId             String   @db.Uuid
+  branchId              String   @db.Uuid
+  posTerminalId         String   @db.Uuid
+  cashRegisterId        String   @db.Uuid
+  registerSessionId     String   @db.Uuid
+  currencyCode          String
+  currencyExponent      Int      @db.SmallInt
+  zNumber               BigInt
+  prevHash              String
+  hash                  String
+  closedAt              DateTime @db.Timestamptz(6)
+  expectedMinor         BigInt
+  countedMinor          BigInt
+  varianceMinor         BigInt
+  countedByUserId       String   @db.Uuid
+  approvedByUserId      String?  @db.Uuid
+  approvedVarianceMinor BigInt?
+  /// ORDER_TERMINAL_ISSUED_AT_WINDOW (CHECK, migration SQL)
+  attributionBasis      String
+  content               Json
+  createdByUserId       String   @db.Uuid
+  createdAt             DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, registerSessionId], map: "z_report_session_key")
+  @@unique([tenantId, cashRegisterId, zNumber], map: "z_report_register_number_key")
+  @@unique([tenantId, cashRegisterId, prevHash], map: "z_report_register_prevhash_key")
+  @@unique([tenantId, hash], map: "z_report_hash_key")
+  @@index([tenantId, branchId, closedAt], map: "z_report_tenantId_branchId_closedAt_idx")
+  @@map("z_report")
+}
+
+/// Phase 4.7 — a tenant-scoped, configurable expense category. NO account column: the category → GL mapping is an ACCOUNTANT decision. `requiresApproval` defaults TRUE
+/// (fail-closed). Never deleted, never truncated. A UNIQUE index on `(tenantId, lower(btrim(nameEn)))` exists only in the migration SQL (an expression index).
+model ExpenseCategory {
+  id               String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  nameEn           String
+  nameAr           String?
+  requiresApproval Boolean  @default(true)
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, id], map: "expense_category_tenant_id_key")
+  @@map("expense_category")
+}
+
+/// Phase 4.7 — the §F.3 expense and its lifecycle DRAFT → SUBMITTED → APPROVED → PAID (SUBMITTED → REJECTED). The four edges, the frozen business columns, creator ≠
+/// approver and the "every change has its event in the same transaction" rule are enforced in the migration SQL (CHECKs + triggers). `paymentMethod` is CASH | CARD |
+/// BANK | PETTY_CASH: PAYABLE (accounts payable, Phase 5) is REFUSED by a CHECK. A drawer tie (`registerSessionId`) only records where a CASH expense was paid — it moves no
+/// cash. Never deleted. A PARTIAL index on `(tenantId, registerSessionId)` exists only in the migration SQL.
+model Expense {
+  id                String    @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId          String    @db.Uuid
+  companyId         String    @db.Uuid
+  branchId          String    @db.Uuid
+  posTerminalId     String?   @db.Uuid
+  registerSessionId String?   @db.Uuid
+  categoryId        String    @db.Uuid
+  amountMinor       BigInt
+  currencyCode      String
+  currencyExponent  Int       @db.SmallInt
+  taxAmountMinor    BigInt?
+  taxCode           String?
+  paymentMethod     String
+  payeeKind         String
+  payeeId           String?   @db.Uuid
+  expenseDate       DateTime  @db.Date
+  description       String
+  reference         String?
+  /// DRAFT | SUBMITTED | APPROVED | REJECTED | PAID (CHECK, migration SQL)
+  status            String    @default("DRAFT")
+  createdByUserId   String    @db.Uuid
+  approvedByUserId  String?   @db.Uuid
+  decidedAt         DateTime? @db.Timestamptz(6)
+  /// the Idempotency-Key of the creating request: a replay finds the row, it never creates a second one
+  idempotencyKey    String
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, id], map: "expense_tenant_id_key")
+  @@unique([tenantId, idempotencyKey], map: "expense_tenant_idempotency_key")
+  @@index([tenantId, branchId, status, expenseDate], map: "expense_tenantId_branchId_status_date_idx")
+  @@map("expense")
+}
+
+/// Phase 4.7 — the append-only history of an expense: one row per transition, written in the SAME transaction as the change (a deferred constraint trigger refuses a
+/// commit without it, in both directions). No UPDATE, no DELETE, no TRUNCATE for any role. `seq` is contiguous per expense under the expense row lock; `txId` is stamped
+/// by the guard (never caller-supplied).
+model ExpenseEvent {
+  id             String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId       String   @db.Uuid
+  companyId      String   @db.Uuid
+  branchId       String   @db.Uuid
+  expenseId      String   @db.Uuid
+  seq            Int
+  /// CREATE | SUBMIT | APPROVE | REJECT | PAY (CHECK, migration SQL)
+  action         String
+  fromStatus     String?
+  toStatus       String
+  /// the AUTHENTICATED user who acted
+  actorUserId    String   @db.Uuid
+  /// required for a REJECT
+  reason         String?
+  idempotencyKey String
+  txId           BigInt   @default(dbgenerated("txid_current()"))
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([tenantId, expenseId, seq], map: "expense_event_expense_seq_key")
+  @@unique([tenantId, idempotencyKey], map: "expense_event_idempotency_key")
+  @@index([tenantId, branchId, createdAt], map: "expense_event_tenantId_branchId_createdAt_idx")
+  @@map("expense_event")
+}
+
+/// Phase 4.7 — a manual / other income (§F.4), created as a DRAFT and KEPT there: §F.4 names no status vocabulary and no approval flow, so the status CHECK admits only
+/// 'DRAFT'. The credit account must be an OTHER_INCOME account of the same company (trigger). NO session / order / invoice / payment column exists: manual income never
+/// reaches a drawer and is never system sales revenue. Never deleted.
+model OtherIncome {
+  id               String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  companyId        String   @db.Uuid
+  branchId         String   @db.Uuid
+  accountId        String   @db.Uuid
+  amountMinor      BigInt
+  currencyCode     String
+  currencyExponent Int      @db.SmallInt
+  taxAmountMinor   BigInt?
+  /// CASH | BANK (CHECK, migration SQL)
+  paymentMethod    String
+  sourceReference  String?
+  incomeDate       DateTime @db.Date
+  description      String
+  /// DRAFT only (CHECK, migration SQL)
+  status           String   @default("DRAFT")
+  createdByUserId  String   @db.Uuid
+  idempotencyKey   String
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([tenantId, id], map: "other_income_tenant_id_key")
+  @@unique([tenantId, idempotencyKey], map: "other_income_tenant_idempotency_key")
+  @@index([tenantId, branchId, incomeDate], map: "other_income_tenantId_branchId_date_idx")
+  @@map("other_income")
+}

@@ -1,0 +1,149 @@
+import 'reflect-metadata';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
+import { createSaleWorld, type SaleWorld } from './load-sale-world.js';
+
+/**
+ * Validation of the PROPOSED, UNAPPLIED draft migrations (docs/decisions/proposed-migrations/*.sql) against a real PostgreSQL that has
+ * all 53 shipped migrations: every draft is executed INSIDE a transaction that is ROLLED BACK — nothing is committed, and nothing is
+ * added to packages/db/prisma/migrations. This file lives in a disposable copy only.
+ */
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const draft = (n: string): string =>
+  readFileSync(join(ROOT, 'docs/decisions/proposed-migrations', n), 'utf8');
+const A = 'DRAFT-A-cash-movement-reason-and-sign.sql';
+const B = 'DRAFT-B-cash-register-permissions.sql';
+const C = 'DRAFT-C-cash-over-short-account.sql';
+
+describe('proposed migrations — drafts apply cleanly on the current schema and behave as documented (rolled back)', () => {
+  let stack: TestStack;
+  let w: SaleWorld;
+
+  beforeAll(async () => {
+    stack = await startTestStack({ services: ['postgres', 'redis'] });
+    migrateTestDb(stack.postgres.url);
+    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2);
+  }, 900_000);
+  afterAll(async () => {
+    await w?.h.close();
+    await w?.pool.end();
+    await stack?.stop();
+  });
+
+  it('the drafts are NOT migrations: the migrations directory is unchanged', () => {
+    const dirs = readdirSync(join(ROOT, 'packages/db/prisma/migrations')).filter((d) =>
+      /^\d{14}_/.test(d),
+    );
+    expect(dirs.sort().at(-1)).toBe('20261204120000_phase_4_device_permissions');
+    expect(dirs.some((d) => /cash|over_short|reason/i.test(d.replace('phase_4_s1_cash_register_foundation', '')))).toBe(false);
+  });
+
+  it('DRAFT A: the column and both CHECKs apply over the existing rows; every sign / shape rule behaves as documented', async () => {
+    const c = await w.pool.connect();
+    try {
+      await c.query('BEGIN');
+      const before = (await c.query(`SELECT count(*)::int AS n FROM cash_movement`)).rows[0].n as number;
+      await c.query(draft(A));
+      expect((await c.query(`SELECT count(*)::int AS n FROM cash_movement`)).rows[0].n).toBe(before);
+      // a table that carries the constraints but none of the foreign keys / triggers: probe the rules row by row
+      await c.query(`CREATE TEMP TABLE cm_probe (LIKE cash_movement INCLUDING DEFAULTS INCLUDING CONSTRAINTS) ON COMMIT DROP`);
+      const ins = async (type: string, amount: string, reason: string | null = null): Promise<boolean> => {
+        await c.query('SAVEPOINT s');
+        try {
+          await c.query(
+            `INSERT INTO cm_probe ("tenantId","companyId","branchId","posTerminalId","cashRegisterId","registerSessionId","type","amountMinor","currencyCode","currencyExponent","sourceKind","sourceId","actingUserId","reasonCode")
+             VALUES ($1,$1,$1,$1,$1,$1,$2,$3::bigint,'AED',2,'X',$4,$1,$5)`,
+            [randomUUID(), type, amount, randomUUID(), reason],
+          );
+          await c.query('RELEASE SAVEPOINT s');
+          return true;
+        } catch {
+          await c.query('ROLLBACK TO SAVEPOINT s');
+          return false;
+        }
+      };
+      const ok = { CASH_SALE: '5', CUSTOMER_PAYMENT: '5', CASH_IN: '5', CASH_REFUND: '-5', CASH_OUT: '-5', SAFE_DROP: '-5', EXPENSE: '-5', REGISTER_TRANSFER: '-5', ADJUSTMENT: '5' };
+      const bad = { CASH_SALE: '-5', CUSTOMER_PAYMENT: '0', CASH_IN: '-5', CASH_REFUND: '5', CASH_OUT: '5', SAFE_DROP: '5', EXPENSE: '0', REGISTER_TRANSFER: '0', ADJUSTMENT: '0' };
+      for (const [t, a] of Object.entries(ok)) expect(await ins(t, a), `${t} ${a} accepted`).toBe(true);
+      for (const [t, a] of Object.entries(bad)) expect(await ins(t, a), `${t} ${a} refused`).toBe(false);
+      // types with no sign rule here: the float (own CHECK elsewhere) and the informational CLOSING row
+      expect(await ins('CLOSING', '-7')).toBe(true);
+      expect(await ins('CLOSING', '7')).toBe(true);
+      // the reason: a short code, never free text
+      expect(await ins('CASH_IN', '5', 'FLOAT_TOP_UP')).toBe(true);
+      for (const r of ['lower', 'A', 'HAS SPACE', 'X'.repeat(33), '1ABC', 'free text!']) {
+        expect(await ins('CASH_IN', '5', r), `reason ${r} refused`).toBe(false);
+      }
+      await c.query('ROLLBACK');
+    } finally {
+      c.release();
+    }
+  });
+
+  it('DRAFT B: six registry keys; Owner gets all six, Cashier four, every other system role none; idempotent; RLS forced again', async () => {
+    const c = await w.pool.connect();
+    try {
+      await c.query('BEGIN');
+      const reg0 = (await c.query(`SELECT count(*)::int AS n FROM permission_registry WHERE key LIKE 'cash_register:%'`)).rows[0].n as number;
+      await c.query(draft(B));
+      const reg1 = (await c.query(`SELECT count(*)::int AS n FROM permission_registry WHERE key LIKE 'cash_register:%'`)).rows[0].n as number;
+      expect(reg1 - reg0).toBe(6 - reg0); // all six exist afterwards
+      expect(reg1).toBe(6);
+      const per = (
+        await c.query(
+          `SELECT r.key AS role, count(*)::int AS n FROM role_permission rp JOIN role r ON r.id = rp."roleId"
+            WHERE rp."permissionKey" LIKE 'cash_register:%' GROUP BY r.key ORDER BY r.key`,
+        )
+      ).rows as { role: string; n: number }[];
+      const roles = (await c.query(`SELECT key, count(*)::int AS n FROM role WHERE "isSystem" = true GROUP BY key`)).rows as { key: string; n: number }[];
+      const nOf = (k: string) => roles.find((r) => r.key === k)?.n ?? 0;
+      expect(nOf('owner')).toBeGreaterThan(0);
+      for (const r of per) expect(['owner', 'cashier']).toContain(r.role); // nobody else
+      expect(per.find((p) => p.role === 'owner')?.n).toBe(6 * nOf('owner'));
+      expect(per.find((p) => p.role === 'cashier')?.n ?? 0).toBe(4 * nOf('cashier'));
+      // idempotent: a second run adds nothing
+      const before = (await c.query(`SELECT count(*)::int AS n FROM role_permission`)).rows[0].n as number;
+      await c.query(draft(B));
+      expect((await c.query(`SELECT count(*)::int AS n FROM role_permission`)).rows[0].n).toBe(before);
+      const rls = (await c.query(`SELECT relname, relforcerowsecurity FROM pg_class WHERE relname IN ('role','role_permission')`)).rows as { relforcerowsecurity: boolean }[];
+      expect(rls.every((r) => r.relforcerowsecurity)).toBe(true);
+      await c.query('ROLLBACK');
+    } finally {
+      c.release();
+    }
+  });
+
+  it('DRAFT C: one EXPENSE.CASH_OVER_SHORT account per company (16 → 17), idempotent, RLS forced again, no journal written', async () => {
+    const c = await w.pool.connect();
+    try {
+      await c.query('BEGIN');
+      const companies = (await c.query(`SELECT count(*)::int AS n FROM company`)).rows[0].n as number;
+      const accounts0 = (await c.query(`SELECT count(*)::int AS n FROM account`)).rows[0].n as number;
+      const journal0 = (await c.query(`SELECT (SELECT count(*) FROM journal_entry)::int AS e, (SELECT count(*) FROM journal_line)::int AS l`)).rows[0];
+      await c.query(draft(C));
+      expect((await c.query(`SELECT count(*)::int AS n FROM account WHERE key = 'EXPENSE.CASH_OVER_SHORT'`)).rows[0].n).toBe(companies);
+      expect((await c.query(`SELECT count(*)::int AS n FROM account`)).rows[0].n).toBe(accounts0 + companies);
+      const perCompany = (await c.query(`SELECT count(*)::int AS n FROM account GROUP BY "companyId" LIMIT 1`)).rows[0].n as number;
+      expect(perCompany).toBe(17);
+      const row = (await c.query(`SELECT category, "displayCode", "displayName" FROM account WHERE key = 'EXPENSE.CASH_OVER_SHORT' LIMIT 1`)).rows[0];
+      expect(row).toEqual({ category: 'EXPENSE', displayCode: '5200', displayName: 'Cash Over/Short' });
+      await c.query(draft(C));
+      expect((await c.query(`SELECT count(*)::int AS n FROM account`)).rows[0].n).toBe(accounts0 + companies);
+      expect((await c.query(`SELECT (SELECT count(*) FROM journal_entry)::int AS e, (SELECT count(*) FROM journal_line)::int AS l`)).rows[0]).toEqual(journal0);
+      expect((await c.query(`SELECT relforcerowsecurity FROM pg_class WHERE relname = 'account'`)).rows[0].relforcerowsecurity).toBe(true);
+      await c.query('ROLLBACK');
+    } finally {
+      c.release();
+    }
+  });
+
+  it('after the rollbacks nothing remains: no reason column, no new registry keys, no new account', async () => {
+    expect((await w.pool.query(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'cash_movement' AND column_name = 'reasonCode'`)).rows[0].n).toBe(0);
+    expect((await w.pool.query(`SELECT count(*)::int AS n FROM permission_registry WHERE key LIKE 'cash_register:%'`)).rows[0].n).toBe(0);
+    expect((await w.pool.query(`SELECT count(*)::int AS n FROM account WHERE key = 'EXPENSE.CASH_OVER_SHORT'`)).rows[0].n).toBe(0);
+  });
+});

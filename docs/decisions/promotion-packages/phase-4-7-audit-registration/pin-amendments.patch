@@ -1,0 +1,89 @@
+--- a/apps/api/src/verification/expense-audit.structural.test.ts
++++ b/apps/api/src/verification/expense-audit.structural.test.ts
+@@ -1,4 +1,3 @@
+-import { execFileSync } from 'node:child_process';
+ import { readFileSync, readdirSync } from 'node:fs';
+ import { dirname, join, resolve } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+@@ -35,42 +34,41 @@
+ const ADAPTER = `${MOD}/expense-audit.adapter.ts`;
+ const REPO = `${MOD}/expense.repository.ts`;
+ const INC = `${MOD}/other-income.repository.ts`;
+-const PATCH = 'docs/decisions/proposed-migrations/patches/E1-audit-actions-registry.patch';
+ const PROPOSED = Object.keys(PROPOSED_EXPENSE_AUDIT_ACTIONS);
+ 
+-describe('expense / other-income platform audit — proposals, not registrations', () => {
+-  it('the proposed actions are NOT in the live registry (registering a production audit action needs security-review approval)', () => {
++describe('expense / other-income platform audit — REGISTERED (security-review approval recorded)', () => {
++  it('the live registry holds EXACTLY the eight approved actions, with the approved resource types, all security:false — and no other expense / category / income action', () => {
+     const registry = read('apps/api/src/common/audit/actions.ts');
+-    for (const a of PROPOSED) expect(registry, a).not.toContain(`'${a}'`);
+-    expect(registry).not.toMatch(/'(expense_record|expense_category|other_income)\./);
++    for (const [a, meta] of Object.entries(PROPOSED_EXPENSE_AUDIT_ACTIONS)) {
++      expect(registry, a).toContain(
++        `'${a}': { resourceType: '${meta.resourceType}', security: false },`,
++      );
++    }
++    const family = [
++      ...registry.matchAll(
++        /^\s+'((?:expense_record|expense_category|other_income|expense|income)\.[a-z_]+)':/gm,
++      ),
++    ].map((m) => m[1]);
++    expect(family.sort()).toEqual([...PROPOSED].sort());
+     // the registry's own gate is intact: the writer still refuses an unregistered action
+     expect(read('apps/api/src/common/audit/audit.writer.ts')).toMatch(
+       /is not a registered auditable action/,
+     );
+   });
+ 
+-  it('the registration is an UNAPPLIED patch: it applies to the current registry, touches only actions.ts, and adds exactly the eight proposed actions (all security:false)', () => {
+-    const patch = read(PATCH);
+-    expect([...patch.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1])).toEqual([
+-      'apps/api/src/common/audit/actions.ts',
+-    ]);
+-    const added = [
+-      ...patch.matchAll(
+-        /^\+\s+'([a-z_]+\.[a-z_]+)': \{ resourceType: '(\w+)', security: (true|false) \},$/gm,
+-      ),
+-    ].map((m) => [m[1], m[2], m[3]]);
+-    expect(added.map((a) => a[0]).sort()).toEqual([...PROPOSED].sort());
+-    for (const [action, resourceType, security] of added) {
+-      expect(security, action).toBe('false');
+-      expect(resourceType, action).toBe(
+-        PROPOSED_EXPENSE_AUDIT_ACTIONS[action as keyof typeof PROPOSED_EXPENSE_AUDIT_ACTIONS]
+-          .resourceType,
+-      );
++  it('the registration was applied as ONE reviewed change: the patch file is consumed, and none of the eight is a security_event (prefix / exact lists unchanged)', () => {
++    const registry = read('apps/api/src/common/audit/actions.ts');
++    expect(registry).toMatch(
++      /SECURITY_ACTION_PREFIXES = \[\s*'tenant\.',\s*'role\.',\s*'user\.',\s*'provider_credential\.',\s*'session\.',\s*'IMPERSONATION:',\s*\] as const;/,
++    );
++    for (const a of PROPOSED) {
++      expect(
++        ['tenant.', 'role.', 'user.', 'provider_credential.', 'session.', 'IMPERSONATION:'].some(
++          (p) => a.startsWith(p),
++        ),
++        a,
++      ).toBe(false);
+     }
+-    expect(patch.match(/^-[^-]/gm) ?? []).toEqual([]); // it only ADDS: no registry line is removed or changed
+-    expect(() =>
+-      execFileSync('git', ['apply', '--check', join(ROOT, PATCH)], { cwd: ROOT, stdio: 'pipe' }),
+-    ).not.toThrow();
+   });
+ });
+ 
+--- a/apps/api/src/verification/promotion-package.structural.test.ts
++++ b/apps/api/src/verification/promotion-package.structural.test.ts
+@@ -283,9 +283,8 @@
+       const c = read(`apps/api/src/modules/expenses/${f}`).replace(/\/\*[\s\S]*?\*\//g, '');
+       expect(c, f).not.toMatch(/AuditWriter|audit_log|\.record\(/);
+     }
+-    expect(read('apps/api/src/common/audit/actions.ts')).not.toMatch(
+-      /'(expense|income|expense_record|expense_category|other_income)\./,
+-    );
++    // REGISTERED: only the eight approved audit actions exist; the retired `expense.` / `income.` families still do not
++    expect(read('apps/api/src/common/audit/actions.ts')).not.toMatch(/'(expense|income)\./);
+     for (const id of ['PLATFORM-AUDIT-EVENTS', 'AUDIT-ACTION-REGISTRATION']) {
+       const a = manifest.approvals.find((x) => x.id === id);
+       expect(a, id).toBeDefined();

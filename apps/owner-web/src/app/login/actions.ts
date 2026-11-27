@@ -2,7 +2,8 @@
 
 import { redirect } from 'next/navigation';
 import { anonApi, errorMessage } from '@/lib/api';
-import { setSession, clearSession } from '@/lib/session';
+import { setSession } from '@/lib/session';
+import { endSession } from '@/lib/end-session';
 
 export async function login(
   _prev: string | undefined,
@@ -31,10 +32,10 @@ export async function login(
   } catch (err) {
     return errorMessage(err);
   }
-  redirect('/access');
+  redirect('/products');
 }
 
 export async function logout(): Promise<void> {
-  await clearSession();
+  await endSession(); // revoke the server session, then clear the cookies
   redirect('/login');
 }

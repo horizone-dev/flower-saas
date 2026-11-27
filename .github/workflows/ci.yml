@@ -219,12 +219,24 @@ jobs:
             --lockfile=pnpm-lock.yaml
             --recursive
 
-      - name: Secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@v2.3.9
+      # The two secret-scan steps run even when an earlier step (e.g. osv-scanner) failed: a red dependency scan must not leave the secret scan skipped.
+      # They replace gitleaks/gitleaks-action 2.3.9, which scanned 0 commits on merge-heavy and >30-commit PRs and still exited 0
+      # (docs/security/GITLEAKS-CI-COVERAGE.md). The scan is the same pinned gitleaks 8.24.3 with the same .gitleaks.toml.
+      - name: Secret scan — self-test of the gate (disposable repos, planted fake secrets, pinned gitleaks)
+        if: ${{ !cancelled() }}
+        run: bash tooling/scripts/gitleaks-scan.test.sh
+
+      - name: Secret scan (gitleaks, explicit commit range, fails closed)
+        if: ${{ !cancelled() }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # required by gitleaks-action >=2.3.3 to scan pull_request events
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
           GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
+        run: bash tooling/scripts/gitleaks-scan.sh
 
       - name: Trivy — Dockerfile misconfiguration
         uses: aquasecurity/trivy-action@v0.36.0
