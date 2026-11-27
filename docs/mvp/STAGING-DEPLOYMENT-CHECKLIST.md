@@ -40,6 +40,16 @@
 
 **Conditions I recommend if the owner approves 17.11 for staging** (each is the owner's to accept or change): staging only, never production; the database stays unreachable from outside the compose network; the two GIN indexes are reindexed before any search-quality check; the decision is **time-boxed**: re-decide when the next PostgreSQL minor is released or before any user outside the internal alpha, whichever comes first. The deferral of the Finding A amendment makes 17.11 a growing security debt; the exits are a verified bounded variant of the amendment (PR #56 lists the options) or accepting 17.12 plan behaviour.
 
+### 2a. Deferred issue — PostgreSQL 17.12 report-plan regression (Finding A / B): **OPEN, DEFERRED by the owner on 2026-11-27 (option 1)**
+
+This pin does **not** resolve it; it only keeps staging on the engine where the frozen report gates pass.
+
+- **What:** on PostgreSQL 17.12 two frozen report probes change from an index scan to a per-row sequential scan: sales `creditNotesWithoutRevenueJournal` and tender-totals `allocatedPaymentsWithoutReceiptJournal` (`LEFT JOIN LATERAL … LIMIT 1 … IS NULL`). Finding B (dense-window JIT) is cleared by the same change. On 17.12 the frozen performance tests fail (8–10 tests in 3 report files); on 17.11 they pass.
+- **Evidence kept:** PR #50 (plan comparison, 17.11 vs 17.12), PR #51 (CI test stack pinned to 17.11, `verify` green), PR #56 (the `NOT EXISTS` rewrite, **DRAFT / BLOCKED, review only, not merged**; its bounded-read tests are **not weakened**: the F-1 tender repro reads about 60,000 rows against bounds of 515–620, and F-2 sales is likewise an open measured finding of that candidate).
+- **Unchanged by design:** the frozen financial SQL, and the 25,000-document density protection (`SALES_REPORT_MAX_DOCUMENTS`).
+- **Digest note:** the `postgres:17.12` tag was re-pushed after the local images used for that evidence were pulled (index digest `0d938e97…f6ac` then, `97fb5337…af1a9` in the registry on 2026-11-27). The numbers above were measured on the earlier build; re-measure on the exact digest if 17.12 is ever chosen.
+- **To close it:** an owner-approved decision on the frozen SQL amendment (a verified bounded variant, PR #56 lists the options) or an owner decision to accept the 17.12 plan behaviour, then a re-measurement on the chosen digest. Until then this section and PR #56 are the record.
+
 ## 3. Secrets and KMS prerequisites
 
 - Copy `infra/staging/.env.example` → `infra/staging/.env.staging` (git-ignored, `chmod 600`) and fill **every** value. `node infra/staging/preflight.mjs infra/staging/.env.staging` refuses placeholders, short or reused secrets and a floating image tag.
