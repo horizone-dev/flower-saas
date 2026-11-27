@@ -81,8 +81,28 @@ if (!envFile) {
     bad(
       `postgres and backup must use the same image (got ${JSON.stringify(pg)} and ${JSON.stringify(pgBackup)})`,
     );
-  for (const name of ['postgres', 'redis', 'api', 'pos', 'owner-web']) {
+  for (const name of ['postgres', 'redis', 'api', 'pos', 'owner-web', 'backup-scheduler']) {
     if (!svc[name]?.healthcheck) bad(`${name} has no healthcheck`);
+  }
+  // scheduled backups: same image as the database (pg_dump must not drift from the server it dumps), and a backup dependency on a healthy postgres
+  if (svc['backup-scheduler']?.image !== pg)
+    bad(
+      `backup-scheduler must use the same image as postgres (got ${JSON.stringify(svc['backup-scheduler']?.image)})`,
+    );
+  dep('backup-scheduler', 'postgres', 'service_healthy');
+  // third-party images are pinned by DIGEST (a tag, even a patch tag, can be re-pointed: the floating redis:7 and caddy:2 tags had already
+  // moved to different digests than the images every rehearsal ran)
+  for (const name of ['redis', 'caddy']) {
+    if (!/@sha256:[0-9a-f]{64}$/.test(String(svc[name]?.image ?? '')))
+      bad(
+        `${name} image must be pinned by digest (name@sha256:<64 hex>), got ${JSON.stringify(svc[name]?.image)}`,
+      );
+  }
+  // every container's log is rotated (Docker's default json-file driver never rotates and fills the host disk)
+  for (const [name, s] of Object.entries(svc)) {
+    const o = s.logging?.options ?? {};
+    if (s.logging?.driver !== 'json-file' || !o['max-size'] || !o['max-file'])
+      bad(`${name} has no log rotation (logging: json-file with max-size and max-file)`);
   }
   if (svc.api.environment?.NODE_ENV !== 'production') bad('api must run with NODE_ENV=production');
   if (svc.api.environment?.SECRETS_PROVIDER === 'dev')

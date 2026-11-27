@@ -92,6 +92,13 @@ None of these is applied, none adds a migration, schema file or `.sql` file, and
 
 F-7a (#52) is inert and merges in step 4 without approval-gated behaviour.
 
+**Update 2026-11-27 (CI and R-1 closure).**
+
+- **Baseline CI.** The baseline (#45 + effect override + #51; tree `31ec0631bc613b0d28a4915c71932d004b47d05d`) was pushed as `integration/ci-baseline-next-effect-pg-pin` and opened as **draft PR #57, CI only, never to be merged**. Actions run `45984384391`: `verify`, `security`, `e2e` and `realtime` all succeeded. The only skipped step was "Upload trace on failure"; three api test files are opt-in heavy suites that skip by design.
+- **R-1a.** It is an amendment on R-1 (explicit, dated `internal-alpha-only` authorization for the disabled vault) and **must be reviewed and merged together with R-1**, as one PR from `R1-plus-R1a-combined.on-staging-tip.patch`. It also needs the independent security reviewer, who is not yet named. It is not activated and not approved.
+- **File overlap, machine-checked.** R-1 plus R-1a touch 17 files. Against the other 11 candidate patches (E1, F1 bundle, F1 six pins, F6, F7b v2, F7c allow-list, F7c MFA gate, M1, S1, T1) the only overlap is with **R-1 itself** (5 files, which R-1a extends). F-6, M-1, F-1a, F-7b, F-7c and the MFA gate share **no file** with R-1a, so R-1a does not change their order.
+- **Order unchanged.** R-1 + R-1a merge after #43. M-1 comes before any manager exists. F-7c and the MFA gate come after F-7b and M-1.
+
 ## 7. What this document does not decide
 
 - Whether the baseline is one merge or three (§1, rule 36), and whether the owner authorises a push to #44's branch.
