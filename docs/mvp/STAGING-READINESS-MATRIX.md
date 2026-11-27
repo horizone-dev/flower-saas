@@ -6,7 +6,7 @@ Legend: **LOCAL** = proven on this machine in Docker, evidence named. **HOST** =
 
 ## 0. Update 2026-11-27 (Task 3): which gaps changed
 
-Everything below was **built and tested locally in Docker on this branch (`ops/staging-postgres-pin`, committed locally, not pushed, not merged, not approved)**. "Closed in code" means the repository now contains a checked mechanism; it does **not** mean anything is deployed or proven on a host. Evidence and numbers: **§2.12**.
+Everything below was **built and tested locally in Docker on this branch (`ops/staging-postgres-pin`, a draft, review-only pull request: not merged, not approved)**. "Closed in code" means the repository now contains a checked mechanism; it does **not** mean anything is deployed or proven on a host. Evidence and numbers: **§2.12**.
 
 | Gap     | Was                                                | Now                                                                                                                                                                                                                        |
 | ------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -149,7 +149,7 @@ Firewall (22 restricted to the operator, 80, 443 only), SSH keys only, unattende
 
 ### 2.12 Staging recovery scripts: built and tested locally (2026-11-27, Task 3)
 
-Everything here ran on this machine against **disposable** `flower-offhost-probe-*` Docker resources (the pinned PostgreSQL 17.11 and Redis digests from the Compose file) or against command shims. No secret is real, nothing was deployed, no host or off-host machine was involved. All of it lives under `infra/staging/ops/` plus the Compose, preflight and `check-release.mjs` changes on branch `ops/staging-postgres-pin` (local, not pushed).
+Everything here ran on this machine against **disposable** `flower-offhost-probe-*` Docker resources (the pinned PostgreSQL 17.11 and Redis digests from the Compose file) or against command shims. No secret is real, nothing was deployed, no host or off-host machine was involved. All of it lives under `infra/staging/ops/` plus the Compose, preflight and `check-release.mjs` changes on branch `ops/staging-postgres-pin` (a draft, review-only pull request). The first GitHub run of the same scripts is recorded on that pull request, not here.
 
 | Piece                                               | What it does                                                                                                                                                                      | Test                                                                  | Result                                                                                               |
 | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
