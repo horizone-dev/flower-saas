@@ -100,7 +100,7 @@ Daily procedure for the alpha, to be agreed with the accountant:
 
 Migrations are forward-only, so **the rollback is a restore**, never "run the old image on the new schema": the previous image's migrate runner **refuses** a database that carries a migration it does not know (`{"ok":false,"refused":"database drift: applied migrations are not all approved and finished — nothing was applied","unknown":[…]}`, exit code 2; measured).
 
-**Rehearsed locally on 2026-11-27** (`infra/staging/rollback-rehearsal-local.sh`, Docker Desktop only, disposable `flower-staging` resources, two real workspaces, a sealed balanced ledger, a labelled test migration that is NOT part of any release): **141 checks passed, 0 failed, 1 explained deviation** (below). Not rehearsed on a host.
+**Rehearsed locally on 2026-11-27** (`infra/staging/rollback-rehearsal-local.sh`, Docker Desktop only, disposable `flower-staging` resources, two real workspaces, a sealed balanced ledger, a labelled test migration that is NOT part of any release): **142 checks passed, 0 failed, 1 explained deviation** (below). Not rehearsed on a host.
 
 1. Stop sales (the till is online-only; use the paper log of `PILOT-RUNBOOK.md` §7). Record the image IDs of the running set (`release-images.mjs`) **before** every deploy; deploy by those IDs.
 2. Quiesce writers: `docker compose stop caddy pos owner-web api`, confirm no `flower_app` / `flower_platform` connection remains, then run `backup` (a verified `pg_dump -Fc`). Note the dump's sha256 and size.
