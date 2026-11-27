@@ -1906,6 +1906,74 @@ describe('Sales Financial Report — task 3b.10 Checkpoint B (real documents, re
       expect(candidate).toBe(legacy);
     });
 
+    it('END-TO-END duplicate: a credit note whose invoice has BOTH revenue journals (invoice_ar AND walk_in_sale, both sealed) has a revenue journal — it is a duplicate, never "missing" and never counted twice', async () => {
+      const co = await makeCompany(tenantId, { currency: 'AED' });
+      const c = await mkCustomer(co);
+      const s = await sell(
+        await mkOrder(co, c.customerId, one(10_000n)),
+        { intent: 'ON_CREDIT' },
+        at('2026-06-10'),
+      );
+      await cancel(s.order, at('2026-06-12'));
+      setClock(at('2026-06-11'));
+      await asTenant((tx) =>
+        engine.postJournal(tx, {
+          tenantId,
+          companyId: co.companyId,
+          sourceKind: 'walk_in_sale', // the OTHER revenue kind, same invoice id, sealed
+          sourceId: s.invoiceId,
+          branchId: co.branchId,
+          lines: [
+            { accountKey: 'ASSET.ACCOUNTS_RECEIVABLE', direction: 'debit', amountMinor: 10_500n },
+            { accountKey: 'REVENUE.SALES', direction: 'credit', amountMinor: 10_000n },
+            { accountKey: 'LIABILITY.TAX_PAYABLE', direction: 'credit', amountMinor: 500n },
+          ],
+        }),
+      );
+      setClock(DEFAULT_INSTANT);
+      const err = await reject(companyReport(co, '2026-06-10', '2026-06-12'));
+      expect(err.code).toBe('REPORT_SALES_SOURCE_INTEGRITY');
+      expect(err.message).toContain('duplicateRevenueJournals');
+      expect(err.message).not.toContain('creditNotesWithoutRevenueJournal');
+    });
+
+    it('END-TO-END reversal: fully REVERSING the invoice revenue journal does not make the credit note "lose" its revenue journal — the original sealed journal still proves it', async () => {
+      const co = await makeCompany(tenantId, { currency: 'AED' });
+      const c = await mkCustomer(co);
+      const s = await sell(
+        await mkOrder(co, c.customerId, one(10_000n)),
+        { intent: 'ON_CREDIT' },
+        at('2026-06-10'),
+      );
+      await cancel(s.order, at('2026-06-12'));
+      const entry = (
+        await q<{ id: string }>(
+          `SELECT id FROM journal_entry WHERE "sourceKind" = 'invoice_ar' AND "sourceId" = $1`,
+          [s.invoiceId],
+        )
+      )[0]!;
+      setClock(at('2026-06-13'));
+      await asTenant((tx) =>
+        engine.reverseJournal(tx, {
+          tenantId,
+          companyId: co.companyId,
+          originalJournalEntryId: entry.id,
+          sourceKind: 'journal_reversal',
+          sourceId: randomUUID(),
+        }),
+      );
+      setClock(DEFAULT_INSTANT);
+      // the original is still sealed and still carries the invoice id: the probe must not report it missing.
+      // (Whether the report accepts or rejects the window for ANOTHER reason is not this probe's business.)
+      let message = '';
+      try {
+        await companyReport(co, '2026-06-10', '2026-06-13');
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).not.toContain('creditNotesWithoutRevenueJournal');
+    });
+
     it("a defect in ANOTHER branch never fails (or discloses itself in) a healthy branch's report", async () => {
       const co = await makeCompany(tenantId, { currency: 'AED' });
       await sell(
