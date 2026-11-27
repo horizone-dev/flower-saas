@@ -13,3 +13,11 @@ packages/db/prisma/migrations/**
 # scripts / templates prettier cannot parse
 *.sh
 .env.example
+
+# hash-pinned review artefacts (docs/decisions/security-review-share/SHARE-MANIFEST.json, promotion-package BUNDLE.json): must stay byte-exact
+docs/decisions/promotion-packages/
+docs/decisions/security-review-share/
+docs/decisions/AL1-SE1-INDEPENDENT-REVIEW-HANDOFF.md
+docs/decisions/D-ORDER-OWNER-DECISION.md
+docs/decisions/SECURITY-OPERATOR-AND-REVIEWER-HANDOFF.md
+docs/decisions/STAGING-PREFLIGHT-RUNBOOK.md

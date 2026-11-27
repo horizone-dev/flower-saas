@@ -1,0 +1,56 @@
+import 'reflect-metadata';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
+import { createSaleWorld, type SaleWorld } from '../../verification/load-sale-world.js';
+
+/**
+ * F-6 CHARACTERISATION of the CURRENT server behaviour (no client involved): a direct API sale of a variant with NO tax category in a
+ * VAT-regime country (AE) completes, with the line recorded at rateBps NULL and tax 0. This test PASSES today and documents the residual gap;
+ * once the F-6 server amendment is approved and applied it must be INVERTED (the same call refused with 422 ORDER_LINE_TAX_NOT_CONFIGURED) and
+ * the explicit-category control below must keep selling with tax > 0.
+ */
+describe('F-6 — direct API sale of an unclassified variant (current behaviour)', () => {
+  let stack: TestStack;
+  let w: SaleWorld;
+
+  beforeAll(async () => {
+    stack = await startTestStack({ services: ['postgres', 'redis'] });
+    migrateTestDb(stack.postgres.url);
+    w = await createSaleWorld({ pg: stack.postgres.url, redis: stack.redis.url }, 2, {
+      realClock: true,
+    });
+  }, 300_000);
+
+  afterAll(async () => {
+    await w?.h.close();
+    await w?.pool.end();
+    await stack?.stop();
+  });
+
+  it('today: the sale completes with tax 0 although the country has a VAT regime and the variant has no category', async () => {
+    const regime = await w.pool.query(
+      `SELECT regime FROM country_tax_config WHERE "countryCode" = 'AE' AND "effectiveTo" IS NULL`,
+    );
+    expect(regime.rows[0]?.regime).toBe('VAT');
+    const cat = await w.pool.query(
+      `SELECT "taxCategoryKey" FROM variant WHERE id = $1`,
+      [w.variantId],
+    );
+    expect(cat.rows[0]?.taxCategoryKey).toBeNull();
+
+    const s = await w.sale({ co: w.a, branch: w.a.branches[0]!, token: w.ownerToken });
+    expect(s.ok, JSON.stringify(s)).toBe(true); // <-- after the amendment: ok === false, code ORDER_LINE_TAX_NOT_CONFIGURED
+    const inv = await w.pool.query(
+      `SELECT i."taxTotalAmountMinor"::text AS tax, i."totalAmountMinor"::text AS total
+         FROM invoice i JOIN "order" o ON o.id = i."orderId" WHERE o.id = $1`,
+      [s.orderId],
+    );
+    expect(inv.rows[0]?.tax).toBe('0');
+    expect(BigInt(inv.rows[0]?.total)).toBeGreaterThan(0n);
+    const line = await w.pool.query(
+      `SELECT "taxCategoryKey", "rateBps" FROM order_line WHERE "orderId" = $1`,
+      [s.orderId],
+    );
+    expect(line.rows[0]).toEqual({ taxCategoryKey: null, rateBps: null });
+  });
+});

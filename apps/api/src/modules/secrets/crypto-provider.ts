@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../../config/env.js';
+import { DomainError } from '../../common/errors/domain-error.js';
 
 /** A sealed secret — three opaque byte blobs, stored as-is in `provider_credential`. */
 export interface SealedSecret {
@@ -26,6 +27,29 @@ export abstract class CryptoProvider {
 }
 
 export const CRYPTO_PROVIDER = Symbol('CRYPTO_PROVIDER');
+
+/**
+ * R-1 (PROPOSED): the FAIL-CLOSED provider. Holds no key, seals nothing, opens nothing: every call is refused with 503 `SECRETS_DISABLED` and
+ * never echoes the plaintext. For a production deployment that stores no provider secrets (the controlled pilot) so the API can boot while the
+ * managed KMS provider is still unwired (G16). It cannot weaken anything: a feature that needs a secret simply fails closed.
+ */
+@Injectable()
+export class DisabledCryptoProvider extends CryptoProvider {
+  async encrypt(_plaintext: string, _ctx: CryptoContext): Promise<SealedSecret> {
+    throw new DomainError(
+      'SECRETS_DISABLED',
+      'the secrets vault is disabled in this deployment',
+      503,
+    );
+  }
+  async decrypt(_sealed: SealedSecret, _ctx: CryptoContext): Promise<string> {
+    throw new DomainError(
+      'SECRETS_DISABLED',
+      'the secrets vault is disabled in this deployment',
+      503,
+    );
+  }
+}
 
 const ALG = 'aes-256-gcm';
 const NONCE_BYTES = 12;

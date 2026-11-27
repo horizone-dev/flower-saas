@@ -1,0 +1,210 @@
+{
+  "package": "phase-4-d-z1-e1",
+  "status": "PREPARED_NOT_APPLIED",
+  "note": "A reviewed, UNAPPLIED promotion diff. Not in packages/db/prisma/migrations. Promote only as a whole, in order, after every approval below is RECORDED by a human.",
+  "newestExistingMigration": "20261204120000_phase_4_device_permissions",
+  "steps": [
+    {
+      "id": "D",
+      "order": 1,
+      "migrationName": "20261205120000_phase_4_s5_register_session_count",
+      "migrationFile": "migrations/20261205120000_phase_4_s5_register_session_count/migration.sql",
+      "migrationSha256": "2bae4261acb8f0212bc3cf3beb8f2052fd3ac7ff79d543edd13b41ece570a496",
+      "sources": [
+        {
+          "path": "docs/decisions/proposed-migrations/DRAFT-D-register-session-count.sql",
+          "sha256": "5bdae72d95c477a1c6fe1371a009241d2843a417aa43ac67fc22e4634640c68a"
+        },
+        {
+          "path": "docs/decisions/promotion-packages/phase-4-d-z1-e1/D-hardening-addendum.sql",
+          "sha256": "c19c64cfd0bb804117ee9e6e34125db3ea1e5c273d04ec2ae9c596c01610ceb9"
+        }
+      ],
+      "tables": [
+        "register_session_count"
+      ],
+      "rollbackFile": "rollback/1-d.sql",
+      "rollbackSha256": "feae9a2e6aebd5351a972e17555da66194002eb5e7104197d56ed4ad93525b49"
+    },
+    {
+      "id": "Z1",
+      "order": 2,
+      "migrationName": "20261205120100_phase_4_s5_z_report_storage",
+      "migrationFile": "migrations/20261205120100_phase_4_s5_z_report_storage/migration.sql",
+      "migrationSha256": "fa249334c86996256ac20f4e43d2e786f17036aa58e4f034a588b12a571955e9",
+      "sources": [
+        {
+          "path": "docs/decisions/proposed-migrations/DRAFT-Z1-z-report-storage.sql",
+          "sha256": "ad8c4e189c11be16568f2c1b6e212478adb8f3fcc96b366585f17319ed755097"
+        }
+      ],
+      "tables": [
+        "z_report"
+      ],
+      "rollbackFile": "rollback/2-z1.sql",
+      "rollbackSha256": "43e40437bfd81be98ae3efcec1bfe9f6c21569bfdd3bc3e25f1bcab88716d31f"
+    },
+    {
+      "id": "E1",
+      "order": 3,
+      "migrationName": "20261205120200_phase_4_7_expenses_and_other_income",
+      "migrationFile": "migrations/20261205120200_phase_4_7_expenses_and_other_income/migration.sql",
+      "migrationSha256": "2be18832828b8787b1414b49a4f6fe6176c0891e90622935255f6aa4b412cb88",
+      "sources": [
+        {
+          "path": "docs/decisions/proposed-migrations/DRAFT-E1-expenses-and-other-income.sql",
+          "sha256": "0efd45240520ca17aab6ca205d71994946b5faae913a33b0f28def012369de86"
+        }
+      ],
+      "tables": [
+        "expense_category",
+        "expense",
+        "expense_event",
+        "other_income"
+      ],
+      "rollbackFile": "rollback/3-e1.sql",
+      "rollbackSha256": "845d4b995ffb50b0db774f5f65258a9ed08f0b44f9469d3b0ed0ebd8de2093a1"
+    }
+  ],
+  "schemaAdditions": {
+    "file": "schema-additions.prisma",
+    "sha256": "7d55e1f50448e14cce72725c0892ecaf5a086922fb0098391e24f80516a691a6",
+    "appendedAfter": "packages/db/prisma/schema.prisma + one newline",
+    "models": [
+      {
+        "name": "RegisterSessionCount",
+        "sha256": "2f8b46f17283d839253f055ca224700f0822075c73c8dffb271b9dfa8f43a7b8"
+      },
+      {
+        "name": "ZReport",
+        "sha256": "edcfd24058b64ed4ea8b9f4d95a4aad7f0619cb0993e68b925fd2410f3c9413b"
+      },
+      {
+        "name": "ExpenseCategory",
+        "sha256": "8021ccd9e04e69c814880c48ddeaeb334f7e071c45a791ed383a8444f4692af8"
+      },
+      {
+        "name": "Expense",
+        "sha256": "22a5341ed532522754a44703f1a59aedaebdc5c68e48edb7cf7b2c84882c4b29"
+      },
+      {
+        "name": "ExpenseEvent",
+        "sha256": "762ea2539eaff1d1aaf60c326f858b5042fb8c1fa2e9bbf14c5889ec17481a7e"
+      },
+      {
+        "name": "OtherIncome",
+        "sha256": "7af95ec1cc5bae97a3b7d663434d27e662064612df8bbf7b9298716d40091bcd"
+      }
+    ]
+  },
+  "driftAmendment": {
+    "file": "drift-amendment.json",
+    "sha256": "786062ab32192ac324e67590ed24eceae717d2c328a3e60ba2d7f3282ba94665",
+    "amendedFixtures": {
+      "baseline": {
+        "file": "amended-fixtures/schema-drift-baseline.json",
+        "sha256": "a879fa133045f706e46c5097073f2720373de1124ab391afe10c3838c159a7c9"
+      },
+      "review": {
+        "file": "amended-fixtures/schema-drift-review.json",
+        "sha256": "5b96e5cd367fd04c02929376a43d23dcbff669a7c069a210886567991f80b9a7"
+      }
+    }
+  },
+  "pinAmendments": {
+    "patch": "pin-amendments.patch",
+    "sha256": "a6f51987327039013b95ff4739900c6e8871d546dcbce41703d8212bd80954ea",
+    "note": "rewrites the pins that name the newest migration and authorises the three migrations and six models in frozen-baseline.ts; apply together with the migrations, in the same reviewed change"
+  },
+  "activation": {
+    "routes": false,
+    "permissionGrants": false,
+    "glPosting": false,
+    "cashMovement": false,
+    "shiftClose": false
+  },
+  "approvals": [
+    {
+      "id": "Z-REPORT-ATTRIBUTION",
+      "owner": "OWNER",
+      "what": "the Z-Report attribution decisions O-1..O-8, A-1..A-5, SR-1, Q-1..Q-3 (docs/decisions/Z-SALES-ATTRIBUTION-DECISION.md)",
+      "recorded": false
+    },
+    {
+      "id": "COUNT-AND-CLOSE-RULE",
+      "owner": "OWNER",
+      "what": "the register-session count and close rule of DRAFT D (decision sheet E-2 / E-3 / E-4 / D-5, S-9): today a close needs a balanced count and, with Z1, its Z-Report",
+      "recorded": false
+    },
+    {
+      "id": "EXPENSE-APPROVAL-POLICY",
+      "owner": "OWNER",
+      "what": "expense approval threshold / auto-approval, resubmission of a REJECTED expense, cancellation, separation of duties for PAY",
+      "recorded": false
+    },
+    {
+      "id": "EXPENSE-PERMISSION-HOLDERS",
+      "owner": "OWNER",
+      "what": "which role holds expense:* and income:* (granted to no system role today) and which permission / scope manages expense categories",
+      "recorded": false
+    },
+    {
+      "id": "CATEGORY-GL-MAPPING",
+      "owner": "ACCOUNTANT",
+      "what": "the expense-category → GL account mapping (no account column exists in E1)",
+      "recorded": false
+    },
+    {
+      "id": "PAYABLE-AND-AP-TIMING",
+      "owner": "ACCOUNTANT",
+      "what": "whether and when PAYABLE (expense on credit → Accounts Payable) is supported (refused by E1 today; Phase 5 boundary)",
+      "recorded": false
+    },
+    {
+      "id": "TAX-TREATMENT",
+      "owner": "ACCOUNTANT",
+      "what": "tax inclusion (included vs added) and the tax-code vocabulary for expenses and other income",
+      "recorded": false
+    },
+    {
+      "id": "OTHER-INCOME-FLOW",
+      "owner": "ACCOUNTANT",
+      "what": "the other-income status vocabulary and approval flow (the table admits only DRAFT today)",
+      "recorded": false
+    },
+    {
+      "id": "CASH-EXPENSE-DRAWER-MOVEMENT",
+      "owner": "ACCOUNTANT",
+      "what": "the cash-drawer movement of a CASH expense (EXPENSE is BLOCKED_PENDING_POLICY: no cash moves today)",
+      "recorded": false
+    },
+    {
+      "id": "POSTING",
+      "owner": "ACCOUNTANT",
+      "what": "any journal posting of an expense or other income (none exists)",
+      "recorded": false
+    },
+    {
+      "id": "GRANTS-RLS-LOCKS",
+      "owner": "SECURITY",
+      "what": "review of the D / Z1 / E1 grants, forced RLS, TRUNCATE guards, lock order, deferred triggers, and the expense repository lock order",
+      "recorded": false
+    },
+    {
+      "id": "PLATFORM-AUDIT-EVENTS",
+      "owner": "SECURITY",
+      "what": "which platform audit_log events activation must write (expense_event is an in-transaction history, NOT a substitute for them)",
+      "recorded": false
+    },
+    {
+      "id": "AUDIT-ACTION-REGISTRATION",
+      "owner": "SECURITY",
+      "what": "registration in common/audit/actions.ts of the eight proposed audit actions (expense_record.created/submitted/approved/rejected/paid, expense_category.created/active_changed, other_income.draft_created) via patches/E1-audit-actions-registry.patch, their bounded payload contents and security:false flag; the audit policy is REQUIRED only after this approval (until then the live writer refuses them and an activated REQUIRED policy fails closed)",
+      "recorded": false
+    }
+  ],
+  "retiredAtPromotion": [
+    "apps/api/src/verification/promotion-package.structural.test.ts",
+    "packages/db/test/phase4-promotion-package.integration.test.ts"
+  ]
+}

@@ -1,0 +1,35 @@
+diff --git a/apps/api/src/modules/catalog/variant.repository.ts b/apps/api/src/modules/catalog/variant.repository.ts
+index 70cf927..86c9749 100644
+--- a/apps/api/src/modules/catalog/variant.repository.ts
++++ b/apps/api/src/modules/catalog/variant.repository.ts
+@@ -300,7 +300,7 @@ export class VariantRepository extends ScopedRepository {
+       if (next === 'ACTIVE') {
+         const product = await tx.product.findUnique({
+           where: { id: current.productId },
+-          select: { status: true, fulfilmentStrategy: true },
++          select: { status: true, fulfilmentStrategy: true, taxCategoryKey: true },
+         });
+         if (!product) throw new NotFoundError('product');
+         if (product.status !== 'ACTIVE') {
+@@ -325,6 +325,21 @@ export class VariantRepository extends ScopedRepository {
+             409,
+           );
+         }
++        // F-6 (PROPOSED, needs owner approval) — fail closed: a variant with NO effective tax category
++        // (variant override, else product default) is charged 0 tax by the sale path. A missing
++        // classification must never silently mean "no VAT"; ZERO_RATED / EXEMPT are explicit categories
++        // and pass. Same shape and precedent as VARIANT_BASE_UOM_REQUIRED above.
++        const variantTax = await tx.variant.findUnique({
++          where: { id },
++          select: { taxCategoryKey: true },
++        });
++        if ((variantTax?.taxCategoryKey ?? product.taxCategoryKey ?? null) === null) {
++          throw new DomainError(
++            'VARIANT_TAX_CATEGORY_REQUIRED',
++            'assign a tax category (variant or product) before activating a variant',
++            409,
++          );
++        }
+         // owner L-7 — reactivating an archived variant whose combination is now
+         // taken by another non-archived variant → 409, no mutation, no audit.
+         await assertSignatureFree(tx, current.productId, current.optionSignature, id);

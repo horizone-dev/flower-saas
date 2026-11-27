@@ -235,11 +235,22 @@ export interface SaleWorld {
 export async function createSaleWorld(
   urls: { pg: string; redis: string },
   branchesPerCompany = 3,
+  /** `realClock`: the MVP pilot rehearsal (real tokens, real dates); every other suite keeps the fixed 2026-06-15 clock */
+  opts: { realClock?: boolean } = {},
 ): Promise<SaleWorld> {
   const pool = new pg.Pool({ connectionString: urls.pg, max: 6 });
   await seedReference(pool);
   const clock: Clock = { now: () => FIXED_INSTANT };
-  const h = await bootApp(urls, clock);
+  const h = opts.realClock ? await bootApp(urls) : await bootApp(urls, clock);
+  const anchor = opts.realClock ? new Date() : FIXED_INSTANT;
+  const anchorIso = anchor.toISOString().slice(0, 10);
+  // the accounting period: the fixed June window, or (real clock) the previous, current and next month so that today is always covered
+  const periodStart = opts.realClock
+    ? new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() - 1, 1))
+    : new Date('2026-06-01T00:00:00Z');
+  const periodEnd = opts.realClock
+    ? new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 2, 0))
+    : new Date('2026-06-30T00:00:00Z');
   const platform = await mintPlatformToken(h);
   const req: SaleWorld['req'] = async (method, url, token, body, headers = {}) => {
     const t0 = performance.now();
@@ -292,16 +303,16 @@ export async function createSaleWorld(
       h.app.get(AccountRepository).ensureDefaultAccounts(tx, { tenantId, companyId }),
     );
     const covering = await q(
-      `SELECT id FROM accounting_period WHERE "companyId" = $1 AND "startDate" <= DATE '2026-06-15' AND "endDate" >= DATE '2026-06-15'`,
-      [companyId],
+      `SELECT id FROM accounting_period WHERE "companyId" = $1 AND "startDate" <= $2::date AND "endDate" >= $2::date`,
+      [companyId, anchorIso],
     );
     if (covering.length === 0) {
       await runScoped(h.db.appClient(), { tenantId }, (tx) =>
         h.app.get(AccountingPeriodRepository).create(tx, {
           tenantId,
           companyId,
-          startDate: new Date('2026-06-01T00:00:00Z'),
-          endDate: new Date('2026-06-30T00:00:00Z'),
+          startDate: periodStart,
+          endDate: periodEnd,
         }),
       );
     }

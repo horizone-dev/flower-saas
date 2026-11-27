@@ -25,10 +25,19 @@ FROM deps AS build
 ARG APP
 RUN test -n "$APP" || (echo "APP build-arg is required" && exit 1)
 COPY . .
+# Build-time API wiring (Next bakes `rewrites()` and NEXT_PUBLIC_* at build). Declared WITHOUT defaults so an unset arg stays unset:
+#   single-origin POS:  --build-arg API_PROXY_TARGET=http://api:3001 --build-arg NEXT_PUBLIC_API_BASE_URL=
+#   cross-origin app:   --build-arg NEXT_PUBLIC_API_BASE_URL=https://api.example.com   (and CORS_ORIGINS on the API)
+# turbo.json lists both in the build task `env`, so strict env mode passes them through (and they key the cache).
+ARG API_PROXY_TARGET
+ARG NEXT_PUBLIC_API_BASE_URL
 RUN pnpm turbo run build --filter "@flower/${APP}"
 
 FROM node:24.20.0-bookworm-slim AS runtime
 ARG APP
+# bake APP into the ENVIRONMENT: the shell-form CMD below expands ${APP} at RUNTIME, and a bare ARG is not visible then
+# (it expanded to an empty string -> `node apps//server.js` -> MODULE_NOT_FOUND; found by the staging smoke test)
+ENV APP=${APP}
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
