@@ -14,6 +14,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PG_PINNED, readPostgresPin } from './postgres-pin.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const problems = [];
@@ -68,8 +69,40 @@ if (!envFile) {
     if (typeof s.image === 'string' && /:latest$/.test(s.image))
       bad(`${name} uses a :latest image`);
   }
-  for (const name of ['postgres', 'redis', 'api', 'pos', 'owner-web']) {
+  // The resolved (not just the env-file) images: postgres and backup must be the SAME digest-pinned 17.<minor> image, equal to the reviewed
+  // pin — a literal `postgres:17` in the compose file would pass the env preflight and still float.
+  const pg = svc.postgres?.image;
+  const pgBackup = svc.backup?.image;
+  if (typeof pg !== 'string' || !PG_PINNED.test(pg))
+    bad(`postgres image must be postgres:17.<minor>@sha256:<64 hex> (got ${JSON.stringify(pg)})`);
+  else if (pg !== readPostgresPin())
+    bad('postgres image differs from the reviewed pin in infra/staging/postgres-image.pin');
+  if (pg !== pgBackup)
+    bad(
+      `postgres and backup must use the same image (got ${JSON.stringify(pg)} and ${JSON.stringify(pgBackup)})`,
+    );
+  for (const name of ['postgres', 'redis', 'api', 'pos', 'owner-web', 'backup-scheduler']) {
     if (!svc[name]?.healthcheck) bad(`${name} has no healthcheck`);
+  }
+  // scheduled backups: same image as the database (pg_dump must not drift from the server it dumps), and a backup dependency on a healthy postgres
+  if (svc['backup-scheduler']?.image !== pg)
+    bad(
+      `backup-scheduler must use the same image as postgres (got ${JSON.stringify(svc['backup-scheduler']?.image)})`,
+    );
+  dep('backup-scheduler', 'postgres', 'service_healthy');
+  // third-party images are pinned by DIGEST (a tag, even a patch tag, can be re-pointed: the floating redis:7 and caddy:2 tags had already
+  // moved to different digests than the images every rehearsal ran)
+  for (const name of ['redis', 'caddy']) {
+    if (!/@sha256:[0-9a-f]{64}$/.test(String(svc[name]?.image ?? '')))
+      bad(
+        `${name} image must be pinned by digest (name@sha256:<64 hex>), got ${JSON.stringify(svc[name]?.image)}`,
+      );
+  }
+  // every container's log is rotated (Docker's default json-file driver never rotates and fills the host disk)
+  for (const [name, s] of Object.entries(svc)) {
+    const o = s.logging?.options ?? {};
+    if (s.logging?.driver !== 'json-file' || !o['max-size'] || !o['max-file'])
+      bad(`${name} has no log rotation (logging: json-file with max-size and max-file)`);
   }
   if (svc.api.environment?.NODE_ENV !== 'production') bad('api must run with NODE_ENV=production');
   if (svc.api.environment?.SECRETS_PROVIDER === 'dev')

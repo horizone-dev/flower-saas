@@ -14,10 +14,19 @@ name: flower-staging
 x-restart: &restart
   restart: unless-stopped
 
+# Docker's default json-file driver NEVER rotates: a chatty container fills the host disk. Every service (long-running and one-shot) rotates
+# its own log: 5 files x 10 MB. check-release refuses a service without this.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: '10m'
+      max-file: '5'
+
 services:
   postgres:
-    image: postgres:17
-    <<: *restart
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE (postgres:17.<minor>, optionally @sha256:<digest>)}
+    <<: [*restart, *logging]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD}
@@ -40,8 +49,10 @@ services:
       start_period: 10s
 
   redis:
-    image: redis:7
-    <<: *restart
+    # Pinned by DIGEST: Redis 7.4.11, the exact image every local rehearsal ran. The floating `redis:7` tag has already moved to a different
+    # digest since (and so has `redis:7.4.11`), so a tag is not a version. Change this only through a reviewed commit and a re-run of the smoke test.
+    image: redis@sha256:c6eabf748fc7a61dbb5a705c78bcf3d6377b1127a97d0ce965c11c44ba46896f
+    <<: [*restart, *logging]
     command:
       [
         'redis-server',
@@ -70,7 +81,7 @@ services:
     build:
       context: ../../packages/testing/docker/minio
     image: flower/minio:RELEASE.2025-04-08T15-41-24Z
-    <<: *restart
+    <<: [*restart, *logging]
     command: ['server', '/data']
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
@@ -80,8 +91,9 @@ services:
 
   # ── pre-deployment backup: a verified logical dump (pg_restore --list must read it) before ANY migration ──
   backup:
-    image: postgres:17
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE (postgres:17.<minor>, optionally @sha256:<digest>)}
     restart: 'no'
+    <<: *logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,10 +110,43 @@ services:
     volumes:
       - flower-staging-backups:/backups
 
+  # ── scheduled backups: a verified logical dump at start and every BACKUP_INTERVAL_HOURS, the newest BACKUP_KEEP verified dumps retained ──
+  # Same image as the database (pg_dump must not drift from the server). A failed backup keeps every existing dump and retries; the healthcheck
+  # turns UNHEALTHY when the newest successful backup is older than 26 h (docker compose ps / the host check show it). The dumps stay on the
+  # flower-staging-backups volume: copying them OFF this host is a separate, owner-chosen step (see STAGING-READINESS-MATRIX).
+  backup-scheduler:
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE (postgres:17.<minor>, optionally @sha256:<digest>)}
+    <<: [*restart, *logging]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?}
+      PGDATABASE: ${POSTGRES_DB:-flower}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    entrypoint: ['sh', '/ops/backup-loop.sh']
+    volumes:
+      - flower-staging-backups:/backups
+      - ./ops:/ops:ro
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'test -f /backups/.last-backup-ok && [ $$(( $$(date -u +%s) - $$(cat /backups/.last-backup-ok) )) -lt 93600 ]',
+        ]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
   # ── migrations: approved-only, read-only unless MIGRATION_MODE=deploy; one runner at a time (advisory lock) ──
   migrate:
     image: ${MIGRATE_IMAGE:?set MIGRATE_IMAGE (flower/migrate:<tag>)}
     restart: 'no'
+    <<: *logging
     depends_on:
       backup:
         condition: service_completed_successfully
@@ -112,6 +157,7 @@ services:
   roles:
     image: ${MIGRATE_IMAGE:?}
     restart: 'no'
+    <<: *logging
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -124,6 +170,7 @@ services:
   seed:
     image: ${MIGRATE_IMAGE:?}
     restart: 'no'
+    <<: *logging
     depends_on:
       roles:
         condition: service_completed_successfully
@@ -133,7 +180,7 @@ services:
 
   api:
     image: ${API_IMAGE:?set API_IMAGE (flower/api:<tag>)}
-    <<: *restart
+    <<: [*restart, *logging]
     depends_on:
       seed:
         condition: service_completed_successfully
@@ -173,7 +220,7 @@ services:
 
   pos:
     image: ${POS_IMAGE:?set POS_IMAGE (built with --build-arg API_PROXY_TARGET=http://api:3001 --build-arg NEXT_PUBLIC_API_BASE_URL=)}
-    <<: *restart
+    <<: [*restart, *logging]
     depends_on:
       api:
         condition: service_healthy
@@ -196,7 +243,7 @@ services:
 
   owner-web:
     image: ${OWNER_IMAGE:?set OWNER_IMAGE}
-    <<: *restart
+    <<: [*restart, *logging]
     depends_on:
       api:
         condition: service_healthy
@@ -221,8 +268,9 @@ services:
 
   # ── TLS termination + the only published ports ──
   caddy:
-    image: caddy:2
-    <<: *restart
+    # Pinned by DIGEST: Caddy 2.11.9, the exact image the local smoke test ran (the floating `caddy:2` tag has moved since). Same rule as redis.
+    image: caddy@sha256:4e2425f6009577e7c651010f16679c28f7d12df3e7b1914f941a7a3370746b3c
+    <<: [*restart, *logging]
     depends_on:
       pos:
         condition: service_healthy
@@ -246,6 +294,7 @@ services:
     image: ${API_IMAGE:?}
     profiles: ['bootstrap']
     restart: 'no'
+    <<: *logging
     depends_on:
       seed:
         condition: service_completed_successfully

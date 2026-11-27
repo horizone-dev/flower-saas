@@ -2,7 +2,8 @@
 /**
  * Verifies the migration runner image against a DISPOSABLE PostgreSQL container (never any real database).
  *   node infra/migrate/verify.mjs [image-tag]     default image: flower/migrate:mvp-check
- * Needs Docker. Creates a throwaway network + postgres:17 container (flower-migrate-verify-*) and removes them at the end.
+ * Needs Docker. Creates a throwaway network + a container of the PostgreSQL image in infra/staging/postgres-image.pin
+ * (flower-migrate-verify-*) and removes them at the end.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -18,8 +19,18 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { PG_PINNED, readPostgresPin } from '../staging/postgres-pin.mjs';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const image = process.argv[2] ?? 'flower/migrate:mvp-check';
+// The runner is verified on the SAME PostgreSQL image staging will run (infra/staging/postgres-image.pin), never on a floating tag.
+const pgImage = readPostgresPin();
+if (pgImage === null || !PG_PINNED.test(pgImage)) {
+  console.error(
+    'refused: infra/staging/postgres-image.pin must hold postgres:17.<minor>@sha256:<64 hex>',
+  );
+  process.exit(2);
+}
 const id = randomBytes(3).toString('hex');
 const net = `flower-migrate-verify-${id}`;
 const pgName = `flower-migrate-verify-pg-${id}`;
@@ -106,7 +117,7 @@ try {
     net,
     '-e',
     `POSTGRES_PASSWORD=${pgPass}`,
-    'postgres:17',
+    pgImage,
   ]);
   for (let i = 0; i < 60; i++) {
     try {
