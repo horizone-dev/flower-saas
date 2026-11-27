@@ -4,9 +4,7 @@ import { startTestStack, migrateTestDb, type TestStack } from '@flower/testing';
 import { DbService, type BackendConfig } from '@flower/backend';
 // White-box measurement test: it generates a disposable dataset and EXPLAINs the real statement —
 // not production module code.
-// eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
 import { runScoped } from '@flower/db';
-// eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
 import type { PrismaClient } from '@flower/db';
 import { buildTenderTotalsReportQuery } from '../modules/reporting/tender-totals-report.sql.js';
 
