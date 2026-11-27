@@ -46,11 +46,37 @@ jobs:
         run: |
           node -e "
           const r=()=>require('crypto').randomBytes(18).toString('hex');
-          const e=['POS_HOST=pos.ci.flower-saas.dev','OWNER_HOST=owner.ci.flower-saas.dev','OPS_HOST=ops.ci.flower-saas.dev','ADMIN_CIDR=203.0.113.0/24','API_IMAGE=flower/api:ci','POS_IMAGE=flower/pos-pwa:ci','OWNER_IMAGE=flower/owner-web:ci','MIGRATE_IMAGE=flower/migrate:ci','POSTGRES_IMAGE='+require('fs').readFileSync('infra/staging/postgres-image.pin','utf8').split('\n').find(l=>l.trim()&&!l.startsWith('#')).trim(),'MIGRATION_MODE=check','POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
+          const d=(c)=>c.repeat(64); // well-formed but fake digests: the preflight now requires immutable application images, and this step only validates configuration
+          const e=['POS_HOST=pos.ci.flower-saas.dev','OWNER_HOST=owner.ci.flower-saas.dev','OPS_HOST=ops.ci.flower-saas.dev','ADMIN_CIDR=203.0.113.0/24','API_IMAGE=flower/api@sha256:'+d('1'),'POS_IMAGE=flower/pos-pwa@sha256:'+d('2'),'OWNER_IMAGE=flower/owner-web@sha256:'+d('3'),'MIGRATE_IMAGE=flower/migrate@sha256:'+d('4'),'POSTGRES_IMAGE='+require('fs').readFileSync('infra/staging/postgres-image.pin','utf8').split('\n').find(l=>l.trim()&&!l.startsWith('#')).trim(),'MIGRATION_MODE=check','POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
           require('fs').writeFileSync('infra/staging/.env.ci',e.join('\n')+'\n')"
           chmod 600 infra/staging/.env.ci # the preflight (correctly) refuses an env file readable by group/others
           node infra/staging/preflight.mjs infra/staging/.env.ci
           docker compose -f infra/staging/docker-compose.staging.yml --env-file infra/staging/.env.ci config -q
+      - name: Preflight refuses tag-only application images and out-of-range backup settings (for the right reason)
+        run: |
+          refused() { # <sed expression> <expected reason fragment>
+            sed "$1" infra/staging/.env.ci > infra/staging/.env.ci.bad
+            chmod 600 infra/staging/.env.ci.bad
+            if out=$(node infra/staging/preflight.mjs infra/staging/.env.ci.bad 2>&1); then echo "preflight accepted: $1"; exit 1; fi
+            echo "$out" | grep -q "$2" || { echo "refused for the wrong reason (wanted '$2'): $out"; exit 1; }
+          }
+          refused 's|^API_IMAGE=.*|API_IMAGE=flower/api:ci|' 'API_IMAGE must be an immutable reference'
+          refused 's|^API_IMAGE=.*|API_IMAGE=flower/api:latest|' 'API_IMAGE must be an immutable reference'
+          refused 's|^API_IMAGE=.*|API_IMAGE=flower/api@sha256:abc|' 'API_IMAGE must be an immutable reference'
+          refused 's|^POS_IMAGE=.*|POS_IMAGE=flower/pos-pwa:ci|' 'POS_IMAGE must be an immutable reference'
+          refused 's|^OWNER_IMAGE=.*|OWNER_IMAGE=flower/owner-web:ci|' 'OWNER_IMAGE must be an immutable reference'
+          refused 's|^MIGRATE_IMAGE=.*|MIGRATE_IMAGE=flower/migrate:ci|' 'MIGRATE_IMAGE must be an immutable reference'
+          refused '$a BACKUP_KEEP=2' 'BACKUP_KEEP must be a whole number from 3 to 365'
+          refused '$a BACKUP_KEEP=abc' 'BACKUP_KEEP must be a whole number from 3 to 365'
+          refused '$a BACKUP_INTERVAL_HOURS=25' 'BACKUP_INTERVAL_HOURS must be a whole number from 1 to 24'
+          # in-range settings are accepted, and a tag is a --local rehearsal convenience only
+          sed '$a BACKUP_KEEP=14' infra/staging/.env.ci | sed '$a BACKUP_INTERVAL_HOURS=24' > infra/staging/.env.ci.ok
+          chmod 600 infra/staging/.env.ci.ok
+          node infra/staging/preflight.mjs infra/staging/.env.ci.ok
+          sed 's|^API_IMAGE=.*|API_IMAGE=flower/api:ci|' infra/staging/.env.ci > infra/staging/.env.ci.bad
+          chmod 600 infra/staging/.env.ci.bad
+          node infra/staging/preflight.mjs infra/staging/.env.ci.bad --local
+          rm -f infra/staging/.env.ci.bad infra/staging/.env.ci.ok
       - name: Preflight refuses a floating, tag-only, wrong-major or unreviewed PostgreSQL image (for the right reason)
         run: |
           Z=$(printf '0%.0s' {1..64})
@@ -115,3 +141,20 @@ jobs:
             docker run --rm -i -e POS_HOST=a.example.test -e OWNER_HOST=b.example.test -e OPS_HOST=c.example.test -e ADMIN_CIDR=203.0.113.0/24 caddy:2 \
               sh -c 'cat > /tmp/Caddyfile && caddy validate --config /tmp/Caddyfile' < infra/staging/$f
           done
+
+  # The staging recovery scripts (backup, retention, scheduler, role bootstrap and off-host restore, Redis flush, host readiness) against DISPOSABLE
+  # containers named flower-offhost-probe-* or against command shims. Nothing here touches a real database, host or secret, and nothing deploys.
+  # Each script runs even if an earlier one failed, so one run reports all three results.
+  staging-ops-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host readiness checks (command shims, no Docker needed)
+        run: bash infra/staging/ops/host-readiness.test.sh
+      - name: Backup, retention, role bootstrap, off-host restore and Redis flush (disposable PostgreSQL and Redis)
+        if: always()
+        run: bash infra/staging/ops/ops.test.sh
+      - name: The backup-scheduler Compose service, its healthcheck and its retention
+        if: always()
+        run: bash infra/staging/ops/scheduler-service.test.sh
