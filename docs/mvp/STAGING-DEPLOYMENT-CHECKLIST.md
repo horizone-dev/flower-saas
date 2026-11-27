@@ -98,13 +98,26 @@ Daily procedure for the alpha, to be agreed with the accountant:
 
 ## 9. Rollback
 
-Forward-only migrations: an application rollback is only valid if the previous image runs on the migrated schema.
+Migrations are forward-only, so **the rollback is a restore**, never "run the old image on the new schema": the previous image's migrate runner **refuses** a database that carries a migration it does not know (`{"ok":false,"refused":"database drift: applied migrations are not all approved and finished — nothing was applied","unknown":[…]}`, exit code 2; measured).
 
-1. Stop sales (the till is online-only; use the paper log of `PILOT-RUNBOOK.md` §7).
-2. Application rollback: previous image tags in `.env.staging`, then `MIGRATION_MODE=check docker compose … up -d api pos owner-web caddy`.
-3. Data rollback only if the data is wrong: run `backup` first, restore into a **new** database, compare, repoint `POSTGRES_DB`.
-4. Revert-forward in git for any bad merge; no history rewrite, no force-push.
-5. Smoke: `/readyz` all `ok`, one sale, one reprint, the Owner sales report. Record cause and timings. **Not yet rehearsed:** redeploying a previous good image set.
+**Rehearsed locally on 2026-11-27** (`infra/staging/rollback-rehearsal-local.sh`, Docker Desktop only, disposable `flower-staging` resources, two real workspaces, a sealed balanced ledger, a labelled test migration that is NOT part of any release): **141 checks passed, 0 failed, 1 explained deviation** (below). Not rehearsed on a host.
+
+1. Stop sales (the till is online-only; use the paper log of `PILOT-RUNBOOK.md` §7). Record the image IDs of the running set (`release-images.mjs`) **before** every deploy; deploy by those IDs.
+2. Quiesce writers: `docker compose stop caddy pos owner-web api`, confirm no `flower_app` / `flower_platform` connection remains, then run `backup` (a verified `pg_dump -Fc`). Note the dump's sha256 and size.
+3. Deploy the new set. `MIGRATION_MODE=check` first: it must list exactly the approved pending migrations; the runner refuses an unlisted extra folder and a changed file (both measured), and applies nothing in that case.
+4. **To roll back:** quiesce writers again, then restore the pre-migration dump into a **new** database: `CREATE DATABASE <new>` then `pg_restore --no-owner --exit-on-error` (use the pinned PostgreSQL image). Keep the migrated database untouched for forensics. Compare the fingerprint (`rollback-rehearsal/fingerprint.sql`) of the restored copy with the one taken at backup time.
+5. **Flush Redis before the previous API serves traffic** (`redis-cli FLUSHALL`). Sessions, rate limits and idempotency state live in Redis and are **not** part of the database backup. Measured: without the flush, an access token issued while the new set was running was still accepted (HTTP 200) after the database was rolled back; with the flush it is rejected (401) and everyone signs in again.
+6. Point the env at the previous set **by the recorded immutable IDs** and at the new database (`POSTGRES_DB=<new>`; Compose recreates the services whose configuration changed, the postgres container included, on the same volume; the migrated database stays in that volume, measured), run `preflight.mjs`, then `MIGRATION_MODE=deploy docker compose … up -d --wait`. The runner reports 49 approved / 49 applied / nothing pending; `backup`, `roles` and `seed` run as on any start.
+7. Verify: `/readyz` all `ok`; image IDs equal the recorded set; row counts equal the backup; the ledger is balanced and sealed; two-workspace isolation; one sale, one reprint, the Owner sales report.
+8. Revert-forward in git for any bad merge; no history rewrite, no force-push.
+
+**What the rehearsal showed (read before relying on it):**
+
+- **Data written after the backup is lost by design** (the recovery point is the backup time). The B-era customer written after the backup was gone after the restore, as intended.
+- The restored schema equals the original in every table row-hash and every schema aspect **except the parenthesisation of one CHECK constraint** (`item_identifier_value_chk`): PostgreSQL re-parses the dumped text and flattens `((a AND b) AND c …)` into `(a AND b AND c …)`. The definition is the same; both forms gave the same result on 11 boundary values (4 accepted, 7 rejected, 0 disagreements). The strict fingerprint therefore reports this as an **explained deviation**, not a pass.
+- After the previous set was redeployed, its `seed` job re-ran idempotently and changed only `updatedAt` on 472 reference rows (`app_meta` 1, `business_type_template` 35, `business_type_template_capability` 429, `country` 6, `plan` 1); no row was added or removed.
+- Backup file: byte-identical (sha256) from creation to the end of the rehearsal.
+- Not covered: object storage (MinIO) content is not in the database backup and was not exercised; no host, no off-host copy, no ACME TLS, no real data volume.
 
 ## 10. Acceptance gates (each ends with evidence kept with the release)
 
@@ -114,7 +127,7 @@ Forward-only migrations: an application rollback is only valid if the previous i
 | A2  | Images built from a clean tree, tagged with the commit, IDs in `release-images.json`                                                                                                                                    | file       |
 | A3  | `MIGRATION_MODE=check` lists only approved migrations; `deploy` finishes; the API reaches `/readyz` all `ok` in production mode                                                                                         | logs       |
 | A4  | TLS, HSTS, host isolation, `OPS_HOST` CIDR restriction verified from outside                                                                                                                                            | output     |
-| A5  | Backup taken and **restored into a new database on the host**                                                                                                                                                           | counts     |
+| A5  | Backup taken and **restored into a new database on the host**, then the previous image set redeployed by its recorded IDs (§9, incl. the Redis flush)                                                                   | counts     |
 | A6  | Operator bootstrap with TOTP; a workspace provisioned; a cashier and a manager onboarded through route A with **no SQL-seeded step**; the manager is refused every financial route before enrolment and passes after it | transcript |
 | A7  | Journeys J1 to J9 (`DECEMBER-ALPHA-EXECUTION.md` §3) pass on that host, with E-5 (J7) and the GL screens (J9) explicitly out of scope                                                                                   | report     |
 | A8  | Two workspaces: no cross-tenant read, write or realtime topic (probe suite green)                                                                                                                                       | suite      |
