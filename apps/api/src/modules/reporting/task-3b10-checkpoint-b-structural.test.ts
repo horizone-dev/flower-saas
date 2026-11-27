@@ -482,12 +482,13 @@ describe('B — the statement: ONE read statement, journal-anchored, sealed, pos
   });
 
   it('no pagination on the aggregate Sales report', () => {
-    // (the single LIMIT in the statement is the "LIMIT 1" of a LATERAL unique-index probe — a one-row
-    // existence lookup per document, not a page of results)
+    // (the single LIMIT 1 in the statement is the "LIMIT 1" of the duplicate-revenue LATERAL unique-index
+    // probe — a one-row existence lookup per document, not a page of results; the credit-note probe is a
+    // NOT EXISTS and carries no LIMIT — Finding A amendment candidate, PostgreSQL 17.12 plan regression)
     // …and the density guard's `LIMIT limit + 1` is the bound of the FIRST stage, not a page of results
     const limits = SQL.match(/\bLIMIT\b[^\n]*/g) ?? [];
-    expect(limits.length).toBe(3);
-    expect(limits.filter((l) => /^LIMIT 1\) (?:dj|rj) ON true$/.test(l)).length).toBe(2);
+    expect(limits.length).toBe(2);
+    expect(limits.filter((l) => /^LIMIT 1\) dj ON true$/.test(l)).length).toBe(1);
     expect(limits).toContain(`LIMIT ${SALES_REPORT_MAX_DOCUMENTS + 1}`);
     expect(SQL).not.toMatch(/\bOFFSET\b|\bFETCH\b|cursor|keyset/i);
     for (const n of B_PRODUCTION) {
@@ -502,7 +503,7 @@ describe('B — the statement: ONE read statement, journal-anchored, sealed, pos
     expect(sqlModule).not.toMatch(
       /\bcursor\b|\boffset\b|nextCursor|\bpage(?:Size|Token)?\b|hasMore/i,
     );
-    expect((SQL.match(/\bLIMIT\b/g) ?? []).length).toBe(3);
+    expect((SQL.match(/\bLIMIT\b/g) ?? []).length).toBe(2);
   });
 
   it('every money aggregate leaves the database as TEXT (exact); counts are JSON integers', () => {

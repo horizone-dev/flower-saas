@@ -116,7 +116,7 @@ describe('E — Checkpoints A, B, C and D are FROZEN: their production files are
     // Checkpoint B (Sales Financial Report)
     'sales-financial-report.ts': '724ded058d15b40d93c5382d980b2db6b4837ceb456217a62a57029f422c8422',
     'sales-financial-report.sql.ts':
-      'de4618891eab1d7c34a48bd873164730226b087f6694221611d99f9cf77e9528',
+      '268232f81bca039a3c828b4bb8f5beac749b9ae29240926c620a9b8261811f62',
     'sales-financial-report.repository.ts':
       'd26efb618d8c1cd16b80abbf6e10bf9c90a197f3a724318fdad852df04c7520e',
     'sales-financial-report.service.ts':
@@ -127,7 +127,7 @@ describe('E — Checkpoints A, B, C and D are FROZEN: their production files are
     // Checkpoint C (Tender Totals, with its density guard)
     'tender-totals-report.ts': 'f417a47b1180bfb9d0d2753a7cfc9a307d38989cdd24baaad47b886d54a0e3a2',
     'tender-totals-report.sql.ts':
-      'c6c5fe43bad3817580f2a375d8845792e72a5870ea3c96e31b9da44ee855d374',
+      'a40c4715d24ffee0a61645a1c269d62d563cf4d61d3784846b8bb36719388aeb',
     'tender-totals-report.repository.ts':
       '4b5c3a4faf84920d57962e93ff287c8d61c06a54c3398cd372ebca5fe3fc22fb',
     'tender-totals-report.service.ts':

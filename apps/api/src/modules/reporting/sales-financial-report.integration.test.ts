@@ -1799,6 +1799,113 @@ describe('Sales Financial Report — task 3b.10 Checkpoint B (real documents, re
       expect(err.message).toContain('creditNotesWithoutRevenueJournal');
     });
 
+    it('a CreditNote whose invoice id exists only on a journal of a NON-invoice kind has no revenue journal → integrity failure (probe kind predicate)', async () => {
+      const co = await makeCompany(tenantId, { currency: 'AED' });
+      const c = await mkCustomer(co);
+      const s = await sell(
+        await mkOrder(co, c.customerId, one(10_000n)),
+        { intent: 'ON_CREDIT' },
+        at('2026-06-10'),
+      );
+      await cancel(s.order, at('2026-06-12'));
+      // the invoice's revenue journal is relabelled to a kind that is NOT a revenue kind; its sourceId still
+      // equals the invoice id, so only the kind predicate keeps it from counting as the revenue journal
+      await corrupt(
+        `UPDATE journal_entry SET "sourceKind" = 'payment_allocation' WHERE "sourceKind" = 'invoice_ar' AND "sourceId" = $1`,
+        [s.invoiceId],
+      );
+      const err = await reject(companyReport(co, '2026-06-12', '2026-06-12'));
+      expect(err.code).toBe('REPORT_SALES_SOURCE_INTEGRITY');
+      expect(err.message).toContain('creditNotesWithoutRevenueJournal');
+    });
+
+    it("a revenue journal for the credit note's invoice id that belongs to ANOTHER company (or tenant) is not its revenue journal → integrity failure (probe scope predicates)", async () => {
+      const co = await makeCompany(tenantId, { currency: 'AED' });
+      const c = await mkCustomer(co);
+      const s = await sell(
+        await mkOrder(co, c.customerId, one(10_000n)),
+        { intent: 'ON_CREDIT' },
+        at('2026-06-10'),
+      );
+      await cancel(s.order, at('2026-06-12'));
+      const entry = (
+        await q<{ id: string }>(
+          `SELECT id FROM journal_entry WHERE "sourceKind" = 'invoice_ar' AND "sourceId" = $1`,
+          [s.invoiceId],
+        )
+      )[0]!;
+      await corrupt(`DELETE FROM journal_line WHERE "journalEntryId" = $1`, [entry.id]);
+      await corrupt(`DELETE FROM journal_entry WHERE id = $1`, [entry.id]);
+      // decoys: the same invoice id, sealed, revenue kind — in a sibling company and in another tenant
+      const sibling = await makeCompany(tenantId, { currency: 'AED' });
+      for (const [decoyTenant, decoyCompany] of [
+        [tenantId, sibling.companyId],
+        [randomUUID(), randomUUID()],
+      ] as const) {
+        await corrupt(
+          `INSERT INTO journal_entry (id,"tenantId","companyId","accountingPeriodId","postingDate","sourceKind","sourceId",
+                                      "currencyCode","postingFingerprint","sealedAt")
+           VALUES (gen_random_uuid(), $1::uuid, $2::uuid, gen_random_uuid(), DATE '2026-06-10', 'invoice_ar', $3, 'AED', $4, now())`,
+          [decoyTenant, decoyCompany, s.invoiceId, randomUUID()],
+        );
+      }
+      const err = await reject(companyReport(co, '2026-06-12', '2026-06-12'));
+      expect(err.code).toBe('REPORT_SALES_SOURCE_INTEGRITY');
+      expect(err.message).toContain('creditNotesWithoutRevenueJournal');
+    });
+
+    it('PROBE EQUIVALENCE: the NOT EXISTS credit-note probe counts exactly what the earlier LATERAL … LIMIT 1 form counted (NULL id, duplicate matches, wrong kind, other company / tenant, unsealed)', async () => {
+      const co = await makeCompany(tenantId, { currency: 'AED' });
+      const sibling = await makeCompany(tenantId, { currency: 'AED' });
+      const run = randomUUID();
+      const id = (n: string): string => `${run}-${n}`;
+      const rows: ReadonlyArray<
+        readonly [tenant: string, company: string, kind: string, sourceId: string, sealed: boolean]
+      > = [
+        [tenantId, co.companyId, 'invoice_ar', id('match'), true],
+        [tenantId, co.companyId, 'invoice_ar', id('dup'), true],
+        [tenantId, co.companyId, 'walk_in_sale', id('dup'), true], // two revenue journals, one id: LIMIT 1 must not double count
+        [tenantId, co.companyId, 'payment_allocation', id('wrongkind'), true],
+        [tenantId, sibling.companyId, 'invoice_ar', id('othercompany'), true],
+        [randomUUID(), randomUUID(), 'invoice_ar', id('othertenant'), true],
+        [tenantId, co.companyId, 'invoice_ar', id('unsealed'), false],
+      ];
+      for (const [t, c, kind, sourceId, sealed] of rows) {
+        await corrupt(
+          `INSERT INTO journal_entry (id,"tenantId","companyId","accountingPeriodId","postingDate","sourceKind","sourceId",
+                                      "currencyCode","postingFingerprint","sealedAt")
+           VALUES (gen_random_uuid(), $1::uuid, $2::uuid, gen_random_uuid(), DATE '2026-06-10', $3, $4, 'AED', $5, ${sealed ? 'now()' : 'NULL'})`,
+          [t, c, kind, sourceId, randomUUID()],
+        );
+      }
+      const docs = `(VALUES ('${id('match')}'), ('${id('dup')}'), ('${id('wrongkind')}'), ('${id('othercompany')}'),
+                      ('${id('othertenant')}'), ('${id('unsealed')}'), ('${id('none')}'), (NULL::text)) AS d(inv)`;
+      const legacy = (
+        await q<{ n: number }>(
+          `SELECT COUNT(*)::int AS n FROM ${docs}
+             LEFT JOIN LATERAL (
+               SELECT 1 AS "hit" FROM journal_entry j3
+                WHERE j3."tenantId" = $1::uuid AND j3."companyId" = $2::uuid AND j3."sealedAt" IS NOT NULL
+                  AND j3."sourceKind" IN ('invoice_ar','walk_in_sale') AND j3."sourceId" = d.inv
+                LIMIT 1) rj ON true
+            WHERE rj."hit" IS NULL`,
+          [tenantId, co.companyId],
+        )
+      )[0]!.n;
+      const candidate = (
+        await q<{ n: number }>(
+          `SELECT COUNT(*)::int AS n FROM ${docs}
+            WHERE NOT EXISTS (
+               SELECT 1 FROM journal_entry j3
+                WHERE j3."tenantId" = $1::uuid AND j3."companyId" = $2::uuid AND j3."sealedAt" IS NOT NULL
+                  AND j3."sourceKind" IN ('invoice_ar','walk_in_sale') AND j3."sourceId" = d.inv)`,
+          [tenantId, co.companyId],
+        )
+      )[0]!.n;
+      expect(legacy).toBe(6); // wrongkind, othercompany, othertenant, unsealed, none, NULL — never match / dup
+      expect(candidate).toBe(legacy);
+    });
+
     it("a defect in ANOTHER branch never fails (or discloses itself in) a healthy branch's report", async () => {
       const co = await makeCompany(tenantId, { currency: 'AED' });
       await sell(
