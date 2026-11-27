@@ -67,6 +67,8 @@ This pin does **not** resolve it; it only keeps staging on the engine where the 
 - `backup` (a verified `pg_dump -Fc`) runs **before** `migrate` on every start. Never skip it.
 - **Restore drill before the alpha opens, on the real host:** restore the newest dump into a **new** database (`pg_restore --no-owner`), compare row counts and the schema fingerprint, then point `POSTGRES_DB` at it only if recovering. Never restore over the live database. Locally rehearsed; **not yet rehearsed on a host**.
 - Record backup time, size, restore time. Those numbers are the RTO evidence an accountant will ask for.
+- **The backups volume holds one dump per start** (the first `up` also backs up the still-empty database). Restore the file whose name the `backup` job printed and whose sha256 you recorded, not "the newest" and not "the first". Nothing prunes old dumps, and **nothing runs `backup` between deployments** (the recovery point is the last deployment until a host timer runs `docker compose run --rm backup`; schedule, retention and the off-host copy are owner decisions). See `STAGING-READINESS-MATRIX.md` G6 to G8.
+- **Restoring on a different server needs the four cluster roles first** (measured 2026-11-27): a dump of one database does not carry roles, so on an empty server `pg_restore --exit-on-error` stops at the first `GRANT … TO flower_app`, and without `--exit-on-error` it restores 79 policies and **0 of the grants**. Create `flower_app`, `flower_platform`, `flower_dispatcher`, `flower_migrate` with the source's attributes (snippet and evidence in `STAGING-READINESS-MATRIX.md` §2.6), restore, run the `roles` job, then `MIGRATION_MODE=check`. Verified on a fresh container of the pinned image: exit 0, the fingerprint equals the backup's except the one explained CHECK parenthesisation, tenant isolation holds as `flower_app`.
 
 ## 6. Database migration order
 
@@ -117,7 +119,7 @@ Migrations are forward-only, so **the rollback is a restore**, never "run the ol
 - The restored schema equals the original in every table row-hash and every schema aspect **except the parenthesisation of one CHECK constraint** (`item_identifier_value_chk`): PostgreSQL re-parses the dumped text and flattens `((a AND b) AND c …)` into `(a AND b AND c …)`. The definition is the same; both forms gave the same result on 11 boundary values (4 accepted, 7 rejected, 0 disagreements). The strict fingerprint therefore reports this as an **explained deviation**, not a pass.
 - After the previous set was redeployed, its `seed` job re-ran idempotently and changed only `updatedAt` on 472 reference rows (`app_meta` 1, `business_type_template` 35, `business_type_template_capability` 429, `country` 6, `plan` 1); no row was added or removed.
 - Backup file: byte-identical (sha256) from creation to the end of the rehearsal.
-- Not covered: object storage (MinIO) content is not in the database backup and was not exercised; no host, no off-host copy, no ACME TLS, no real data volume.
+- Not covered by the rehearsal itself: object storage (MinIO) content is not in the database backup (no first-party code imports a storage client, so it holds no business data at this tip); no host, no off-host copy, no ACME TLS, no real data volume. The **off-host restore onto a fresh server** was measured separately on 2026-11-27 (`STAGING-READINESS-MATRIX.md` §2.6; it found the missing-roles step above).
 
 ## 10. Acceptance gates (each ends with evidence kept with the release)
 
