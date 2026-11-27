@@ -381,14 +381,12 @@ ic AS (
     (SELECT COUNT(*) FROM wp w
        JOIN cr c ON c."paymentId" = w."paymentId") AS "anonymousPaymentsWithReceiptJournal",
     (SELECT COUNT(*) FROM alu u
-       LEFT JOIN LATERAL (
-         SELECT 1 AS "hit" FROM "journal_entry" j
+      WHERE NOT EXISTS (
+         SELECT 1 FROM "journal_entry" j
           WHERE j."tenantId" = $1::uuid AND j."companyId" = $2::uuid
             AND j."sealedAt" IS NOT NULL
             AND j."sourceKind" = '${TENDER_SOURCE_KINDS.customerReceipt}'
-            AND j."sourceId" = u."paymentId"::text
-          LIMIT 1) rj2 ON true
-      WHERE rj2."hit" IS NULL) AS "allocatedPaymentsWithoutReceiptJournal"
+            AND j."sourceId" = u."paymentId"::text)) AS "allocatedPaymentsWithoutReceiptJournal"
 )
 SELECT json_build_object(
   'company', (SELECT json_build_object('defaultCurrency', co."defaultCurrency", 'accountingTimezone', co."accountingTimezone") FROM co),

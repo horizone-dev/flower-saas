@@ -113,7 +113,7 @@ describe('C — Checkpoints A and B are FROZEN: their production files are byte-
     // Checkpoint B (Sales Financial Report, the line-discount authority, the 90-day cap, the density guard)
     'sales-financial-report.ts': '724ded058d15b40d93c5382d980b2db6b4837ceb456217a62a57029f422c8422',
     'sales-financial-report.sql.ts':
-      'de4618891eab1d7c34a48bd873164730226b087f6694221611d99f9cf77e9528',
+      '268232f81bca039a3c828b4bb8f5beac749b9ae29240926c620a9b8261811f62',
     'sales-financial-report.repository.ts':
       'd26efb618d8c1cd16b80abbf6e10bf9c90a197f3a724318fdad852df04c7520e',
     'sales-financial-report.service.ts':
@@ -423,13 +423,15 @@ describe('C — the exact frozen sources: Payment and Refund rows, their exact j
     expect(SQL).toMatch(
       /FROM wp w\s+JOIN cr c ON c\."paymentId" = w\."paymentId"\) AS "anonymousPaymentsWithReceiptJournal"/,
     );
-    // the allocation check anti-joins the in-period receipts, THEN probes the unique source index with LIMIT 1
+    // the allocation check anti-joins the in-period receipts, THEN probes the unique source index with ONE
+    // NOT EXISTS over the unproven remainder only (it was LATERAL … LIMIT 1; changed because PostgreSQL 17.12
+    // costs the LATERAL form as a per-row sequential scan — Finding A amendment candidate)
     expect(SQL).toMatch(
       /WHERE NOT EXISTS \(SELECT 1 FROM cr c WHERE c\."paymentId" = a\."paymentId"\)/,
     );
-    expect(SQL).toMatch(/FROM alu u\s+LEFT JOIN LATERAL \(/);
-    expect(SQL).toMatch(/LIMIT 1\) rj2 ON true/);
-    // no EXISTS probe against journal_entry anywhere (the measured hash-anti-join / 250 000-probe shapes)
+    expect(SQL).toMatch(/FROM alu u\s+WHERE NOT EXISTS \(\s+SELECT 1 FROM "journal_entry" j\b/);
+    expect(SQL).not.toMatch(/LATERAL/);
+    // no one-line EXISTS probe against journal_entry, and the only multi-line one is the unproven-remainder probe above (the measured hash-anti-join / 250 000-probe shapes stay excluded: dense-window and query-plan gates measure it)
     expect(SQL).not.toMatch(/EXISTS \(SELECT 1 FROM "journal_entry"/);
     expect((SQL.match(/FROM "journal_entry"/g) ?? []).length).toBe(3); // the density candidates + the anchor + the one remainder probe
   });
@@ -524,19 +526,15 @@ describe('C — period authority, seal, scope predicates', () => {
         /sales-report-range|SALES_REPORT_MAX_DAYS|SALES_REPORT_MAX_DOCUMENTS|REPORT_RANGE_TOO_LARGE|parseSalesReportRange|candidateDocuments|maxDocuments|maxDays|rangeCap/,
       );
     }
-    // exactly two LIMITs: the density candidate bound (limit + 1) and the `LIMIT 1` existence probe of the unproven
-    // remainder — never a page of the report
-    expect((SQL.match(/\bLIMIT\b/g) ?? []).length).toBe(2);
-    expect(SQL).toMatch(/LIMIT 1\) rj2 ON true/);
+    // exactly ONE LIMIT: the density candidate bound (limit + 1); the unproven-remainder existence probe is a
+    // NOT EXISTS with no LIMIT — never a page of the report
+    expect((SQL.match(/\bLIMIT\b/g) ?? []).length).toBe(1);
     expect(SQL).toMatch(
       new RegExp(`\\n   LIMIT ${TENDER_REPORT_MAX_MOVEMENTS + 1}\\n\\),\\ngate AS`),
     );
-    expect(
-      SQL.replace(/LIMIT 1\) rj2 ON true/, '').replace(
-        new RegExp(`LIMIT ${TENDER_REPORT_MAX_MOVEMENTS + 1}`),
-        '',
-      ),
-    ).not.toMatch(/\bLIMIT\b|\bOFFSET\b|\bFETCH\b|cursor/i);
+    expect(SQL.replace(new RegExp(`LIMIT ${TENDER_REPORT_MAX_MOVEMENTS + 1}`), '')).not.toMatch(
+      /\bLIMIT\b|\bOFFSET\b|\bFETCH\b|cursor/i,
+    );
     const five = { from: '2021-01-01', to: '2026-12-31' };
     expect(parseReportDateRange(five)).toEqual(five);
   });

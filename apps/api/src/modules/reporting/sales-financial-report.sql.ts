@@ -250,14 +250,13 @@ ic AS (
           SELECT 1 FROM "customer_receivable" cr
            WHERE cr."invoiceId" = d."docId" AND cr."tenantId" = $1::uuid AND cr."companyId" = $2::uuid))) AS "revenueKindMismatches",
     (SELECT COUNT(*) FROM fdocs d
-       LEFT JOIN LATERAL (
-         SELECT 1 AS "hit" FROM "journal_entry" j3
+      WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.creditNote}'
+        AND NOT EXISTS (
+         SELECT 1 FROM "journal_entry" j3
           WHERE j3."tenantId" = $1::uuid AND j3."companyId" = $2::uuid
             AND j3."sealedAt" IS NOT NULL
             AND j3."sourceKind" IN (${INVOICE_KINDS})
-            AND j3."sourceId" = d."invoiceId"::text
-          LIMIT 1) rj ON true
-      WHERE d."sourceKind" = '${SALES_SOURCE_KINDS.creditNote}' AND rj."hit" IS NULL) AS "creditNotesWithoutRevenueJournal"
+            AND j3."sourceId" = d."invoiceId"::text)) AS "creditNotesWithoutRevenueJournal"
 )
 SELECT json_build_object(
   'company', (SELECT json_build_object('defaultCurrency', co."defaultCurrency", 'accountingTimezone', co."accountingTimezone") FROM co),

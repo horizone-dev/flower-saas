@@ -2700,6 +2700,50 @@ describe('Tender Totals — task 3b.10 Checkpoint C (real documents, real Postgr
       });
     });
 
+    describe('allocated-payment receipt probe: kind and scope predicates (Finding A amendment candidate)', () => {
+      async function allocatedPaymentWithoutItsReceipt(): Promise<{
+        co: Awaited<ReturnType<typeof makeCompany>>;
+        paymentId: string;
+        entry: string;
+      }> {
+        const co = await makeCompany(tenantId, { currency: 'AED' });
+        const c = await mkCustomer(co);
+        const s = await sell(
+          await mkOrder(co, c.customerId, one(10_000n)),
+          { intent: 'ON_CREDIT' },
+          at('2026-06-10'),
+        );
+        await payInvoice(co, co.branchId, s.invoiceId, [cash(10_500n)], at('2026-06-11'));
+        setClock(DEFAULT_INSTANT);
+        const paymentId = await paymentOfInvoice(s.invoiceId);
+        return { co, paymentId, entry: await journalOf('customer_receipt_payment', paymentId) };
+      }
+
+      it('a journal that carries the Payment id but is NOT a customer-receipt journal is no proof of a receipt → allocatedPaymentsWithoutReceiptJournal', async () => {
+        const { co, entry } = await allocatedPaymentWithoutItsReceipt();
+        // same sourceId, a different (non-receipt) kind: only the kind predicate keeps it from counting
+        await corrupt(
+          `UPDATE journal_entry SET "sourceKind" = 'payment_allocation' WHERE id = $1`,
+          [entry],
+        );
+        await expectIntegrity(companyReport(co, ...W6), 'allocatedPaymentsWithoutReceiptJournal');
+      });
+
+      it("a receipt journal for the Payment id that belongs to ANOTHER company is not this company's receipt → allocatedPaymentsWithoutReceiptJournal", async () => {
+        const { co, paymentId, entry } = await allocatedPaymentWithoutItsReceipt();
+        await corrupt(`DELETE FROM journal_line WHERE "journalEntryId" = $1`, [entry]);
+        await corrupt(`DELETE FROM journal_entry WHERE id = $1`, [entry]);
+        const sibling = await makeCompany(tenantId, { currency: 'AED' });
+        await corrupt(
+          `INSERT INTO journal_entry (id,"tenantId","companyId","accountingPeriodId","postingDate","sourceKind","sourceId",
+                                      "currencyCode","postingFingerprint","sealedAt")
+           VALUES (gen_random_uuid(), $1::uuid, $2::uuid, gen_random_uuid(), DATE '2026-06-11', 'customer_receipt_payment', $3, 'AED', $4, now())`,
+          [tenantId, sibling.companyId, paymentId, randomUUID()],
+        );
+        await expectIntegrity(companyReport(co, ...W6), 'allocatedPaymentsWithoutReceiptJournal');
+      });
+    });
+
     // ── anonymous walk-in tenders ──
     describe('anonymous walk-in sale journals', () => {
       it('a Payment one minor unit above the debit line it should match → walkInTenderMismatches', async () => {
