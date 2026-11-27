@@ -16,7 +16,7 @@ x-restart: &restart
 
 services:
   postgres:
-    image: postgres:17
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE (postgres:17.<minor>, optionally @sha256:<digest>)}
     <<: *restart
     environment:
       POSTGRES_USER: postgres
@@ -80,7 +80,7 @@ services:
 
   # ── pre-deployment backup: a verified logical dump (pg_restore --list must read it) before ANY migration ──
   backup:
-    image: postgres:17
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE (postgres:17.<minor>, optionally @sha256:<digest>)}
     restart: 'no'
     depends_on:
       postgres:

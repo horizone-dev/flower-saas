@@ -14,6 +14,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PG_PINNED, readPostgresPin } from './postgres-pin.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const problems = [];
@@ -68,6 +69,18 @@ if (!envFile) {
     if (typeof s.image === 'string' && /:latest$/.test(s.image))
       bad(`${name} uses a :latest image`);
   }
+  // The resolved (not just the env-file) images: postgres and backup must be the SAME digest-pinned 17.<minor> image, equal to the reviewed
+  // pin — a literal `postgres:17` in the compose file would pass the env preflight and still float.
+  const pg = svc.postgres?.image;
+  const pgBackup = svc.backup?.image;
+  if (typeof pg !== 'string' || !PG_PINNED.test(pg))
+    bad(`postgres image must be postgres:17.<minor>@sha256:<64 hex> (got ${JSON.stringify(pg)})`);
+  else if (pg !== readPostgresPin())
+    bad('postgres image differs from the reviewed pin in infra/staging/postgres-image.pin');
+  if (pg !== pgBackup)
+    bad(
+      `postgres and backup must use the same image (got ${JSON.stringify(pg)} and ${JSON.stringify(pgBackup)})`,
+    );
   for (const name of ['postgres', 'redis', 'api', 'pos', 'owner-web']) {
     if (!svc[name]?.healthcheck) bad(`${name} has no healthcheck`);
   }

@@ -2,13 +2,15 @@
 /**
  * Fails closed before the stack is started:  node infra/staging/preflight.mjs [path-to-env-file] [--local]
  * Refuses: a missing file, a missing/empty variable, any CHANGE_ME placeholder, secrets that are short or one repeated character, reused
- * passwords, localhost/example hostnames (unless --local), a wildcard ADMIN_CIDR, an env file readable by other users (POSIX), and an
- * env file that is tracked by git. Prints only variable NAMES, never values.
+ * passwords, localhost/example hostnames (unless --local), a wildcard ADMIN_CIDR, a floating or non-17 POSTGRES_IMAGE (must be
+ * postgres:17.<minor>@sha256:<digest> and equal the reviewed infra/staging/postgres-image.pin; --local also accepts a plain 17.<minor> tag),
+ * an env file readable by other users (POSIX), and an env file that is tracked by git. Prints only variable NAMES, never values.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PG_PINNED, PG_TAG, readPostgresPin } from './postgres-pin.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const local = process.argv.includes('--local');
@@ -39,6 +41,7 @@ const REQUIRED = [
   'POS_IMAGE',
   'OWNER_IMAGE',
   'MIGRATE_IMAGE',
+  'POSTGRES_IMAGE',
   'MIGRATION_MODE',
   'POSTGRES_SUPERUSER_PASSWORD',
   'APP_DB_PASSWORD',
@@ -108,6 +111,25 @@ if (!['disabled', 'kms'].includes(env['SECRETS_PROVIDER'] ?? ''))
 for (const k of ['API_IMAGE', 'POS_IMAGE', 'OWNER_IMAGE', 'MIGRATE_IMAGE']) {
   if (env[k] && /:(latest)?$/.test(env[k]))
     bad(`${k} must pin an explicit tag (not :latest / empty)`);
+}
+// The database and the backup job share ONE explicit PostgreSQL image. A floating tag lets a `docker compose pull` change the minor
+// version silently (17.12 changed report query plans — Finding A) and lets pg_dump drift from the server it dumps.
+// A real staging deployment needs the DIGEST too (a patch tag is mutable) and must equal the reviewed pin; `--local` rehearsals may use a tag.
+const pgPin = readPostgresPin();
+if (pgPin === null || !PG_PINNED.test(pgPin))
+  bad(
+    'POSTGRES_IMAGE: infra/staging/postgres-image.pin must hold exactly one reference of the form postgres:17.<minor>@sha256:<64 hex>',
+  );
+const pgImage = env['POSTGRES_IMAGE'];
+if (pgImage && !/CHANGE_ME/.test(pgImage)) {
+  if (!(PG_PINNED.test(pgImage) || (local && PG_TAG.test(pgImage))))
+    bad(
+      `POSTGRES_IMAGE must be postgres:17.<minor>@sha256:<64 hex>${local ? ' (or postgres:17.<minor> with --local)' : ''} — not postgres:17, :latest, a bare major, another major, a variant tag or a tag without a digest`,
+    );
+  else if (!local && pgPin !== null && pgImage !== pgPin)
+    bad(
+      'POSTGRES_IMAGE differs from the reviewed pin in infra/staging/postgres-image.pin — change the pin through a reviewed commit, not the server env file',
+    );
 }
 if (process.platform !== 'win32') {
   try {

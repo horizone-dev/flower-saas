@@ -8,6 +8,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 API=${1:?api image}; MIG=${2:?migrate image}; POS=${3:?pos image}; OWN=${4:?owner image}
+PGIMG=${POSTGRES_IMAGE:-$(grep -vE '^[[:space:]]*(#|$)' postgres-image.pin | head -1 | tr -d '\r')} # the ONE PostgreSQL image for postgres, backup and the restore drill below: the reviewed pin (never the floating postgres:17)
 C="docker compose -f docker-compose.staging.yml --env-file .env.smoke"
 R="--resolve ops.flower.localhost:8443:127.0.0.1 --resolve pos.flower.localhost:8443:127.0.0.1 --resolve owner.flower.localhost:8443:127.0.0.1"
 PW='violet-meadow-slow-river-47!'
@@ -22,7 +23,7 @@ psqlq(){ $C exec -T postgres psql -U postgres -d flower -At -c "$1" | tr -d '\r'
 node -e "
 const r=()=>require('crypto').randomBytes(18).toString('hex');
 const e=['POS_HOST=pos.flower.localhost','OWNER_HOST=owner.flower.localhost','OPS_HOST=ops.flower.localhost','ADMIN_CIDR=172.16.0.0/12','HTTP_PORT=8080','HTTPS_PORT=8443','CADDYFILE=./Caddyfile.local',
-'API_IMAGE=$API','POS_IMAGE=$POS','OWNER_IMAGE=$OWN','MIGRATE_IMAGE=$MIG','MIGRATION_MODE=check',
+'API_IMAGE=$API','POS_IMAGE=$POS','OWNER_IMAGE=$OWN','MIGRATE_IMAGE=$MIG','POSTGRES_IMAGE=$PGIMG','MIGRATION_MODE=check',
 'POSTGRES_SUPERUSER_PASSWORD='+r(),'POSTGRES_DB=flower','APP_DB_PASSWORD='+r(),'PLATFORM_DB_PASSWORD='+r(),'REDIS_PASSWORD='+r(),'MINIO_ROOT_USER=flower_minio','MINIO_ROOT_PASSWORD='+r(),'AUTH_JWT_SECRET='+r(),'SECRETS_PROVIDER=disabled'];
 require('fs').writeFileSync('.env.smoke',e.join('\n')+'\n')"
 echo "== config"; node preflight.mjs .env.smoke --local >/dev/null && ok "preflight accepts the generated env" || bad "preflight"
@@ -98,7 +99,7 @@ chk "positive control: tenant two reads its OWN receipt identity" "$(curl -sk $R
 echo "== backup and restore into a NEW database"
 MIGRATION_MODE=check $C run --rm backup 2>&1 | grep -q "backup verified" && ok "backup job: verified dump" || bad "backup job"
 PGPW=$(grep ^POSTGRES_SUPERUSER_PASSWORD .env.smoke | cut -d= -f2)
-MSYS_NO_PATHCONV=1 docker run --rm --network flower-staging_default -v flower-staging_flower-staging-backups:/backups -e PGPASSWORD=$PGPW postgres:17 sh -ec 'f=$(ls -1t /backups/*.dump | head -1); psql -h postgres -U postgres -d postgres -qc "DROP DATABASE IF EXISTS flower_restore" -c "CREATE DATABASE flower_restore" >/dev/null 2>&1; pg_restore -h postgres -U postgres -d flower_restore --no-owner "$f"' >/dev/null 2>&1
+MSYS_NO_PATHCONV=1 docker run --rm --network flower-staging_default -v flower-staging_flower-staging-backups:/backups -e PGPASSWORD=$PGPW $PGIMG sh -ec 'f=$(ls -1t /backups/*.dump | head -1); psql -h postgres -U postgres -d postgres -qc "DROP DATABASE IF EXISTS flower_restore" -c "CREATE DATABASE flower_restore" >/dev/null 2>&1; pg_restore -h postgres -U postgres -d flower_restore --no-owner "$f"' >/dev/null 2>&1
 FP="select (select count(*) from tenant)||'/'||(select count(*) from \"user\")||'/'||(select count(*) from customer)||'/'||(select count(*) from mfa_factor)||'/'||(select count(*) from _prisma_migrations)"
 LIVE=$(psqlq "$FP"); REST=$($C exec -T postgres psql -U postgres -d flower_restore -At -c "$FP" | tr -d '\r')
 chk "restored database fingerprint equals the live one ($LIVE)" "$REST" "$LIVE"
