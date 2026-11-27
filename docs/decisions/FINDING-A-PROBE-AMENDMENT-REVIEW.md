@@ -15,20 +15,22 @@
 
 Commit 1 is the verified candidate patch applied unchanged (`finding-a-probe-rewrite.candidate.patch`, sha256 `d5ca563be090cec8841cec67f36c3c2c83f433c4a4ab99ab35001355094c4d04`; `git diff --binary` of the commit equals it byte for byte).
 
-| Commit | File                                                                                      | Role                                                                       |
-| ------ | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| 1      | `apps/api/src/modules/reporting/sales-financial-report.sql.ts`                            | **Frozen statement** — probe `creditNotesWithoutRevenueJournal`            |
-| 1      | `apps/api/src/modules/reporting/tender-totals-report.sql.ts`                              | **Frozen statement** — probe `allocatedPaymentsWithoutReceiptJournal`      |
-| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts`                | pin amendment — LIMIT counts (sales 3→2, `LIMIT 1) dj` 2→1)                |
-| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts`                | pin amendment — sales SHA-256, tender probe text, tender LIMIT count       |
-| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts`                | pin amendment — SHA-256 (sales, tender)                                    |
-| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts`                | pin amendment — SHA-256 (sales, tender)                                    |
-| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts`                | pin amendment — SHA-256 (sales, tender)                                    |
-| 1      | `apps/api/src/modules/reporting/sales-financial-report.integration.test.ts`               | +3 behavioural tests (kind predicate, scope predicates, probe equivalence) |
-| 1      | `apps/api/src/modules/reporting/tender-totals-report.integration.test.ts`                 | +2 behavioural tests (kind predicate, scope predicate)                     |
-| 2      | `apps/api/src/modules/reporting/sales-financial-report.integration.test.ts`               | +2 end-to-end tests (duplicate revenue journals; reversal)                 |
-| 3      | `apps/api/src/modules/reporting/tender-totals-report.remainder-probe.integration.test.ts` | **new, failing by design** — reproduction of F-1                           |
-| 4      | `docs/decisions/FINDING-A-PROBE-AMENDMENT-REVIEW.md`                                      | this document                                                              |
+| Commit | File                                                                                       | Role                                                                       |
+| ------ | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| 1      | `apps/api/src/modules/reporting/sales-financial-report.sql.ts`                             | **Frozen statement** — probe `creditNotesWithoutRevenueJournal`            |
+| 1      | `apps/api/src/modules/reporting/tender-totals-report.sql.ts`                               | **Frozen statement** — probe `allocatedPaymentsWithoutReceiptJournal`      |
+| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-b-structural.test.ts`                 | pin amendment — LIMIT counts (sales 3→2, `LIMIT 1) dj` 2→1)                |
+| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-c-structural.test.ts`                 | pin amendment — sales SHA-256, tender probe text, tender LIMIT count       |
+| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-d-structural.test.ts`                 | pin amendment — SHA-256 (sales, tender)                                    |
+| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-e-structural.test.ts`                 | pin amendment — SHA-256 (sales, tender)                                    |
+| 1      | `apps/api/src/modules/reporting/task-3b10-checkpoint-f-structural.test.ts`                 | pin amendment — SHA-256 (sales, tender)                                    |
+| 1      | `apps/api/src/modules/reporting/sales-financial-report.integration.test.ts`                | +3 behavioural tests (kind predicate, scope predicates, probe equivalence) |
+| 1      | `apps/api/src/modules/reporting/tender-totals-report.integration.test.ts`                  | +2 behavioural tests (kind predicate, scope predicate)                     |
+| 2      | `apps/api/src/modules/reporting/sales-financial-report.integration.test.ts`                | +2 end-to-end tests (duplicate revenue journals; reversal)                 |
+| 3      | `apps/api/src/verification/task-3b10-finding-a-tender-remainder-probe.integration.test.ts` | **new, failing by design** — reproduction of F-1                           |
+| 4      | `docs/decisions/FINDING-A-PROBE-AMENDMENT-REVIEW.md`                                       | this document                                                              |
+
+Commit 3 first placed the reproduction in the reporting directory. Three frozen closed-set pins (Checkpoints A, B and C, which enumerate exactly the files allowed in that directory) reject any new file there, and CI run 2 caught it; commit 5 moves the file to `apps/api/src/verification/`, which has no closed-set pin, and the `task-3b10-` file-name prefix (the convention the Checkpoint G verification tests use) exempts it from the "nothing outside the reporting module references Tender Totals" pins. Commit 1 (the amendment itself) adds no file to the reporting directory.
 
 Hashes of the two frozen statements:
 
@@ -149,7 +151,7 @@ Sections 3–5 show the candidate fixes the 17.12 regression and changes no outp
 
 The tender statement proves "an allocated Payment has a receipt journal" from the in-period journals first; only the **unproven remainder** (a Payment allocated in the window whose receipt journal was posted in an earlier period) is probed against the unique source index. The frozen SQL header records that a per-Payment existence probe over every Payment was rejected because "a hash anti-join read the whole receipt history for a one-day report". The candidate's `NOT EXISTS` is accepted by the rewritten pin only because the keyword is followed by a newline; its plan is exactly that rejected shape once the remainder is non-empty.
 
-`tender-totals-report.remainder-probe.integration.test.ts` (commit 3): 60,000 receipt journals of history, one day holding 40 allocation journals whose receipts are 40+ days old, and a second company whose 5 allocated Payments have no receipt journal at all.
+`task-3b10-finding-a-tender-remainder-probe.integration.test.ts` (commit 3): 60,000 receipt journals of history, one day holding 40 allocation journals whose receipts are 40+ days old, and a second company whose 5 allocated Payments have no receipt journal at all.
 
 | PostgreSQL | statement              | positive company: journal rows read | negative company: journal rows read | anomaly counter (positive / negative) | test          |
 | ---------- | ---------------------- | ----------------------------------- | ----------------------------------- | ------------------------------------- | ------------- |
@@ -222,7 +224,7 @@ The two `.sql.ts` files and the structural pins are **frozen contract** (Phase 3
 2. Predicates inside each `NOT EXISTS` equal the removed lateral predicates (tenant, company, `sealedAt IS NOT NULL`, kind, key).
 3. `NOT EXISTS` vs `LEFT JOIN LATERAL … LIMIT 1 … IS NULL` for NULL keys and duplicate matches (test `PROBE EQUIVALENCE`).
 4. Decide the tender structural pin question (section 8, item 4) in light of F-1.
-5. Reproduce F-1 (`tender-totals-report.remainder-probe.integration.test.ts` fails on the candidate, passes on the shipped statement) and F-2 (section 11), and decide.
+5. Reproduce F-1 (`task-3b10-finding-a-tender-remainder-probe.integration.test.ts` fails on the candidate, passes on the shipped statement) and F-2 (section 11), and decide.
 6. Accountant: no amount, tax figure, rounding or category changes; the limits in section 4 are acceptable.
 7. Re-run on a clean checkout on both `postgres:17.11` and `postgres:17.12` (sales/tender integration, query-plan, dense-window, structural).
 8. Decide whether the 3× `full history` scenario needs a cap-aware assertion (the existing test is not changed here).
@@ -241,7 +243,7 @@ pnpm --filter=@flower/api exec vitest run src/modules/reporting/task-3b10-checkp
 pnpm --filter=@flower/api exec vitest run src/modules/reporting/sales-financial-report.integration.test.ts \
   src/modules/reporting/tender-totals-report.integration.test.ts
 # F-1 reproduction (fails on the candidate, passes on the shipped statement)
-pnpm --filter=@flower/api exec vitest run src/modules/reporting/tender-totals-report.remainder-probe.integration.test.ts
+pnpm --filter=@flower/api exec vitest run src/verification/task-3b10-finding-a-tender-remainder-probe.integration.test.ts
 ```
 
 F-2 was measured with a local, **uncommitted** copy of `sales-financial-report.query-plan.integration.test.ts` that logs, per scenario, the rows read from `journal_entry`; the helper is:

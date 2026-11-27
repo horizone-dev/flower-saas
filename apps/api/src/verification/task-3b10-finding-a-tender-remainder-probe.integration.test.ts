@@ -8,7 +8,7 @@ import { DbService, type BackendConfig } from '@flower/backend';
 import { runScoped } from '@flower/db';
 // eslint-disable-next-line flower/no-raw-prisma-in-scoped-modules
 import type { PrismaClient } from '@flower/db';
-import { buildTenderTotalsReportQuery } from './tender-totals-report.sql.js';
+import { buildTenderTotalsReportQuery } from '../modules/reporting/tender-totals-report.sql.js';
 
 /**
  * Tender Totals — the UNPROVEN-REMAINDER probe (`allocatedPaymentsWithoutReceiptJournal`), measured with a
