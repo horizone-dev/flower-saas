@@ -93,6 +93,9 @@ F="$(files)"
 check "the dump has its sha256 sidecar and no .partial is left" 'echo "$F" | grep -qE "^scheduled-[0-9]{8}T[0-9]{6}Z\.dump$" && echo "$F" | grep -qE "^scheduled-[0-9]{8}T[0-9]{6}Z\.dump\.sha256$" && ! echo "$F" | grep -q "\.partial"'
 tb "/ops/backup-run.sh nightly" > /tmp/ops-t1b.out 2>&1; RC=$?
 check "an unknown prefix is refused (exit 2)" '[ $RC -eq 2 ] && grep -q "unknown backup prefix" /tmp/ops-t1b.out'
+# backup file names have one-second resolution and backup-run.sh REFUSES a second backup in the same second (exit 4). A fast runner can reach this run inside the
+# second of the first one and get 4 instead of the 3 asserted below, so wait out that second (the assertions are unchanged; this only removes the race)
+sleep 1
 BACKUP_MIN_BYTES=999999999 tb "/ops/backup-run.sh scheduled" > /tmp/ops-t1c.out 2>&1; RC=$?
 F2="$(files)"
 check "a dump below the size floor is refused (exit 3), leaves no partial and no new final file" '[ $RC -eq 3 ] && ! echo "$F2" | grep -q "\.partial" && [ "$(echo "$F2" | grep -c "\.dump$")" = "$(echo "$F" | grep -c "\.dump$")" ]'
@@ -137,7 +140,7 @@ check "success cycle pruned back to the newest 3 VERIFIED dumps (the new one + 2
 tb "cd /backups; for t in 20250101T000000Z 20250102T000000Z; do echo old-\$t > scheduled-\$t.dump; sha256sum scheduled-\$t.dump > scheduled-\$t.dump.sha256; done" > /dev/null 2>&1
 check "setup: more than KEEP (3) verified scheduled dumps exist before the failing cycle" '[ "$(files | grep -cE "^scheduled-[0-9]{8}T[0-9]{6}Z\.dump$")" -gt 3 ]'
 BEFORE="$(files | grep -v '^\.last-backup' )"
-PGPASSWORD_OVERRIDE=wrong-password BACKUP_RUN_ONCE=1 BACKUP_KEEP=3 tb "/ops/backup-loop.sh" > /tmp/ops-t3b.out 2>&1; RC=$?
+PGPASSWORD_OVERRIDE=wrong-password BACKUP_RUN_ONCE=1 BACKUP_KEEP=3 tb "sleep 1; /ops/backup-loop.sh" > /tmp/ops-t3b.out 2>&1; RC=$? # sleep 1: a same-second collision with the cycle above would also fail, for the wrong reason (exit 4, not the password)
 AFTER="$(files | grep -v '^\.last-backup')"
 check "FAILURE cycle: exit 1, .last-backup-failed written, and NOTHING was deleted (the history is intact)" '[ $RC -eq 1 ] && files | grep -qx ".last-backup-failed" && [ "$BEFORE" = "$AFTER" ] && grep -q "BACKUP FAILED" /tmp/ops-t3b.out'
 BACKUP_RUN_ONCE=1 BACKUP_KEEP=3 tb "sleep 1; /ops/backup-loop.sh" > /tmp/ops-t3c.out 2>&1
