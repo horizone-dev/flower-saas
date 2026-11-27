@@ -1,7 +1,12 @@
 import { Module } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../../config/env.js';
 import { AuditModule } from '../../common/audit/audit.module.js';
-import { CRYPTO_PROVIDER, CryptoProvider, DevCryptoProvider } from './crypto-provider.js';
+import {
+  CRYPTO_PROVIDER,
+  CryptoProvider,
+  DevCryptoProvider,
+  DisabledCryptoProvider,
+} from './crypto-provider.js';
 import { SecretsRepository } from './secrets.repository.js';
 import { SecretsService } from './secrets.service.js';
 import { SecretsController } from './secrets.controller.js';
@@ -24,6 +29,7 @@ import { SecretsController } from './secrets.controller.js';
       inject: [APP_CONFIG, DevCryptoProvider],
       useFactory: (config: AppConfig, dev: DevCryptoProvider): CryptoProvider => {
         if (config.SECRETS_PROVIDER === 'dev') return dev;
+        if (config.SECRETS_PROVIDER === 'disabled') return new DisabledCryptoProvider();
         throw new Error(
           'SECRETS_PROVIDER=kms: no managed KMS crypto provider is wired yet (production is gated — G16)',
         );

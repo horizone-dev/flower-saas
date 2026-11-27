@@ -135,6 +135,28 @@ describe('loadConfig', () => {
     ).toThrow(/SECRETS_MASTER_KEY/);
   });
 
+  it('R-1: the fail-closed "disabled" provider boots in production (a pilot that stores no provider secrets); dev is still refused; the unused master key is not demanded', () => {
+    const prodBase = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://x',
+      AUTH_JWT_SECRET: 'a-real-production-jwt-secret-value-32+',
+      CORS_ORIGINS: 'https://pos.acme.com',
+    };
+    expect(() => loadConfig({ ...prodBase, SECRETS_PROVIDER: 'disabled' })).not.toThrow();
+    expect(() => loadConfig({ ...prodBase, SECRETS_PROVIDER: 'dev' })).toThrow(/SECRETS_PROVIDER/);
+    // the other production guards still apply with the vault disabled
+    expect(() =>
+      loadConfig({ ...prodBase, SECRETS_PROVIDER: 'disabled', CORS_ORIGINS: '*' }),
+    ).toThrow(/CORS_ORIGINS/);
+    expect(() =>
+      loadConfig({
+        ...prodBase,
+        SECRETS_PROVIDER: 'disabled',
+        AUTH_JWT_SECRET: 'dev-only-insecure-jwt-secret-change-me-000',
+      }),
+    ).toThrow(/AUTH_JWT_SECRET/);
+  });
+
   it('the dev secrets provider is the default outside production', () => {
     const cfg = loadConfig({});
     expect(cfg.SECRETS_PROVIDER).toBe('dev');

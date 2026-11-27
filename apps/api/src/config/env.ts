@@ -74,7 +74,9 @@ const envSchema = backendEnvSchema.extend({
   // onboarding is gated on a managed provider (`kms`) — the `dev` provider is
   // refused when NODE_ENV=production (G16). `SECRETS_MASTER_KEY` is any passphrase
   // ≥ 32 chars; the 32-byte key is derived from it.
-  SECRETS_PROVIDER: z.enum(['dev', 'kms']).default('dev'),
+  // `disabled` (R-1, PROPOSED): a FAIL-CLOSED vault for a deployment that stores NO provider secrets (the controlled pilot: card is a recorded
+  // terminal tender, no provider integration). It is allowed in production because it can never hold or reveal a secret.
+  SECRETS_PROVIDER: z.enum(['dev', 'kms', 'disabled']).default('dev'),
   SECRETS_MASTER_KEY: z
     .string()
     .min(32)
@@ -150,7 +152,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
         '  - SECRETS_PROVIDER: the "dev" secrets provider must not be used in production (set SECRETS_PROVIDER=kms)',
       );
     }
-    if (cfg.SECRETS_MASTER_KEY === DEV_SECRETS_MASTER_KEY) {
+    // (the master key is never used by the `disabled` provider, so it is not demanded there)
+    if (cfg.SECRETS_PROVIDER !== 'disabled' && cfg.SECRETS_MASTER_KEY === DEV_SECRETS_MASTER_KEY) {
       throw new EnvValidationError(
         '  - SECRETS_MASTER_KEY: the dev default must not be used in production',
       );
