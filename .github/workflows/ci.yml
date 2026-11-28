@@ -177,6 +177,86 @@ jobs:
       - name: Worker realtime-relay + Stream-retention suites (apps/worker)
         run: pnpm --filter @flower/worker exec vitest run src/realtime-relay src/stream-retention
 
+  # ── Gate 1d: tenant / branch isolation on PostgreSQL 17.12 (build-blocking) ─
+  # The startTestStack() suites (incl. the probes in `verify`) run on the
+  # TEMPORARY digest-pinned PostgreSQL 17.11 CI test image (ADR-0013 amendment
+  # of 2026-11-28, review by 2026-12-15). 17.11 lacks CVE fixes shipped in
+  # 17.12, four of them about RLS / row visibility, and 17.11 is NOT authorised
+  # for staging or production. This job re-runs ONLY the isolation probe suites
+  # (cross-tenant + branch, incl. their RLS-level FORCE / no-GUC / NOBYPASSRLS
+  # assertions) on digest-pinned 17.12. It deliberately excludes the frozen
+  # report performance / query-plan tests (Finding A/B) — they stay in `verify`
+  # on 17.11, with no threshold or SQL change. @flower/db RLS schema tests and
+  # tooling/spikes/rls already start `postgres:17` (17.12 today) in `verify`
+  # and are not repeated here. No continue-on-error: any leak fails the build.
+  isolation-pg17-12:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # Docker Hub multi-arch index digest of postgres:17.12, verified 2026-11-28.
+      FLOWER_TEST_POSTGRES_IMAGE: postgres:17.12@sha256:97fb53376be3e4fb1a8a61421daa69dcc3bf2fa39bda3259f5245f9a455af1a9
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable corepack (pins pnpm from package.json)
+        run: corepack enable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (api workspace deps)
+        run: pnpm turbo run build --filter=@flower/api^...
+
+      - name: Guard — PostgreSQL 17.12 by server version and image digest, with negative controls
+        env:
+          NEGATIVE_CONTROL_IMAGE: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+        run: |
+          GUARD=$(cat <<'EOF'
+          import { execFileSync } from 'node:child_process';
+          import { startTestStack, resolvePostgresImage } from '@flower/testing';
+          const image = resolvePostgresImage();
+          const wantDigest = image.slice(image.indexOf('@') + 1);
+          const stack = await startTestStack({ services: ['postgres'] });
+          try {
+            const r = await stack.postgres.container.exec(['psql', '-U', 'flower', '-d', 'flower_test', '-tAc', 'SHOW server_version_num']);
+            const num = r.stdout.trim();
+            const imageId = execFileSync('docker', ['inspect', '-f', '{{.Image}}', stack.postgres.container.getId()], { encoding: 'utf8' }).trim();
+            const digests = execFileSync('docker', ['image', 'inspect', '-f', '{{join .RepoDigests ","}}', imageId], { encoding: 'utf8' }).trim();
+            const digestOk = digests.split(',').some((d) => d.endsWith('@' + wantDigest));
+            console.log(`::notice title=${process.env.GUARD_LABEL}::requested=${image} server_version_num=${num} repo_digests=${digests} digest_match=${digestOk}`);
+            if (r.exitCode !== 0 || num !== '170012' || !digestOk) { console.log('guard: expected PostgreSQL 17.12 (170012) from ' + wantDigest); process.exitCode = 1; }
+          } finally { await stack.stop(); }
+          EOF
+          )
+          guard() { pnpm --filter @flower/api exec node --input-type=module -e "$GUARD"; }
+          # 1. the job's image must be PostgreSQL 17.12 with the pinned digest
+          GUARD_LABEL='PostgreSQL test image' guard
+          # 2. negative control: the same guard must REJECT the 17.11 default image
+          if FLOWER_TEST_POSTGRES_IMAGE="$NEGATIVE_CONTROL_IMAGE" GUARD_LABEL='Negative control 17.11 (must be rejected)' guard; then
+            echo '::error::negative control failed: the guard accepted PostgreSQL 17.11'; exit 1
+          fi
+          # 3. negative control: a floating tag must be refused before any container starts
+          if FLOWER_TEST_POSTGRES_IMAGE=postgres:17 GUARD_LABEL='Negative control floating tag' guard; then
+            echo '::error::negative control failed: a floating postgres:17 override was accepted'; exit 1
+          fi
+          echo '::notice title=Negative controls::17.11 digest rejected; floating postgres:17 override refused'
+
+      - name: Cross-tenant + branch isolation probes (PostgreSQL 17.12)
+        run: pnpm --filter @flower/api exec vitest run src/probes/cross-tenant.probe.test.ts src/probes/branch-isolation.probe.test.ts
+
   # ── Gate 2: supply-chain & secret scanning ─────────────────────────────────
   security:
     runs-on: ubuntu-latest
