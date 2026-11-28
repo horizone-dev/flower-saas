@@ -1,4 +1,9 @@
-export { startTestStack, type TestStack, type StartTestStackOptions } from './containers.js';
+export {
+  startTestStack,
+  resolvePostgresImage,
+  type TestStack,
+  type StartTestStackOptions,
+} from './containers.js';
 export {
   withTenantContext,
   currentTenantGuc,
