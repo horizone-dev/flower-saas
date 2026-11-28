@@ -38,6 +38,11 @@ export interface StartTestStackOptions {
 }
 
 const IMAGES = {
+  // TEMPORARY CI TEST PIN. Review by 2026-12-15 (owner decision, 2026-11-28): re-decide it
+  // then; it is not extended by default. PostgreSQL 17.12 changes two frozen report query
+  // plans (Finding A/B). That regression is still OPEN and this pin only keeps CI from
+  // seeing it. The pin covers this API test stack only. It does NOT authorise PostgreSQL
+  // 17.11 in staging or production.
   postgres: 'postgres:17.11',
   redis: 'redis:7',
 } as const;
