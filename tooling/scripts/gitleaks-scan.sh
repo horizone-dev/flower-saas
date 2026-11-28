@@ -14,8 +14,17 @@
 #   EVENT_NAME      pull_request | push
 #   PR_BASE_SHA, PR_HEAD_SHA, PR_COMMITS    pull_request: payload base.sha, head.sha and the payload's own commit count
 #   PUSH_BEFORE, PUSH_AFTER                 push: payload before and after
-#   GITLEAKS_CONFIG optional, default <repo>/.gitleaks.toml; must exist, the default rule set is never used silently
+#   GITLEAKS_CONFIG optional, default <repo>/.gitleaks.toml; must exist, must not be empty, and must be PROVEN to detect (see below); the default
+#                   rule set is never used silently
 #   GITLEAKS_BIN    optional scanner executable (tests only); default is the digest-pinned image below
+#
+# A scan with no effective rules is not a scan. gitleaks v8.24.3 accepts a config that defines no rules (empty, comments only, title only,
+# allowlist without `[extend] useDefault = true`) and a config whose allowlist covers everything or whose `disabledRules` removes the rules, scans the
+# whole range and prints "no leaks found" with exit 0. So before the range is scanned, the SAME scanner with the SAME config must detect a canary: a
+# disposable file holding a fake GitHub token and a fake private key, assembled at run time from fragments (no secret-shaped literal lives here, and
+# no config can be tuned to a fixed string). Exit code 2 and both rule ids (github-pat, private-key) are required; anything else fails the job.
+# This proves the config is not blind. It does not judge a config that detects the canary but exempts something else on purpose: allowlist entries
+# stay a matter for the security review of any change to .gitleaks.toml.
 # Exit codes: 0 whole range scanned and clean, 1 anything that stops us proving that, 2 leaks found.
 # Needs: bash, git, and docker (unless GITLEAKS_BIN is set). Run from inside the clone being scanned (CI: fetch-depth 0).
 
@@ -80,16 +89,75 @@ CONFIG="${GITLEAKS_CONFIG:-$TOP/.gitleaks.toml}"
 [ -f "$CONFIG" ] || fail "gitleaks config not found: '${CONFIG}' (refusing to fall back to the default rules)"
 CONFIG="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
 hostpath() { if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+[ -s "$CONFIG" ] || fail "gitleaks config is empty: '${CONFIG}' (a scan with no rules reports a clean result and exits 0, so an empty config is refused)"
+grep -Eq '^[[:space:]]*[^[:space:]#]' "$CONFIG" || fail "gitleaks config holds only blank lines and comments: '${CONFIG}' (it defines no rules, so it is refused)"
+if [ -n "${GITLEAKS_BIN:-}" ]; then [ -x "$GITLEAKS_BIN" ] || fail "GITLEAKS_BIN is not an executable file: '${GITLEAKS_BIN}'"; fi
+if [ -z "${GITLEAKS_BIN:-}" ]; then command -v docker > /dev/null 2>&1 || fail "docker is required to run the pinned gitleaks image"; fi
 
+OUTFILE=''
+CANARY_DIR=''
+CANARY_OUT=''
+cleanup() {
+  [ -n "$OUTFILE" ] && rm -f -- "$OUTFILE"
+  [ -n "$CANARY_OUT" ] && rm -f -- "$CANARY_OUT"
+  [ -n "$CANARY_DIR" ] && [ -d "$CANARY_DIR" ] && rm -rf -- "$CANARY_DIR"
+  return 0
+}
+trap cleanup EXIT
 OUTFILE="$(mktemp)" || fail "cannot create a temporary file"
-trap 'rm -f -- "$OUTFILE"' EXIT
+CANARY_OUT="$(mktemp)" || fail "cannot create a temporary file"
+CANARY_DIR="$(mktemp -d)" || fail "cannot create a temporary directory"
+
+# ---- 4a. prove that this config has effective detection rules, with the scanner and config used for the real scan -----------------------------
+rand_alnum() { # rand_alnum N: N random [A-Za-z0-9] characters, at least 12 distinct so the entropy gate of a rule cannot make the check flaky
+  local s tries=0
+  while [ "$tries" -lt 20 ]; do
+    s="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1")" # head closes the pipe and ends tr with SIGPIPE; only the captured length is judged
+    if [ "${#s}" -eq "$1" ] && [ "$(printf '%s' "$s" | fold -w1 | sort -u | wc -l)" -ge 12 ]; then
+      printf '%s' "$s"
+      return 0
+    fi
+    tries=$((tries + 1))
+  done
+  return 1
+}
+PAT_TAIL="$(rand_alnum 36)" || fail "cannot generate the canary (no usable random source)"
+KEY_ROW1="$(rand_alnum 64)" || fail "cannot generate the canary (no usable random source)"
+KEY_ROW2="$(rand_alnum 64)" || fail "cannot generate the canary (no usable random source)"
+{
+  printf '%s%s%s\n' 'gh' 'p_' "$PAT_TAIL"
+  printf '%s%s\n' '-----BEGIN RSA PRIV' 'ATE KEY-----'
+  printf '%s\n%s\n' "$KEY_ROW1" "$KEY_ROW2"
+  printf '%s%s\n' '-----END RSA PRIV' 'ATE KEY-----'
+} > "$CANARY_DIR/canary.txt" || fail "cannot write the canary file"
 
 if [ -n "${GITLEAKS_BIN:-}" ]; then
-  [ -x "$GITLEAKS_BIN" ] || fail "GITLEAKS_BIN is not an executable file: '${GITLEAKS_BIN}'"
+  "$GITLEAKS_BIN" dir "$(hostpath "$CANARY_DIR")" --config "$CONFIG" --no-banner --redact -v --exit-code 2 > "$CANARY_OUT" 2>&1
+  CRC=$?
+else
+  docker run --rm \
+    -v "$(hostpath "$CANARY_DIR"):/canary:ro" \
+    -v "$(hostpath "$CONFIG"):/cfg/gitleaks.toml:ro" \
+    "$IMAGE" dir /canary --config /cfg/gitleaks.toml --no-banner --redact -v --exit-code 2 > "$CANARY_OUT" 2>&1
+  CRC=$?
+fi
+sed -i 's/\x1b\[[0-9;]*[A-Za-z]//g' "$CANARY_OUT"
+case "$CRC" in
+  2) ;;
+  0) fail "this config detects nothing in a file that holds a fake GitHub token and a fake private key: it defines no effective detection rules (rule-less, allowlisting everything, or its rules disabled). An empty scan is not a pass, so the range was not scanned" ;;
+  *) fail "the scanner could not use this config (exit code ${CRC}): $(grep -E 'FTL|ERR' "$CANARY_OUT" | tail -2 | tr '\n' ' ')" ;;
+esac
+for CANARY_RULE in github-pat private-key; do
+  grep -Eq "^RuleID:[[:space:]]+${CANARY_RULE}[[:space:]]*\$" "$CANARY_OUT" ||
+    fail "this config does not detect the canary for rule '${CANARY_RULE}' (rules that fired: $(grep -E '^RuleID:' "$CANARY_OUT" | awk '{print $2}' | sort -u | tr '\n' ' ')): a default rule is disabled or neutralised, so the range was not scanned"
+done
+CANARY_PROVED=1
+say "config check: '${CONFIG##*/}' detects the canary secrets (github-pat, private-key): the rule set is effective"
+
+if [ -n "${GITLEAKS_BIN:-}" ]; then
   "$GITLEAKS_BIN" git "$TOP" --config "$CONFIG" --log-opts="$RANGE" --no-banner --redact -v --exit-code 2 2>&1 | tee "$OUTFILE"
   RC="${PIPESTATUS[0]}"
 else
-  command -v docker > /dev/null 2>&1 || fail "docker is required to run the pinned gitleaks image"
   docker run --rm \
     -v "$(hostpath "$COMMON_GIT"):/g:ro" \
     -v "$(hostpath "$CONFIG"):/cfg/gitleaks.toml:ro" \
@@ -110,5 +178,7 @@ fi
 [ -n "$REPORTED" ] || fail "the scanner exited 0 but printed no commit count, so the scanned range cannot be verified"
 [ "$REPORTED" -ge 1 ] || fail "the scanner exited 0 but scanned 0 commits: an empty scan is not a pass"
 [ "$REPORTED" = "$SCANNABLE" ] || fail "the scanner covered ${REPORTED} commits but ${SCANNABLE} are in ${RANGE}: a partial scan is not a pass"
+# defence in depth: a later edit that moves or drops the config proof must not be able to turn a rule-less scan into a pass
+[ "${CANARY_PROVED:-0}" = 1 ] || fail "internal error: reached the success path without proving that the config has effective detection rules"
 say "OK: scanned ${REPORTED} of ${SCANNABLE} scannable commits in ${RANGE} (${TOTAL} total, ${NONMERGE} non-merge); no leaks found"
 exit 0

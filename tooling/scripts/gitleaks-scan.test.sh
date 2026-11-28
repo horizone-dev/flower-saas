@@ -138,6 +138,193 @@ build_heavy() {
   HEAD="$(head_of "$r")"
 }
 
+# ---- the config guard (section 10): a scan with no effective detection rules must never be a pass ----------------------------------------------
+# What a stub scanner prints when the gate asks it to scan the canary (`dir ...`): what the real v8.24.3 prints for a config that works.
+CANARY_STUB_PRELUDE='[ "$1" = dir ] && { echo "RuleID:      github-pat"; echo "RuleID:      private-key"; echo "WRN leaks found: 2"; exit 2; }'
+
+cfgfile() { # cfgfile NAME < config text  -> prints the path of the config file it wrote (never inside the repository under test)
+  mkdir -p "$WORK/cfg"
+  cat > "$WORK/cfg/$1.toml"
+  printf '%s' "$WORK/cfg/$1.toml"
+}
+raw_with_cfg() { # raw_with_cfg REPO LOG-OPTS CONFIG -> RAW_RC, RAW_COUNT (the raw scanner with an explicit config: a witness of what the scanner alone does)
+  local save="$CONFIG"
+  CONFIG="$3"
+  raw_gitleaks "$1" "$2"
+  CONFIG="$save"
+}
+sut_cfg() { # sut_cfg REPO CONFIG BASE HEAD COMMITS
+  sut "$1" EVENT_NAME=pull_request PR_BASE_SHA="$3" PR_HEAD_SHA="$4" PR_COMMITS="$5" GITLEAKS_CONFIG="$2"
+}
+
+section_config_guard() {
+  local R CL PB PH CB CH F WHY S
+  echo "== 10. config guard: a scan with no effective detection rules is never a pass (pinned scanner, disposable repos, planted fake secret)"
+  R="$(mk cfg-planted)"
+  cm "$R" README.md "base" "chore: base"
+  PB="$(head_of "$R")"
+  cm "$R" src/aws.conf "aws_access_key_id = $(fake_secret)" "feat: add aws config"
+  PH="$(head_of "$R")"
+  CL="$(mk cfg-clean)"
+  cm "$CL" README.md "base" "chore: base"
+  CB="$(head_of "$CL")"
+  cm "$CL" src/a.md "one" "docs: one"
+  CH="$(head_of "$CL")"
+
+  sut_cfg "$R" "$CONFIG" "$PB" "$PH" 1
+  chk "control: the repository's own config + a planted fake secret: exit 2, the config check ran first, 1 leak, 1 commit scanned" '[ $RC -eq 2 ] && [ "$SCANNED" = 1 ] && has "config check:" && has "leaks found: 1"'
+  sut_cfg "$CL" "$CONFIG" "$CB" "$CH" 1
+  chk "control: the repository's own config on a clean range: exit 0, and the canary secrets are never printed to the log" '[ $RC -eq 0 ] && has "config check:" && has "gitleaks-scan: OK" && ! has "ghp_" && ! has "PRIVATE KEY"'
+
+  # witnesses: the scanner ALONE, given a config with no effective rules, scans the planted secret and says clean. This is the defect.
+  F="$(cfgfile w-empty < /dev/null)"
+  raw_with_cfg "$R" "$PB..$PH" "$F"
+  chk "defect witness 1: the pinned scanner with an EMPTY config scans the planted-secret commit and exits 0 (so it would have passed)" '[ "$RAW_RC" -eq 0 ] && [ "$RAW_COUNT" = 1 ]'
+  F="$(
+    cfgfile w-allowlist-only << 'EOF'
+[allowlist]
+description = "fixtures"
+paths = ['''.*\.test\.ts$''']
+EOF
+  )"
+  raw_with_cfg "$R" "$PB..$PH" "$F"
+  chk "defect witness 2: an allowlist WITHOUT [extend] useDefault = true (no rules at all): exit 0 on the planted secret" '[ "$RAW_RC" -eq 0 ] && [ "$RAW_COUNT" = 1 ]'
+  F="$(
+    cfgfile w-allow-all << 'EOF'
+[extend]
+useDefault = true
+[allowlist]
+paths = ['''.*''']
+EOF
+  )"
+  raw_with_cfg "$R" "$PB..$PH" "$F"
+  chk "defect witness 3: the default rules plus an allowlist that covers every path: exit 0 on the planted secret" '[ "$RAW_RC" -eq 0 ] && [ "$RAW_COUNT" = 1 ]'
+
+  # the gate: every config that leaves the scanner blind is refused BEFORE the range is scanned, with the right reason, even with a planted secret
+  bad_cfg() { # bad_cfg DESCRIPTION CONFIG-FILE REASON
+    WHY="$3"
+    sut_cfg "$R" "$2" "$PB" "$PH" 1
+    chk "$1: exit 1, reason '$3', no success verdict, the range was never scanned" '[ $RC -eq 1 ] && has "FAIL:" && has "$WHY" && ! has "gitleaks-scan: OK" && ! has "no leaks found" && [ "$SCANNED" = none ]'
+  }
+  F="$(cfgfile empty < /dev/null)"
+  bad_cfg "an EMPTY config (0 bytes), planted secret in range" "$F" "gitleaks config is empty"
+  F="$(printf '  \n\t\n\n' | cfgfile blank)"
+  bad_cfg "a config of blank lines only" "$F" "only blank lines and comments"
+  F="$(printf '# nothing but comments\n# a second comment\n' | cfgfile comments)"
+  bad_cfg "a COMMENTS-ONLY config" "$F" "only blank lines and comments"
+  F="$(printf 'title = "x"\n' | cfgfile title)"
+  bad_cfg "a config that sets only a title (valid TOML, no rules)" "$F" "detects nothing"
+  F="$(
+    cfgfile allowlist-only << 'EOF'
+title = "fixtures only"
+[allowlist]
+description = "fixtures"
+paths = ['''.*\.test\.ts$''']
+EOF
+  )"
+  bad_cfg "an ALLOWLIST-ONLY config (the documented fixture allowlist without the rules it belongs to)" "$F" "detects nothing"
+  F="$(
+    cfgfile allow-all-paths << 'EOF'
+[extend]
+useDefault = true
+[allowlist]
+paths = ['''.*''']
+EOF
+  )"
+  bad_cfg "default rules, but an allowlist covering every path" "$F" "detects nothing"
+  F="$(
+    cfgfile allow-all-regex << 'EOF'
+[extend]
+useDefault = true
+[allowlist]
+regexes = ['''.*''']
+EOF
+  )"
+  bad_cfg "default rules, but an allowlist regex matching every secret" "$F" "detects nothing"
+  F="$(
+    cfgfile disabled-both << 'EOF'
+[extend]
+useDefault = true
+disabledRules = ["github-pat", "private-key"]
+EOF
+  )"
+  bad_cfg "default rules with the canary rules disabled" "$F" "detects nothing"
+  F="$(
+    cfgfile disabled-one << 'EOF'
+[extend]
+useDefault = true
+disabledRules = ["private-key"]
+EOF
+  )"
+  bad_cfg "default rules with ONE canary rule (private-key) disabled" "$F" "does not detect the canary for rule 'private-key'"
+  F="$(
+    cfgfile custom-only << 'EOF'
+[[rules]]
+id = "only-custom"
+regex = '''NEVERMATCHES[0-9]{30}'''
+EOF
+  )"
+  bad_cfg "a single custom rule that never fires and no default rules" "$F" "detects nothing"
+  F="$(printf '[extend\nuseDefault = true\n' | cfgfile invalid)"
+  bad_cfg "an INVALID config (broken TOML)" "$F" "could not use this config"
+
+  # configs that work are still accepted, and a documented fixture allowlist still works beside the default rules
+  F="$(printf '[extend]\nuseDefault = true\n' | cfgfile extend-only)"
+  sut_cfg "$CL" "$F" "$CB" "$CH" 1
+  chk "valid: [extend] useDefault = true alone, clean range: exit 0 and 1 commit scanned" '[ $RC -eq 0 ] && [ "$SCANNED" = 1 ] && has "config check:"'
+  sut_cfg "$R" "$F" "$PB" "$PH" 1
+  chk "valid: the same config on the planted-secret range: exit 2, 1 leak (a working config reports it)" '[ $RC -eq 2 ] && has "leaks found: 1"'
+  F="$(
+    cfgfile narrow-allowlist << 'EOF'
+[extend]
+useDefault = true
+[allowlist]
+paths = ['''.*\.test\.ts$''']
+EOF
+  )"
+  S="$(mk cfg-allow-test)"
+  cm "$S" README.md "base" "chore: base"
+  CB="$(head_of "$S")"
+  cm "$S" src/pay.test.ts "const k = '$(fake_secret)'" "test: fake key in a test file"
+  CH="$(head_of "$S")"
+  sut_cfg "$S" "$F" "$CB" "$CH" 1
+  chk "valid: a documented fixture allowlist next to the default rules still exempts a *.test.ts file: exit 0, 1 commit scanned" '[ $RC -eq 0 ] && [ "$SCANNED" = 1 ]'
+  S="$(mk cfg-allow-src)"
+  cm "$S" README.md "base" "chore: base"
+  CB="$(head_of "$S")"
+  cm "$S" src/pay.ts "const k = '$(fake_secret)'" "feat: the same value in a source file"
+  CH="$(head_of "$S")"
+  sut_cfg "$S" "$F" "$CB" "$CH" 1
+  chk "valid: ... and the same value in a normal source file is still reported: exit 2 (the allowlist was not widened)" '[ $RC -eq 2 ] && has "leaks found: 1"'
+
+  # stub scanners that lie about the config: the gate must not trust a scanner that cannot prove it detects
+  S="$(mk cfg-stub)"
+  cm "$S" README.md "base" "chore: base"
+  CB="$(head_of "$S")"
+  cm "$S" src/a.md "one" "docs: one"
+  cm "$S" src/b.md "two" "docs: two"
+  CH="$(head_of "$S")"
+  gstub() { # gstub NAME BODY (written exactly as given: no canary prelude)
+    printf '#!/bin/sh\n%s\n' "$2" > "$WORK/$1.sh"
+    chmod +x "$WORK/$1.sh"
+  }
+  gstub g-blind '[ "$1" = dir ] && { echo "INF no leaks found"; exit 0; }; echo "INF 2 commits scanned."; echo "INF no leaks found"; exit 0'
+  sut "$S" EVENT_NAME=pull_request PR_BASE_SHA="$CB" PR_HEAD_SHA="$CH" PR_COMMITS=2 GITLEAKS_BIN="$WORK/g-blind.sh"
+  chk "a scanner that finds nothing in the canary but then reports the FULL range scanned and clean: exit 1, never OK (a rule-less scan cannot pass)" '[ $RC -eq 1 ] && has "detects nothing" && ! has "gitleaks-scan: OK" && [ "$SCANNED" = none ]'
+  gstub g-one-rule '[ "$1" = dir ] && { echo "RuleID:      github-pat"; echo "WRN leaks found: 1"; exit 2; }; echo "INF 2 commits scanned."; exit 0'
+  sut "$S" EVENT_NAME=pull_request PR_BASE_SHA="$CB" PR_HEAD_SHA="$CH" PR_COMMITS=2 GITLEAKS_BIN="$WORK/g-one-rule.sh"
+  chk "a scanner whose canary run fires only github-pat: exit 1, reason names the missing rule 'private-key'" '[ $RC -eq 1 ] && has "rule '"'"'private-key'"'"'" && ! has "gitleaks-scan: OK"'
+  gstub g-exit2-no-rules '[ "$1" = dir ] && { echo "WRN leaks found: 1"; exit 2; }; echo "INF 2 commits scanned."; exit 0'
+  sut "$S" EVENT_NAME=pull_request PR_BASE_SHA="$CB" PR_HEAD_SHA="$CH" PR_COMMITS=2 GITLEAKS_BIN="$WORK/g-exit2-no-rules.sh"
+  chk "a scanner that exits 2 on the canary but names no rule (a crash, not a detection): exit 1, not accepted" '[ $RC -eq 1 ] && has "does not detect the canary for rule" && ! has "gitleaks-scan: OK"'
+  gstub g-canary-error '[ "$1" = dir ] && { echo "FTL unable to load gitleaks config"; exit 1; }; echo "INF 2 commits scanned."; exit 0'
+  sut "$S" EVENT_NAME=pull_request PR_BASE_SHA="$CB" PR_HEAD_SHA="$CH" PR_COMMITS=2 GITLEAKS_BIN="$WORK/g-canary-error.sh"
+  chk "a scanner that errors on the canary (exit 1): exit 1, reason 'could not use this config'" '[ $RC -eq 1 ] && has "could not use this config" && ! has "gitleaks-scan: OK"'
+  gstub g-works "$CANARY_STUB_PRELUDE"'; echo "INF 2 commits scanned."; echo "INF no leaks found"; exit 0'
+  sut "$S" EVENT_NAME=pull_request PR_BASE_SHA="$CB" PR_HEAD_SHA="$CH" PR_COMMITS=2 GITLEAKS_BIN="$WORK/g-works.sh"
+  chk "control: a scanner that detects both canary rules and then scans the full range clean: exit 0" '[ $RC -eq 0 ] && [ "$SCANNED" = 2 ] && has "config check:"'
+}
+
 echo "### gitleaks-scan.sh tests: image=${IMG:-<none found in the script>}"
 echo "### config under test: $CONFIG"
 if [ ! -f "$SUT" ]; then
@@ -149,6 +336,12 @@ fi
   echo "  FAIL  the script pins gitleaks by digest"
   exit 1
 }
+if [ "${GATE_TEST_ONLY:-}" = config ]; then # a fast run of section 10 alone (used by the mutation sweep); CI runs everything
+  section_config_guard
+  echo "### gitleaks-scan tests (section 10 only): PASS=$PASS FAIL=$FAIL"
+  [ "$FAIL" -eq 0 ]
+  exit
+fi
 
 echo "== 0. the planted fake secret is detectable by raw gitleaks (a control for every detection test below)"
 R="$(mk ctl)"
@@ -402,8 +595,8 @@ B="$(head_of "$R")"
 cm "$R" src/a.md "one" "docs: one"
 cm "$R" src/b.md "two" "docs: two"
 H="$(head_of "$R")"
-stub() { # stub NAME BODY
-  printf '#!/bin/sh\n%s\n' "$2" > "$WORK/$1.sh"
+stub() { # stub NAME BODY (the gate first asks the scanner to scan its canary: every stub answers that like a scanner whose config works)
+  printf '#!/bin/sh\n%s\n%s\n' "$CANARY_STUB_PRELUDE" "$2" > "$WORK/$1.sh"
   chmod +x "$WORK/$1.sh"
 }
 stub gl-zero 'echo "INF 0 commits scanned."; echo "INF no leaks found"; exit 0'
@@ -431,6 +624,8 @@ sut "$R" EVENT_NAME=pull_request PR_BASE_SHA="$B" PR_HEAD_SHA="$H" PR_COMMITS=2 
 chk "a scanner binary that does not exist: exit 1, reason 'GITLEAKS_BIN is not an executable file'" '[ $RC -eq 1 ] && has "GITLEAKS_BIN is not an executable file"'
 sut "$R" EVENT_NAME=pull_request PR_BASE_SHA="$B" PR_HEAD_SHA="$H" PR_COMMITS=2 GITLEAKS_CONFIG="$WORK/no-such-config.toml"
 chk "a missing config file: exit 1, reason 'gitleaks config not found' (never fall back to the default rules silently)" '[ $RC -eq 1 ] && has "gitleaks config not found" && ! has "gitleaks-scan: OK"'
+
+section_config_guard
 
 echo "### gitleaks-scan tests: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
