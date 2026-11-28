@@ -212,7 +212,12 @@ jobs:
           output-file: sbom.cdx.json
           artifact-name: sbom.cdx.json
 
+      # Every scanner step below (OSV, both Gitleaks steps, both Trivy scans) has an id and `if: !cancelled()`, so one scanner failing
+      # (e.g. osv-scanner) never leaves another skipped, and the final gate step reads every result. A failed step still makes the job red.
+      # Versions, arguments and thresholds are unchanged; Trivy's filesystem scan stays REPORT-ONLY (exit-code '0'). See docs/security/CI-SCANNER-INDEPENDENCE.md.
       - name: Dependency vulnerability scan (osv-scanner)
+        id: osv
+        if: ${{ !cancelled() }}
         uses: google/osv-scanner-action/osv-scanner-action@v2.5.1
         with:
           scan-args: |-
@@ -223,10 +228,12 @@ jobs:
       # They replace gitleaks/gitleaks-action 2.3.9, which scanned 0 commits on merge-heavy and >30-commit PRs and still exited 0
       # (docs/security/GITLEAKS-CI-COVERAGE.md). The scan is the same pinned gitleaks 8.24.3 with the same .gitleaks.toml.
       - name: Secret scan — self-test of the gate (disposable repos, planted fake secrets, pinned gitleaks)
+        id: gitleaks_selftest
         if: ${{ !cancelled() }}
         run: bash tooling/scripts/gitleaks-scan.test.sh
 
       - name: Secret scan (gitleaks, explicit commit range, fails closed)
+        id: gitleaks_scan
         if: ${{ !cancelled() }}
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -239,6 +246,8 @@ jobs:
         run: bash tooling/scripts/gitleaks-scan.sh
 
       - name: Trivy — Dockerfile misconfiguration
+        id: trivy_config
+        if: ${{ !cancelled() }}
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
@@ -247,6 +256,8 @@ jobs:
           exit-code: '1'
 
       - name: Trivy — filesystem vulnerabilities
+        id: trivy_fs
+        if: ${{ !cancelled() }}
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
@@ -254,3 +265,22 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '0' # report-only for now; tighten during hardening (Phase 10)
+
+      - name: Scanner gate — self-test (a skipped, failed or empty scan must never read as a pass)
+        id: scanner_selftest
+        if: ${{ !cancelled() }}
+        run: node --test tooling/scripts/scanner-gate.test.mjs
+
+      # Last step: every scanner step must have succeeded, exactly, and its input must be real (the pinned OSV action exits 0 on "no package
+      # sources found"; Trivy exits 0 on an empty directory). A skipped, cancelled or missing result fails the job. It does not make Trivy's
+      # filesystem findings blocking.
+      - name: Scanner gate — every scanner ran, succeeded and had something to scan
+        if: ${{ !cancelled() }}
+        env:
+          SCAN_OSV: ${{ steps.osv.outcome }}
+          SCAN_GITLEAKS_SELFTEST: ${{ steps.gitleaks_selftest.outcome }}
+          SCAN_GITLEAKS_SCAN: ${{ steps.gitleaks_scan.outcome }}
+          SCAN_TRIVY_CONFIG: ${{ steps.trivy_config.outcome }}
+          SCAN_TRIVY_FS: ${{ steps.trivy_fs.outcome }}
+          SCAN_SCANNER_SELFTEST: ${{ steps.scanner_selftest.outcome }}
+        run: node tooling/scripts/scanner-gate.mjs
